@@ -243,3 +243,6 @@ bb.out.*
 
 # End of https://www.toptal.com/developers/gitignore/api/c,c++,rust,cmake,clion,visualstudiocode,valgrind
 .vscode/launch.json
+
+.zig-cache
+zig-build

@@ -190,6 +190,10 @@ pub(crate) mod lazy;
 mod location;
 mod write_config;
 
+// C ABI surface used by the Zig port's test harness.
+#[cfg(feature = "zig-ffi")]
+pub mod zig_ffi;
+
 pub use crate::lazy::any_encoding::AnyEncoding;
 pub use crate::lazy::decoder::{HasRange, HasSpan};
 pub use crate::lazy::span::Span;

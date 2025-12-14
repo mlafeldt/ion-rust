@@ -20,6 +20,10 @@ version = "1.0.0-rc.11"
 edition = "2021"
 rust-version = "1.82"
 
+[lib]
+# Emit a static library for the Zig test harness under `zig/`.
+crate-type = ["rlib", "staticlib"]
+
 [features]
 default = []
 experimental-ion-hash = ["digest", "experimental-reader-writer"]
@@ -48,6 +52,7 @@ experimental-tooling-apis = []
 experimental-serde = ["experimental-reader-writer", "dep:serde_with", "dep:serde"]
 
 bigdecimal = ["dep:bigdecimal"]
+zig-ffi = ["experimental-reader-writer"]
 
 [dependencies]
 base64 = "0.12"
