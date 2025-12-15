@@ -36,7 +36,10 @@ Key properties:
 - `zig/src/ion/text.zig`
   - Parses top-level streams and containers: lists, sexps, structs.
   - Literals implemented: nulls, bool, ints, floats (`nan`, `±inf`), decimals, timestamps, strings, symbols, clobs/blobs.
-  - Local symbol tables: minimal `$ion_symbol_table::{symbols:[...]}` support sufficient for ion-tests needs.
+  - Local symbol tables:
+    - Supports `$ion_symbol_table` with `symbols:[...]` and `imports:[...]` (including `max_id:0`).
+    - Supports `$ion_shared_symbol_table` declarations in-stream and uses them as an import catalog.
+    - Supports unknown symbol IDs when the symbol table slot exists but has unknown text (null slot).
   - Whitespace handling includes HT/VT/FF/CR/LF per corpus expectations.
   - Includes a debugging helper `parseTopLevelWithErrorIndex(...)` intended for ad-hoc repro tooling.
 
@@ -49,7 +52,7 @@ Key properties:
     - NOP pads (T0) (and rejects null.nop)
     - Containers: list/sexp/struct (including NOP padding inside)
     - Numerics, decimals, timestamps, strings, clobs, blobs, symbols
-    - Local symbol tables
+    - Local symbol tables (symbols list + null slots; imports currently only accepts empty imports)
     - IVM appearing inside the stream (ignored if it’s `E0 01 00 EA`)
     - “Ordered struct” encoding variant (as used by ion-tests)
 
@@ -114,7 +117,7 @@ Options:
 
 ### 3) Full symbol table/import semantics
 
-Some symbol-table-heavy fixtures are skipped (imports, unknown text behaviors, annotation interactions with symbol tables).
+Some symbol-table-heavy fixtures are still skipped (symbol table state across multiple symbol tables/documents; null-slot equivalence; some import edge cases).
 
 Options:
 
@@ -133,9 +136,9 @@ Options:
 2) canonical re-encoding
 3) preserve exact subfield encoding forms
 
-### 5) `typecodes/T7-large.10n`, `item1.10n`, `testfile35.ion`
+### 5) `item1.10n`
 
-These are currently marked “requires additional features beyond the subset”. The next step is to identify the missing constructs each file uses and implement them.
+This is currently marked “requires additional features beyond the subset”. The next step is to identify the missing constructs it uses and implement them.
 
 ## Gotchas encountered (and fixes)
 
@@ -195,7 +198,7 @@ Fix: text writer alternates short/long string literal styles for adjacent string
 
 ## Fun facts / notable behavior choices
 
-1) `$0` is treated as “unknown symbol”; it’s allowed in annotations and as a struct field name, but unresolved non-zero `$sid` must map to symbol text (else invalid), matching corpus expectations.
+1) `$0` is treated as “unknown symbol”; it’s allowed in annotations and as a struct field name. Non-zero `$sid` is allowed if the SID is defined by the current symbol table (even if its text is unknown via a null slot).
 2) Lists require commas; sexps do not allow commas, matching “bad” fixtures.
 3) Timestamps are validated tightly (ranges, precision rules, explicit offsets for time precision).
 4) Binary streams can contain IVM mid-stream; the parser tolerates Ion 1.0 IVM and ignores it.
@@ -210,4 +213,3 @@ Fix: text writer alternates short/long string literal styles for adjacent string
 - Equality: `zig/src/ion/eq.zig`
 - Test harness & skip reasons: `zig/src/tests.zig`
 - Zig build (Zig-only tests): `zig/build.zig`
-

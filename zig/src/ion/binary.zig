@@ -254,8 +254,9 @@ const Decoder = struct {
 
     fn resolveSidToSymbol(self: *Decoder, sid: u32) IonError!value.Symbol {
         if (sid == 0) return value.unknownSymbol();
-        const text = self.st.textForSid(sid) orelse return IonError.InvalidIon;
-        return value.makeSymbolId(sid, text);
+        const slot = self.st.slotForSid(sid) orelse return IonError.InvalidIon;
+        if (slot) |text| return value.makeSymbolId(sid, text);
+        return value.makeSymbolId(sid, null);
     }
 
     fn decodeTimestamp(_: *Decoder, body: []const u8) IonError!value.Value {

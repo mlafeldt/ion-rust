@@ -64,14 +64,9 @@ const global_skip_list = [_][]const u8{
     "ion-tests/iontestdata/good/subfieldVarUInt15bit.ion", // Subfield encodings are not implemented/preserved.
     "ion-tests/iontestdata/good/subfieldVarUInt16bit.ion", // Subfield encodings are not implemented/preserved.
     "ion-tests/iontestdata/good/subfieldVarUInt32bit.ion", // Subfield encodings are not implemented/preserved.
-    "ion-tests/iontestdata/good/typecodes/T7-large.10n", // Depends on large/edge binary encodings not covered by this port.
     "ion-tests/iontestdata/good/item1.10n", // Requires additional binary features beyond the current subset.
-    "ion-tests/iontestdata/good/localSymbolTableImportZeroMaxId.ion", // Full local symbol table import semantics not implemented.
-    "ion-tests/iontestdata/good/testfile35.ion", // Requires features not implemented yet (kept skipped to avoid misleading failures).
     "ion-tests/iontestdata/good/utf16.ion", // Input is treated as UTF-8 bytes; UTF-16 decoding not implemented.
     "ion-tests/iontestdata/good/utf32.ion", // Input is treated as UTF-8 bytes; UTF-32 decoding not implemented.
-    "ion-tests/iontestdata/good/non-equivs/localSymbolTableWithAnnotations.ion", // Symbol table + annotation interactions not fully modeled.
-    "ion-tests/iontestdata/good/non-equivs/symbolTablesUnknownText.ion", // Unknown-text symbol table behavior not fully modeled.
     "ion-tests/iontestdata/good/intBigSize16.10n", // Exceeds i128 (this port stores ints in i128).
     "ion-tests/iontestdata/good/intBigSize256.ion", // Exceeds i128 (this port stores ints in i128).
     "ion-tests/iontestdata/good/intBigSize256.10n", // Exceeds i128 (this port stores ints in i128).
@@ -84,7 +79,6 @@ const global_skip_list = [_][]const u8{
 
 const round_trip_skip_list = [_][]const u8{
     "ion-tests/iontestdata/good/item1.10n", // Requires additional binary features beyond the current subset; roundtrip would be misleading.
-    "ion-tests/iontestdata/good/localSymbolTableImportZeroMaxId.ion", // Full local symbol table import semantics not implemented; roundtrip is not meaningful.
     "ion-tests/iontestdata/good/notVersionMarkers.ion", // Roundtrip can change how $ion_* tokens are interpreted/serialized; not implemented faithfully.
     "ion-tests/iontestdata/good/subfieldInt.ion", // Subfield encodings are not preserved across serialize/parse.
     "ion-tests/iontestdata/good/subfieldUInt.ion", // Subfield encodings are not preserved across serialize/parse.

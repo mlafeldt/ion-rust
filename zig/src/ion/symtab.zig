@@ -79,6 +79,14 @@ pub const SymbolTable = struct {
         return self.sid_to_text.items[@intCast(sid)];
     }
 
+    /// Returns the slot for a SID:
+    /// - null => SID is out of range (undefined)
+    /// - ?[]const u8 => defined, with optional text (null => unknown slot)
+    pub fn slotForSid(self: *const SymbolTable, sid: u32) ?(?[]const u8) {
+        if (sid >= self.sid_to_text.items.len) return null;
+        return self.sid_to_text.items[@intCast(sid)];
+    }
+
     /// Appends a new symbol text slot and returns its assigned SID.
     pub fn addSymbolText(self: *SymbolTable, text: []const u8) IonError!u32 {
         const owned = try self.arena.dupe(text);
