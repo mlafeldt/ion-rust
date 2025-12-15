@@ -52,7 +52,10 @@ Key properties:
     - NOP pads (T0) (and rejects null.nop)
     - Containers: list/sexp/struct (including NOP padding inside)
     - Numerics, decimals, timestamps, strings, clobs, blobs, symbols
-    - Local symbol tables (symbols list + null slots; imports currently only accepts empty imports)
+    - Local symbol tables:
+      - Supports `$ion_symbol_table` `imports:[...]` (falls back to unknown slots if imported table is not known).
+      - Supports in-stream `$ion_shared_symbol_table` declarations as an import catalog.
+      - Supports unknown symbol IDs when the symbol table slot exists but has unknown text (null slot).
     - IVM appearing inside the stream (ignored if it’s `E0 01 00 EA`)
     - “Ordered struct” encoding variant (as used by ion-tests)
 
@@ -66,6 +69,7 @@ Key properties:
     - Handles signed-magnitude integer fields in decimals and timestamp fractionals (sign-bit padding rules).
   - Text writer:
     - Produces legal text Ion consumable by our parser and by ion-tests expectations.
+    - Emits a minimal `$ion_symbol_table` import when needed so `$<sid>` tokens (unknown symbol IDs) are parseable.
     - Handles timestamps with correct “trailing `T`” rules at year/month precision.
     - Uses `\\xNN` escapes for non-ASCII bytes in clobs.
     - Avoids accidental string literal concatenation by alternating short (`"..."`) and long (`'''...'''`) forms for adjacent string values at top-level and in sexps.
@@ -109,11 +113,7 @@ Options:
 
 ### 2) UTF-16 / UTF-32 text inputs
 
-`utf16.ion` / `utf32.ion` are skipped because the parser assumes UTF-8 bytes.
-
-Options:
-
-- Add BOM/encoding detection and transcode to UTF-8 before parsing.
+Done: `parseDocument()` detects BOM-less UTF-16/UTF-32 (and BOM variants) and transcodes to UTF-8 before parsing.
 
 ### 3) Full symbol table/import semantics
 
@@ -136,9 +136,9 @@ Options:
 2) canonical re-encoding
 3) preserve exact subfield encoding forms
 
-### 5) `item1.10n`
+### 5) `subfield*` fixtures
 
-This is currently marked “requires additional features beyond the subset”. The next step is to identify the missing constructs it uses and implement them.
+These are currently skipped because the port does not preserve the encoding-specific subfield forms across roundtrips.
 
 ## Gotchas encountered (and fixes)
 

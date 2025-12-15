@@ -17,6 +17,12 @@ const symtab = @import("symtab.zig");
 
 const IonError = ion.IonError;
 
+const FixedSymtab = struct {
+    /// Number of local symbol slots reserved after the system table.
+    /// Local SIDs are `SystemSymtab.max_id + 1 + index`.
+    slots: []?[]const u8,
+};
+
 fn appendByte(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, b: u8) IonError!void {
     out.append(allocator, b) catch return IonError.OutOfMemory;
 }
@@ -39,8 +45,8 @@ pub fn writeBinary(allocator: std.mem.Allocator, doc: []const value.Element) Ion
     // IVM
     try appendSlice(&out, allocator, &.{ 0xE0, 0x01, 0x00, 0xEA });
 
-    // Emit a simple local symbol table if needed.
-    if (intern.new_symbols.items.len != 0) {
+    // Emit a local symbol table if needed.
+    if (intern.fixed.slots.len != 0 or intern.new_symbols.items.len != 0) {
         try writeLocalSymtabBinary(allocator, &out, &intern);
     }
 
@@ -58,6 +64,23 @@ pub fn writeBinary(allocator: std.mem.Allocator, doc: []const value.Element) Ion
 pub fn writeText(allocator: std.mem.Allocator, doc: []const value.Element) IonError![]u8 {
     var out = std.ArrayListUnmanaged(u8){};
     errdefer out.deinit(allocator);
+
+    if (maxUnknownLocalSid(doc)) |max_sid| {
+        const max_id: u32 = max_sid - symtab.SystemSymtab.max_id;
+        // Emit a minimal symbol table that makes `$<sid>` tokens parseable as unknown symbols
+        // without materializing a gigantic `symbols:[null, null, ...]` list.
+        //
+        // We intentionally use an import to a likely-nonexistent shared table; if the reader
+        // doesn't have it, the imported slots remain unknown (which is what `$<sid>` encodes).
+        var buf: [128]u8 = undefined;
+        const header = std.fmt.bufPrint(
+            &buf,
+            "'$ion_symbol_table'::{{imports:[{{name:\"$ion_symbol_table\",version:1,max_id:{d}}}]}}",
+            .{max_id},
+        ) catch return IonError.InvalidIon;
+        try appendSlice(&out, allocator, header);
+        try appendByte(&out, allocator, '\n');
+    }
 
     var first: bool = true;
     var prev_was_string: bool = false;
@@ -83,9 +106,43 @@ pub fn writeText(allocator: std.mem.Allocator, doc: []const value.Element) IonEr
     return out.toOwnedSlice(allocator) catch return IonError.OutOfMemory;
 }
 
+fn maxUnknownLocalSid(elements: []const value.Element) ?u32 {
+    var max_sid: u32 = 0;
+    for (elements) |e| updateMaxUnknownLocalSidElem(e, &max_sid);
+    return if (max_sid > symtab.SystemSymtab.max_id) max_sid else null;
+}
+
+fn updateMaxUnknownLocalSidElem(elem: value.Element, max_sid: *u32) void {
+    for (elem.annotations) |a| updateMaxUnknownLocalSidSym(a, max_sid);
+    updateMaxUnknownLocalSidValue(elem.value, max_sid);
+}
+
+fn updateMaxUnknownLocalSidValue(v: value.Value, max_sid: *u32) void {
+    switch (v) {
+        .symbol => |s| updateMaxUnknownLocalSidSym(s, max_sid),
+        .list => |items| for (items) |e| updateMaxUnknownLocalSidElem(e, max_sid),
+        .sexp => |items| for (items) |e| updateMaxUnknownLocalSidElem(e, max_sid),
+        .@"struct" => |st| {
+            for (st.fields) |f| {
+                updateMaxUnknownLocalSidSym(f.name, max_sid);
+                updateMaxUnknownLocalSidElem(f.value, max_sid);
+            }
+        },
+        else => {},
+    }
+}
+
+fn updateMaxUnknownLocalSidSym(s: value.Symbol, max_sid: *u32) void {
+    if (s.text != null) return;
+    const sid = s.sid orelse return;
+    if (sid <= symtab.SystemSymtab.max_id) return;
+    if (sid > max_sid.*) max_sid.* = sid;
+}
+
 const SymbolIntern = struct {
     allocator: std.mem.Allocator,
     map: std.StringHashMapUnmanaged(u32) = .{},
+    fixed: FixedSymtab = .{ .slots = &.{} },
     new_symbols: std.ArrayListUnmanaged([]const u8) = .{},
 
     fn init(allocator: std.mem.Allocator) IonError!SymbolIntern {
@@ -94,6 +151,7 @@ const SymbolIntern = struct {
 
     fn deinit(self: *SymbolIntern, allocator: std.mem.Allocator) void {
         self.map.deinit(allocator);
+        if (self.fixed.slots.len != 0) allocator.free(self.fixed.slots);
         self.new_symbols.deinit(allocator);
     }
 
@@ -101,14 +159,102 @@ const SymbolIntern = struct {
         _ = allocator;
         if (symtab.SystemSymtab.sidForText(text)) |sid| return sid;
         if (self.map.get(text)) |sid| return sid;
-        const sid: u32 = symtab.SystemSymtab.max_id + 1 + @as(u32, @intCast(self.new_symbols.items.len));
+        const sid: u32 = symtab.SystemSymtab.max_id + 1 + @as(u32, @intCast(self.fixed.slots.len + self.new_symbols.items.len));
         self.map.put(self.allocator, text, sid) catch return IonError.OutOfMemory;
         self.new_symbols.append(self.allocator, text) catch return IonError.OutOfMemory;
         return sid;
     }
 
     fn collectFromElements(self: *SymbolIntern, elements: []const value.Element) IonError!void {
+        const fixed_len = try self.maxExplicitLocalSid(elements);
+        if (fixed_len != 0) {
+            const slots = self.allocator.alloc(?[]const u8, fixed_len) catch return IonError.OutOfMemory;
+            @memset(slots, null);
+            try self.fillFixedSlots(elements, slots);
+            self.fixed = .{ .slots = slots };
+            // Seed text->sid mapping for fixed slots with known text so we can reuse them for symbols
+            // that only carry text.
+            for (slots, 0..) |opt, idx| {
+                if (opt) |t| {
+                    const sid: u32 = symtab.SystemSymtab.max_id + 1 + @as(u32, @intCast(idx));
+                    self.map.put(self.allocator, t, sid) catch return IonError.OutOfMemory;
+                }
+            }
+        }
         for (elements) |e| try self.collectFromElement(e);
+    }
+
+    fn maxExplicitLocalSid(self: *SymbolIntern, elements: []const value.Element) IonError!usize {
+        _ = self;
+        var max_sid: u32 = symtab.SystemSymtab.max_id;
+        for (elements) |e| try maxExplicitLocalSidElem(e, &max_sid);
+        if (max_sid <= symtab.SystemSymtab.max_id) return 0;
+        return @as(usize, @intCast(max_sid - symtab.SystemSymtab.max_id));
+    }
+
+    fn maxExplicitLocalSidElem(elem: value.Element, max_sid: *u32) IonError!void {
+        for (elem.annotations) |a| try maxExplicitLocalSidSym(a, max_sid);
+        try maxExplicitLocalSidValue(elem.value, max_sid);
+    }
+
+    fn maxExplicitLocalSidValue(v: value.Value, max_sid: *u32) IonError!void {
+        switch (v) {
+            .symbol => |s| try maxExplicitLocalSidSym(s, max_sid),
+            .list => |items| for (items) |e| try maxExplicitLocalSidElem(e, max_sid),
+            .sexp => |items| for (items) |e| try maxExplicitLocalSidElem(e, max_sid),
+            .@"struct" => |st| {
+                for (st.fields) |f| {
+                    try maxExplicitLocalSidSym(f.name, max_sid);
+                    try maxExplicitLocalSidElem(f.value, max_sid);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn maxExplicitLocalSidSym(s: value.Symbol, max_sid: *u32) IonError!void {
+        if (s.sid) |sid| {
+            if (sid > symtab.SystemSymtab.max_id and sid > max_sid.*) max_sid.* = sid;
+        }
+    }
+
+    fn fillFixedSlots(self: *SymbolIntern, elements: []const value.Element, slots: []?[]const u8) IonError!void {
+        for (elements) |e| try self.fillFixedSlotsElem(e, slots);
+    }
+
+    fn fillFixedSlotsElem(self: *SymbolIntern, elem: value.Element, slots: []?[]const u8) IonError!void {
+        for (elem.annotations) |a| try self.fillFixedSlotsSym(a, slots);
+        try self.fillFixedSlotsValue(elem.value, slots);
+    }
+
+    fn fillFixedSlotsValue(self: *SymbolIntern, v: value.Value, slots: []?[]const u8) IonError!void {
+        switch (v) {
+            .symbol => |s| try self.fillFixedSlotsSym(s, slots),
+            .list => |items| for (items) |e| try self.fillFixedSlotsElem(e, slots),
+            .sexp => |items| for (items) |e| try self.fillFixedSlotsElem(e, slots),
+            .@"struct" => |st| {
+                for (st.fields) |f| {
+                    try self.fillFixedSlotsSym(f.name, slots);
+                    try self.fillFixedSlotsElem(f.value, slots);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn fillFixedSlotsSym(self: *SymbolIntern, s: value.Symbol, slots: []?[]const u8) IonError!void {
+        _ = self;
+        const sid = s.sid orelse return;
+        if (sid <= symtab.SystemSymtab.max_id) return;
+        const idx: usize = @intCast(sid - (symtab.SystemSymtab.max_id + 1));
+        if (idx >= slots.len) return IonError.InvalidIon;
+        if (s.text) |t| {
+            if (slots[idx]) |existing| {
+                if (!std.mem.eql(u8, existing, t)) return IonError.InvalidIon;
+            } else {
+                slots[idx] = t;
+            }
+        }
     }
 
     fn collectFromElement(self: *SymbolIntern, elem: value.Element) IonError!void {
@@ -140,8 +286,16 @@ fn writeLocalSymtabBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnman
     // $ion_symbol_table::{symbols:[...]}
     var list_body = std.ArrayListUnmanaged(u8){};
     defer list_body.deinit(allocator);
+    for (intern.fixed.slots) |opt| {
+        if (opt) |t| {
+            try writeTypedValueHeader(allocator, &list_body, 8, t.len);
+            try appendSlice(&list_body, allocator, t);
+        } else {
+            // null.string
+            try appendByte(&list_body, allocator, (8 << 4) | 0x0F);
+        }
+    }
     for (intern.new_symbols.items) |t| {
-        // string value
         try writeTypedValueHeader(allocator, &list_body, 8, t.len);
         try appendSlice(&list_body, allocator, t);
     }

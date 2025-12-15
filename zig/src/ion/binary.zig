@@ -16,6 +16,13 @@ const symtab = @import("symtab.zig");
 
 const IonError = ion.IonError;
 
+const SharedSymtab = struct {
+    name: []const u8,
+    version: u32,
+    // Index 0 corresponds to the shared table's SID 1 (shared table SIDs are 1-based).
+    symbols: []const ?[]const u8,
+};
+
 /// Parses an Ion binary stream that begins with the Ion 1.0 IVM (`E0 01 00 EA`).
 ///
 /// All returned slices are allocated in `arena` and valid until the arena is deinited.
@@ -31,6 +38,7 @@ const Decoder = struct {
     input: []const u8,
     i: usize = 0,
     st: symtab.SymbolTable,
+    shared: std.StringHashMapUnmanaged(SharedSymtab) = .{},
 
     fn init(arena: *value.Arena, input: []const u8) IonError!Decoder {
         return .{
@@ -38,11 +46,13 @@ const Decoder = struct {
             .input = input,
             .i = 0,
             .st = try symtab.SymbolTable.init(arena),
+            .shared = .{},
         };
     }
 
     fn parseTopLevel(self: *Decoder) IonError![]value.Element {
         defer self.st.deinit();
+        defer self.shared.deinit(self.arena.allocator());
         var out = std.ArrayListUnmanaged(value.Element){};
         errdefer out.deinit(self.arena.allocator());
 
@@ -221,13 +231,6 @@ const Decoder = struct {
         var fields = std.ArrayListUnmanaged(value.StructField){};
         errdefer fields.deinit(self.arena.allocator());
         while (cursor < body.len) {
-            // NOP pads are allowed.
-            while (cursor < body.len) {
-                const td = parseTypeDesc(body[cursor]);
-                if (td.type_id != 0 or td.is_null) break;
-                cursor += try skipNop(body[cursor..]);
-            }
-            if (cursor >= body.len) break;
             const name_sid = try readVarUInt(body, &cursor);
             if (cursor >= body.len) return IonError.Incomplete;
 
@@ -343,10 +346,136 @@ const Decoder = struct {
     fn maybeConsumeSymbolTable(self: *Decoder, elem: value.Element) IonError!void {
         if (elem.annotations.len != 1) return;
         const ann = elem.annotations[0].text orelse return;
-        if (!std.mem.eql(u8, ann, "$ion_symbol_table")) return;
         if (elem.value != .@"struct") return;
 
         const st_val = elem.value.@"struct";
+        const allocator = self.arena.allocator();
+
+        if (std.mem.eql(u8, ann, "$ion_shared_symbol_table")) {
+            var name: ?[]const u8 = null;
+            var version: ?u32 = null;
+            var symbols: ?[]const ?[]const u8 = null;
+
+            for (st_val.fields) |f| {
+                const fname = f.name.text orelse continue;
+                if (std.mem.eql(u8, fname, "name")) {
+                    if (f.value.value != .string) return IonError.InvalidIon;
+                    name = f.value.value.string;
+                    continue;
+                }
+                if (std.mem.eql(u8, fname, "version")) {
+                    if (f.value.value != .int) return IonError.InvalidIon;
+                    const v_i = f.value.value.int;
+                    if (v_i <= 0 or v_i > std.math.maxInt(u32)) return IonError.InvalidIon;
+                    version = @intCast(v_i);
+                    continue;
+                }
+                if (std.mem.eql(u8, fname, "symbols")) {
+                    if (f.value.value != .list) return IonError.InvalidIon;
+                    const items = f.value.value.list;
+                    const out = allocator.alloc(?[]const u8, items.len) catch return IonError.OutOfMemory;
+                    for (items, 0..) |e, idx| {
+                        out[idx] = switch (e.value) {
+                            .null => null,
+                            .string => |s| s,
+                            else => return IonError.InvalidIon,
+                        };
+                    }
+                    symbols = out;
+                    continue;
+                }
+            }
+
+            const n = name orelse return IonError.InvalidIon;
+            const v = version orelse return IonError.InvalidIon;
+            const syms = symbols orelse return IonError.InvalidIon;
+            const key = std.fmt.allocPrint(allocator, "{s}:{d}", .{ n, v }) catch return IonError.OutOfMemory;
+            self.shared.put(allocator, key, .{ .name = n, .version = v, .symbols = syms }) catch return IonError.OutOfMemory;
+            return;
+        }
+
+        if (!std.mem.eql(u8, ann, "$ion_symbol_table")) return;
+
+        // New local symbol table resets the current local symbol space (system symbols always present).
+        self.st.deinit();
+        self.st = try symtab.SymbolTable.init(self.arena);
+
+        const applyImport = struct {
+            fn run(d: *Decoder, import_name: []const u8, import_version: u32, import_max_id: u32) IonError!void {
+                if (import_max_id == 0) return;
+
+                const arena_alloc = d.arena.allocator();
+                const key = std.fmt.allocPrint(arena_alloc, "{s}:{d}", .{ import_name, import_version }) catch return IonError.OutOfMemory;
+                if (d.shared.get(key)) |shared_st| {
+                    const available: u32 = @intCast(shared_st.symbols.len);
+                    const take: u32 = if (import_max_id < available) import_max_id else available;
+
+                    var sid_in_table: u32 = 1;
+                    while (sid_in_table <= take) : (sid_in_table += 1) {
+                        const idx: usize = @intCast(sid_in_table - 1);
+                        if (shared_st.symbols[idx]) |t| {
+                            _ = try d.st.addSymbolText(t);
+                        } else {
+                            _ = try d.st.addNullSlot();
+                        }
+                    }
+                    var remaining: u32 = import_max_id - take;
+                    while (remaining != 0) : (remaining -= 1) {
+                        _ = try d.st.addNullSlot();
+                    }
+                } else {
+                    var remaining: u32 = import_max_id;
+                    while (remaining != 0) : (remaining -= 1) {
+                        _ = try d.st.addNullSlot();
+                    }
+                }
+            }
+        }.run;
+
+        const parseImportStruct = struct {
+            fn run(d: *Decoder, imp_st: value.Struct) IonError!struct { name: []const u8, version: u32, max_id: u32 } {
+                var name: ?[]const u8 = null;
+                var version: u32 = 1;
+                var max_id: ?u32 = null;
+
+                for (imp_st.fields) |ff| {
+                    const nn = ff.name.text orelse continue;
+                    if (std.mem.eql(u8, nn, "name")) {
+                        switch (ff.value.value) {
+                            .string => |s| name = s,
+                            .symbol => |s| name = s.text orelse return IonError.InvalidIon,
+                            else => return IonError.InvalidIon,
+                        }
+                        continue;
+                    }
+                    if (std.mem.eql(u8, nn, "version")) {
+                        if (ff.value.value != .int) return IonError.InvalidIon;
+                        const v_i = ff.value.value.int;
+                        if (v_i <= 0 or v_i > std.math.maxInt(u32)) return IonError.InvalidIon;
+                        version = @intCast(v_i);
+                        continue;
+                    }
+                    if (std.mem.eql(u8, nn, "max_id")) {
+                        if (ff.value.value != .int) return IonError.InvalidIon;
+                        const m_i = ff.value.value.int;
+                        if (m_i < 0 or m_i > std.math.maxInt(u32)) return IonError.InvalidIon;
+                        max_id = @intCast(m_i);
+                        continue;
+                    }
+                }
+
+                const n = name orelse return IonError.InvalidIon;
+                const m = max_id orelse blk: {
+                    const arena_alloc = d.arena.allocator();
+                    const key = std.fmt.allocPrint(arena_alloc, "{s}:{d}", .{ n, version }) catch return IonError.OutOfMemory;
+                    if (d.shared.get(key)) |shared_st| break :blk @as(u32, @intCast(shared_st.symbols.len));
+                    break :blk 0;
+                };
+
+                return .{ .name = n, .version = version, .max_id = m };
+            }
+        }.run;
+
         var seen_symbols = false;
         var seen_imports = false;
         for (st_val.fields) |f| {
@@ -354,11 +483,33 @@ const Decoder = struct {
             if (std.mem.eql(u8, fname, "imports")) {
                 if (seen_imports) return IonError.InvalidIon;
                 seen_imports = true;
-                // Minimal handling: accept empty imports only.
-                if (f.value.value != .list) return IonError.InvalidIon;
-                if (f.value.value.list.len != 0) return IonError.InvalidIon;
+
+                switch (f.value.value) {
+                    .null => {},
+                    .symbol => |s| {
+                        const t = s.text orelse return IonError.InvalidIon;
+                        if (!std.mem.eql(u8, t, "$ion_symbol_table")) return IonError.InvalidIon;
+                    },
+                    .list => |imports| {
+                        for (imports) |imp_elem| {
+                            switch (imp_elem.value) {
+                                .symbol => |s| {
+                                    const t = s.text orelse return IonError.InvalidIon;
+                                    if (!std.mem.eql(u8, t, "$ion_symbol_table")) return IonError.InvalidIon;
+                                },
+                                .@"struct" => |imp_st| {
+                                    const desc = try parseImportStruct(self, imp_st);
+                                    try applyImport(self, desc.name, desc.version, desc.max_id);
+                                },
+                                else => return IonError.InvalidIon,
+                            }
+                        }
+                    },
+                    else => return IonError.InvalidIon,
+                }
                 continue;
             }
+
             if (!std.mem.eql(u8, fname, "symbols")) continue;
             if (seen_symbols) return IonError.InvalidIon;
             seen_symbols = true;

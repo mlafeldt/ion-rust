@@ -4,6 +4,8 @@
 //! - `parseDocument(allocator, bytes)` parses either Ion text or Ion binary (IVM-detected).
 //! - `serializeDocument(allocator, format, elements)` writes Ion text or Ion binary.
 
+const std = @import("std");
+
 pub const value = @import("ion/value.zig");
 pub const symtab = @import("ion/symtab.zig");
 pub const text = @import("ion/text.zig");
@@ -18,7 +20,7 @@ pub const IonError = error{
     OutOfMemory,
 };
 
-pub const Allocator = @import("std").mem.Allocator;
+pub const Allocator = std.mem.Allocator;
 
 /// A parsed Ion document that owns all of its decoded values in an arena.
 ///
@@ -48,8 +50,114 @@ pub fn parseDocument(allocator: Allocator, bytes: []const u8) IonError!Document 
         const elements = try binary.parseTopLevel(&arena, bytes);
         return .{ .arena = arena, .elements = elements };
     } else {
-        const elements = try text.parseTopLevel(&arena, bytes);
+        const decoded = try decodeTextToUtf8(allocator, bytes);
+        defer if (decoded) |b| allocator.free(b);
+        const input = if (decoded) |b| b else bytes;
+        const elements = try text.parseTopLevel(&arena, input);
         return .{ .arena = arena, .elements = elements };
+    }
+}
+
+fn decodeTextToUtf8(allocator: Allocator, bytes: []const u8) IonError!?[]u8 {
+    if (bytes.len == 0) return null;
+
+    const Encoding = enum { utf8, utf16le, utf16be, utf32le, utf32be };
+    var enc: Encoding = .utf8;
+    var start: usize = 0;
+
+    // BOM detection.
+    if (bytes.len >= 4 and std.mem.eql(u8, bytes[0..4], &.{ 0x00, 0x00, 0xFE, 0xFF })) {
+        enc = .utf32be;
+        start = 4;
+    } else if (bytes.len >= 4 and std.mem.eql(u8, bytes[0..4], &.{ 0xFF, 0xFE, 0x00, 0x00 })) {
+        enc = .utf32le;
+        start = 4;
+    } else if (bytes.len >= 3 and std.mem.eql(u8, bytes[0..3], &.{ 0xEF, 0xBB, 0xBF })) {
+        enc = .utf8;
+        start = 3;
+    } else if (bytes.len >= 2 and std.mem.eql(u8, bytes[0..2], &.{ 0xFE, 0xFF })) {
+        enc = .utf16be;
+        start = 2;
+    } else if (bytes.len >= 2 and std.mem.eql(u8, bytes[0..2], &.{ 0xFF, 0xFE })) {
+        enc = .utf16le;
+        start = 2;
+    } else {
+        // Heuristics for BOM-less UTF-16/32 (as in ion-tests fixtures).
+        if (bytes.len >= 4 and bytes[0] == 0x00 and bytes[1] == 0x00 and bytes[2] == 0x00 and bytes[3] != 0x00) {
+            enc = .utf32be;
+        } else if (bytes.len >= 4 and bytes[0] != 0x00 and bytes[1] == 0x00 and bytes[2] == 0x00 and bytes[3] == 0x00) {
+            enc = .utf32le;
+        } else if (bytes.len >= 2 and bytes[0] == 0x00 and bytes[1] != 0x00) {
+            enc = .utf16be;
+        } else if (bytes.len >= 2 and bytes[0] != 0x00 and bytes[1] == 0x00) {
+            enc = .utf16le;
+        }
+    }
+
+    const body = bytes[start..];
+    switch (enc) {
+        .utf8 => return null,
+        .utf16le, .utf16be => {
+            if (body.len % 2 != 0) return IonError.InvalidIon;
+            var out = std.ArrayListUnmanaged(u8){};
+            errdefer out.deinit(allocator);
+
+            var i: usize = 0;
+            while (i < body.len) : (i += 2) {
+                const u = if (enc == .utf16le)
+                    std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(body[i .. i + 2].ptr)), .little)
+                else
+                    std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(body[i .. i + 2].ptr)), .big);
+
+                var codepoint: u21 = 0;
+                if (u >= 0xD800 and u <= 0xDBFF) {
+                    // High surrogate: must be followed by low surrogate.
+                    if (i + 4 > body.len) return IonError.InvalidIon;
+                    const u_next = if (enc == .utf16le)
+                        std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(body[i + 2 .. i + 4].ptr)), .little)
+                    else
+                        std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(body[i + 2 .. i + 4].ptr)), .big);
+                    if (u_next < 0xDC00 or u_next > 0xDFFF) return IonError.InvalidIon;
+                    const hi: u32 = u - 0xD800;
+                    const lo: u32 = u_next - 0xDC00;
+                    const cp: u32 = 0x10000 + ((hi << 10) | lo);
+                    codepoint = @intCast(cp);
+                    i += 2;
+                } else if (u >= 0xDC00 and u <= 0xDFFF) {
+                    return IonError.InvalidIon;
+                } else {
+                    codepoint = @intCast(u);
+                }
+
+                var buf: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(codepoint, &buf) catch return IonError.InvalidIon;
+                out.appendSlice(allocator, buf[0..n]) catch return IonError.OutOfMemory;
+            }
+
+            return out.toOwnedSlice(allocator) catch return IonError.OutOfMemory;
+        },
+        .utf32le, .utf32be => {
+            if (body.len % 4 != 0) return IonError.InvalidIon;
+            var out = std.ArrayListUnmanaged(u8){};
+            errdefer out.deinit(allocator);
+
+            var i: usize = 0;
+            while (i < body.len) : (i += 4) {
+                const u = if (enc == .utf32le)
+                    std.mem.readInt(u32, @as(*const [4]u8, @ptrCast(body[i .. i + 4].ptr)), .little)
+                else
+                    std.mem.readInt(u32, @as(*const [4]u8, @ptrCast(body[i .. i + 4].ptr)), .big);
+
+                // Validate Unicode scalar value (exclude surrogate range).
+                if (u > 0x10FFFF or (u >= 0xD800 and u <= 0xDFFF)) return IonError.InvalidIon;
+
+                var buf: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(@intCast(u), &buf) catch return IonError.InvalidIon;
+                out.appendSlice(allocator, buf[0..n]) catch return IonError.OutOfMemory;
+            }
+
+            return out.toOwnedSlice(allocator) catch return IonError.OutOfMemory;
+        },
     }
 }
 

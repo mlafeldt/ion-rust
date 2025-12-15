@@ -58,15 +58,11 @@ fn walkAndTest(
 }
 
 const global_skip_list = [_][]const u8{
-    "ion-tests/iontestdata/bad/listWithValueLargerThanSize.10n", // Exercises binary container length edge cases; currently not enforced by the harness.
     "ion-tests/iontestdata/good/subfieldVarInt.ion", // Subfield encodings are not implemented/preserved.
     "ion-tests/iontestdata/good/subfieldVarUInt.ion", // Subfield encodings are not implemented/preserved.
     "ion-tests/iontestdata/good/subfieldVarUInt15bit.ion", // Subfield encodings are not implemented/preserved.
     "ion-tests/iontestdata/good/subfieldVarUInt16bit.ion", // Subfield encodings are not implemented/preserved.
     "ion-tests/iontestdata/good/subfieldVarUInt32bit.ion", // Subfield encodings are not implemented/preserved.
-    "ion-tests/iontestdata/good/item1.10n", // Requires additional binary features beyond the current subset.
-    "ion-tests/iontestdata/good/utf16.ion", // Input is treated as UTF-8 bytes; UTF-16 decoding not implemented.
-    "ion-tests/iontestdata/good/utf32.ion", // Input is treated as UTF-8 bytes; UTF-32 decoding not implemented.
     "ion-tests/iontestdata/good/intBigSize16.10n", // Exceeds i128 (this port stores ints in i128).
     "ion-tests/iontestdata/good/intBigSize256.ion", // Exceeds i128 (this port stores ints in i128).
     "ion-tests/iontestdata/good/intBigSize256.10n", // Exceeds i128 (this port stores ints in i128).
@@ -78,7 +74,6 @@ const global_skip_list = [_][]const u8{
 };
 
 const round_trip_skip_list = [_][]const u8{
-    "ion-tests/iontestdata/good/item1.10n", // Requires additional binary features beyond the current subset; roundtrip would be misleading.
     "ion-tests/iontestdata/good/notVersionMarkers.ion", // Roundtrip can change how $ion_* tokens are interpreted/serialized; not implemented faithfully.
     "ion-tests/iontestdata/good/subfieldInt.ion", // Subfield encodings are not preserved across serialize/parse.
     "ion-tests/iontestdata/good/subfieldUInt.ion", // Subfield encodings are not preserved across serialize/parse.
@@ -87,14 +82,9 @@ const round_trip_skip_list = [_][]const u8{
     "ion-tests/iontestdata/good/subfieldVarUInt15bit.ion", // Subfield encodings are not preserved across serialize/parse.
     "ion-tests/iontestdata/good/subfieldVarUInt16bit.ion", // Subfield encodings are not preserved across serialize/parse.
     "ion-tests/iontestdata/good/subfieldVarUInt32bit.ion", // Subfield encodings are not preserved across serialize/parse.
-    "ion-tests/iontestdata/good/utf16.ion", // Input is treated as UTF-8 bytes; UTF-16 decoding not implemented.
-    "ion-tests/iontestdata/good/utf32.ion", // Input is treated as UTF-8 bytes; UTF-32 decoding not implemented.
 };
 
 const equivs_skip_list = [_][]const u8{
-    "ion-tests/iontestdata/good/equivs/localSymbolTableAppend.ion", // Symbol table state across documents/values not fully modeled.
-    "ion-tests/iontestdata/good/equivs/localSymbolTableNullSlots.ion", // Symbol table null-slot equivalence not fully modeled.
-    "ion-tests/iontestdata/good/equivs/nonIVMNoOps.ion", // Non-IVM NOP stream equivalence not fully modeled.
 };
 
 fn concatSkipLists(allocator: std.mem.Allocator, lists: []const []const []const u8) ![][]const u8 {
