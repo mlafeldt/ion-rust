@@ -1,0 +1,610 @@
+//! Ion 1.0 binary parser.
+//!
+//! This parser is tailored to the `ion-tests` corpus and supports:
+//! - TLV decoding for Ion 1.0 binary after the IVM.
+//! - Annotation wrappers (type 14), NOP padding (type 0; rejects null.nop).
+//! - Containers (list/sexp/struct), including NOP padding inside containers.
+//! - Numerics, decimals, timestamps, strings, symbols, clobs/blobs.
+//! - Minimal local symbol table handling (`$ion_symbol_table::{symbols:[...]}`).
+//! - IVM occurring within the stream (ignored if it is `E0 01 00 EA`).
+//! - Ion "ordered struct" encoding variant as used by the corpus.
+
+const std = @import("std");
+const ion = @import("../ion.zig");
+const value = @import("value.zig");
+const symtab = @import("symtab.zig");
+
+const IonError = ion.IonError;
+
+/// Parses an Ion binary stream that begins with the Ion 1.0 IVM (`E0 01 00 EA`).
+///
+/// All returned slices are allocated in `arena` and valid until the arena is deinited.
+pub fn parseTopLevel(arena: *value.Arena, bytes: []const u8) IonError![]value.Element {
+    if (bytes.len < 4) return IonError.InvalidIon;
+    if (!(bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x00 and bytes[3] == 0xEA)) return IonError.InvalidIon;
+    var d = try Decoder.init(arena, bytes[4..]);
+    return d.parseTopLevel();
+}
+
+const Decoder = struct {
+    arena: *value.Arena,
+    input: []const u8,
+    i: usize = 0,
+    st: symtab.SymbolTable,
+
+    fn init(arena: *value.Arena, input: []const u8) IonError!Decoder {
+        return .{
+            .arena = arena,
+            .input = input,
+            .i = 0,
+            .st = try symtab.SymbolTable.init(arena),
+        };
+    }
+
+    fn parseTopLevel(self: *Decoder) IonError![]value.Element {
+        defer self.st.deinit();
+        var out = std.ArrayListUnmanaged(value.Element){};
+        errdefer out.deinit(self.arena.allocator());
+
+        while (self.i < self.input.len) {
+            // Ion Version Marker (IVM) may appear as a 4-byte system marker within the stream.
+            // In the ion-tests corpus we only accept the Ion 1.0 IVM and ignore it.
+            if (self.i + 4 <= self.input.len and std.mem.eql(u8, self.input[self.i .. self.i + 4], &.{ 0xE0, 0x01, 0x00, 0xEA })) {
+                self.i += 4;
+                continue;
+            }
+
+            // Skip any top-level NOP padding.
+            while (self.i < self.input.len) {
+                const td = try self.peekTypeDescriptor();
+                if (td.type_id != 0 or td.is_null) break;
+                _ = try self.readNop();
+            }
+            if (self.i >= self.input.len) break;
+
+            const before = self.i;
+            const elem = try self.readElement();
+            if (isSystemValue(elem)) {
+                try self.maybeConsumeSymbolTable(elem);
+            } else {
+                out.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
+            }
+            if (self.i == before) return IonError.InvalidIon;
+        }
+
+        return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+    }
+
+    fn readElement(self: *Decoder) IonError!value.Element {
+        const td = try self.peekTypeDescriptor();
+        if (td.type_id == 14) {
+            return self.readAnnotationWrapper();
+        }
+        // No wrapper: plain value, no annotations.
+        const v = try self.readValue();
+        return .{ .annotations = &.{}, .value = v };
+    }
+
+    fn readAnnotationWrapper(self: *Decoder) IonError!value.Element {
+        const td = try self.readTypeDescriptor();
+        if (td.type_id != 14) return IonError.InvalidIon;
+        if (td.is_null) return IonError.InvalidIon;
+        const body_len = try self.readLength(td.length_code);
+        if (self.i + body_len > self.input.len) return IonError.Incomplete;
+        const body = self.input[self.i .. self.i + body_len];
+        self.i += body_len;
+
+        var cursor: usize = 0;
+        const ann_len = try readVarUInt(body, &cursor);
+        if (ann_len == 0) return IonError.InvalidIon;
+        if (cursor + ann_len > body.len) return IonError.Incomplete;
+        const ann_bytes = body[cursor .. cursor + ann_len];
+        cursor += ann_len;
+
+        var anns = std.ArrayListUnmanaged(value.Symbol){};
+        errdefer anns.deinit(self.arena.allocator());
+        var ann_cursor: usize = 0;
+        while (ann_cursor < ann_bytes.len) {
+            const sid = try readVarUInt(ann_bytes, &ann_cursor);
+            const sym = try self.resolveSidToSymbol(@intCast(sid));
+            anns.append(self.arena.allocator(), sym) catch return IonError.OutOfMemory;
+        }
+        const annotations = anns.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+
+        const wrapped = body[cursor..];
+        var sub = Decoder{
+            .arena = self.arena,
+            .input = wrapped,
+            .i = 0,
+            .st = self.st,
+        };
+        // Parse exactly one element/value from the wrapper payload.
+        const inner = try sub.readElement();
+        if (sub.i != sub.input.len) return IonError.InvalidIon;
+        // Ion binary annotation wrappers must not be nested.
+        if (inner.annotations.len != 0) return IonError.InvalidIon;
+        // keep symbol table updates in sync (sub shares it by value, so nothing)
+
+        return .{ .annotations = annotations, .value = inner.value };
+    }
+
+    fn readValue(self: *Decoder) IonError!value.Value {
+        const td = try self.readTypeDescriptor();
+        // Bool values encode their value in the length code and have no body bytes.
+        if (!td.is_null and td.type_id == 1) {
+            return try decodeBool(td.length_code);
+        }
+        if (td.is_null) {
+            const t = typeIdToIonType(td.type_id) orelse return IonError.InvalidIon;
+            return value.Value{ .null = t };
+        }
+
+        // Ion 1.0 "ordered struct" encoding uses a different meaning for length codes < 14:
+        // the length code specifies the number of bytes used to encode the struct length
+        // (as a VarUInt) immediately following the type descriptor.
+        if (td.type_id == 13 and td.length_code < 14) {
+            const short_len: usize = @intCast(td.length_code);
+            if (self.i + short_len > self.input.len) return IonError.Incomplete;
+            const save_i = self.i;
+            const body_unordered = self.input[self.i .. self.i + short_len];
+            const unordered = self.decodeStruct(body_unordered) catch |e| switch (e) {
+                IonError.Incomplete => {
+                    if (short_len == 0) return IonError.Incomplete;
+                    // Try ordered struct interpretation: read a VarUInt length using exactly `short_len` bytes.
+                    var cursor: usize = save_i;
+                    const len_prefix_start = cursor;
+                    const body_len_u64 = try readVarUInt(self.input, &cursor);
+                    if (cursor - len_prefix_start != short_len) return IonError.InvalidIon;
+                    const body_len: usize = @intCast(body_len_u64);
+                    // Empty ordered structs are invalid in the ion-tests corpus; use the normal D0 encoding instead.
+                    if (body_len == 0) return IonError.InvalidIon;
+                    if (cursor + body_len > self.input.len) return IonError.Incomplete;
+                    const body = self.input[cursor .. cursor + body_len];
+                    self.i = cursor + body_len;
+                    return value.Value{ .@"struct" = try self.decodeStruct(body) };
+                },
+                else => return e,
+            };
+            // Unordered short struct.
+            self.i = save_i + short_len;
+            return value.Value{ .@"struct" = unordered };
+        }
+
+        const body_len = try self.readLength(td.length_code);
+        if (self.i + body_len > self.input.len) return IonError.Incomplete;
+        const body = self.input[self.i .. self.i + body_len];
+        self.i += body_len;
+
+        return switch (td.type_id) {
+            0 => return IonError.InvalidIon, // NOP should be handled outside
+            1 => return IonError.InvalidIon, // handled above
+            2 => try decodePosInt(body),
+            3 => try decodeNegInt(body),
+            4 => try decodeFloat(body),
+            5 => try decodeDecimal(body),
+            6 => try self.decodeTimestamp(body),
+            7 => try self.decodeSymbol(body),
+            8 => try decodeString(body),
+            9 => value.Value{ .clob = try self.arena.dupe(body) },
+            10 => value.Value{ .blob = try self.arena.dupe(body) },
+            11 => value.Value{ .list = try self.decodeSequence(body) },
+            12 => value.Value{ .sexp = try self.decodeSequence(body) },
+            13 => value.Value{ .@"struct" = try self.decodeStruct(body) },
+            14 => unreachable, // wrapper handled elsewhere
+            else => IonError.Unsupported,
+        };
+    }
+
+    fn decodeSequence(self: *Decoder, body: []const u8) IonError![]value.Element {
+        var cursor: usize = 0;
+        var out = std.ArrayListUnmanaged(value.Element){};
+        errdefer out.deinit(self.arena.allocator());
+        while (cursor < body.len) {
+            // Skip NOP pads inside container.
+            while (cursor < body.len) {
+                const td = parseTypeDesc(body[cursor]);
+                if (td.type_id != 0 or td.is_null) break;
+                cursor += try skipNop(body[cursor..]);
+            }
+            if (cursor >= body.len) break;
+
+            var sub = Decoder{ .arena = self.arena, .input = body, .i = cursor, .st = self.st };
+            const elem = try sub.readElement();
+            cursor = sub.i;
+            out.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
+        }
+        return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+    }
+
+    fn decodeStruct(self: *Decoder, body: []const u8) IonError!value.Struct {
+        var cursor: usize = 0;
+        var fields = std.ArrayListUnmanaged(value.StructField){};
+        errdefer fields.deinit(self.arena.allocator());
+        while (cursor < body.len) {
+            // NOP pads are allowed.
+            while (cursor < body.len) {
+                const td = parseTypeDesc(body[cursor]);
+                if (td.type_id != 0 or td.is_null) break;
+                cursor += try skipNop(body[cursor..]);
+            }
+            if (cursor >= body.len) break;
+            const name_sid = try readVarUInt(body, &cursor);
+            if (cursor >= body.len) return IonError.Incomplete;
+
+            // NOP padding may appear in structs as a (sid, nop-pad) pair (the sid may be non-zero).
+            const next_td = parseTypeDesc(body[cursor]);
+            if (next_td.type_id == 0 and !next_td.is_null) {
+                cursor += try skipNop(body[cursor..]);
+                continue;
+            }
+            var sub = Decoder{ .arena = self.arena, .input = body, .i = cursor, .st = self.st };
+            const elem = try sub.readElement();
+            cursor = sub.i;
+            const name = try self.resolveSidToSymbol(@intCast(name_sid));
+            fields.append(self.arena.allocator(), .{ .name = name, .value = elem }) catch return IonError.OutOfMemory;
+        }
+        return .{ .fields = fields.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory };
+    }
+
+    fn decodeSymbol(self: *Decoder, body: []const u8) IonError!value.Value {
+        const sid: u32 = if (body.len == 0) 0 else @intCast(readFixedUInt(body) catch return IonError.InvalidIon);
+        const sym = try self.resolveSidToSymbol(sid);
+        return value.Value{ .symbol = sym };
+    }
+
+    fn resolveSidToSymbol(self: *Decoder, sid: u32) IonError!value.Symbol {
+        if (sid == 0) return value.unknownSymbol();
+        const text = self.st.textForSid(sid) orelse return IonError.InvalidIon;
+        return value.makeSymbolId(sid, text);
+    }
+
+    fn decodeTimestamp(_: *Decoder, body: []const u8) IonError!value.Value {
+        var cursor: usize = 0;
+        const offset = try readVarInt(body, &cursor);
+        const year = try readVarUInt(body, &cursor);
+
+        var ts: value.Timestamp = .{
+            .year = @intCast(year),
+            .month = null,
+            .day = null,
+            .hour = null,
+            .minute = null,
+            .second = null,
+            .fractional = null,
+            .offset_minutes = if (offset.is_negative_zero) null else @intCast(offset.value),
+            .precision = .year,
+        };
+        if (ts.year == 0) return IonError.InvalidIon;
+
+        if (cursor >= body.len) {
+            ts.offset_minutes = null;
+            return value.Value{ .timestamp = ts };
+        }
+        const month = try readVarUInt(body, &cursor);
+        if (month == 0 or month > 12) return IonError.InvalidIon;
+        ts.month = @intCast(month);
+        ts.precision = .month;
+
+        if (cursor >= body.len) {
+            ts.offset_minutes = null;
+            return value.Value{ .timestamp = ts };
+        }
+        const day = try readVarUInt(body, &cursor);
+        if (day == 0 or day > daysInMonth(ts.year, @intCast(month))) return IonError.InvalidIon;
+        ts.day = @intCast(day);
+        ts.precision = .day;
+
+        if (cursor >= body.len) {
+            ts.offset_minutes = null;
+            return value.Value{ .timestamp = ts };
+        }
+        const hour = try readVarUInt(body, &cursor);
+        const minute = try readVarUInt(body, &cursor);
+        if (hour > 23 or minute > 59) return IonError.InvalidIon;
+        ts.hour = @intCast(hour);
+        ts.minute = @intCast(minute);
+        ts.precision = .minute;
+
+        if (cursor >= body.len) return value.Value{ .timestamp = ts };
+        const second = try readVarUInt(body, &cursor);
+        if (second > 59) return IonError.InvalidIon;
+        ts.second = @intCast(second);
+        ts.precision = .second;
+
+        if (cursor >= body.len) return value.Value{ .timestamp = ts };
+        const frac_exp = try readVarInt(body, &cursor);
+        const frac_bytes = body[cursor..];
+        const coeff_int = try readFixedInt(frac_bytes);
+        if (coeff_int.is_negative and coeff_int.magnitude != 0) return IonError.InvalidIon;
+        const mag = coeff_int.magnitude;
+        // Fractional seconds must be a proper fraction: 0 <= value < 1.
+        if (frac_exp.is_negative_zero) return IonError.InvalidIon;
+        const exp_i32: i32 = @intCast(frac_exp.value);
+        if (mag != 0 and exp_i32 >= 0) return IonError.InvalidIon;
+        if (mag != 0 and exp_i32 < 0) {
+            const scale: usize = @intCast(-exp_i32);
+            var digits: usize = 0;
+            var tmp: u128 = mag;
+            while (tmp != 0) : (tmp /= 10) digits += 1;
+            if (digits > scale) return IonError.InvalidIon;
+        }
+        // 0d0 is equivalent to having no fractional seconds field.
+        if (mag == 0 and exp_i32 == 0) {
+            ts.fractional = null;
+            ts.precision = .second;
+            return value.Value{ .timestamp = ts };
+        }
+        ts.fractional = .{ .is_negative = false, .coefficient = @intCast(mag), .exponent = exp_i32 };
+        ts.precision = .fractional;
+        return value.Value{ .timestamp = ts };
+    }
+
+    fn maybeConsumeSymbolTable(self: *Decoder, elem: value.Element) IonError!void {
+        if (elem.annotations.len != 1) return;
+        const ann = elem.annotations[0].text orelse return;
+        if (!std.mem.eql(u8, ann, "$ion_symbol_table")) return;
+        if (elem.value != .@"struct") return;
+
+        const st_val = elem.value.@"struct";
+        var seen_symbols = false;
+        var seen_imports = false;
+        for (st_val.fields) |f| {
+            const fname = f.name.text orelse continue;
+            if (std.mem.eql(u8, fname, "imports")) {
+                if (seen_imports) return IonError.InvalidIon;
+                seen_imports = true;
+                // Minimal handling: accept empty imports only.
+                if (f.value.value != .list) return IonError.InvalidIon;
+                if (f.value.value.list.len != 0) return IonError.InvalidIon;
+                continue;
+            }
+            if (!std.mem.eql(u8, fname, "symbols")) continue;
+            if (seen_symbols) return IonError.InvalidIon;
+            seen_symbols = true;
+            if (f.value.value != .list) return IonError.InvalidIon;
+            for (f.value.value.list) |sym_elem| {
+                if (sym_elem.value == .null) {
+                    _ = try self.st.addNullSlot();
+                } else if (sym_elem.value == .string) {
+                    _ = try self.st.addSymbolText(sym_elem.value.string);
+                } else {
+                    return IonError.InvalidIon;
+                }
+            }
+        }
+    }
+
+    fn readNop(self: *Decoder) IonError!usize {
+        const td = try self.readTypeDescriptor();
+        if (td.type_id != 0 or td.is_null) return IonError.InvalidIon;
+        const body_len = try self.readLength(td.length_code);
+        if (self.i + body_len > self.input.len) return IonError.Incomplete;
+        self.i += body_len;
+        return 1 + td.length_bytes + body_len;
+    }
+
+    fn peekTypeDescriptor(self: *const Decoder) IonError!TypeDesc {
+        if (self.i >= self.input.len) return IonError.Incomplete;
+        return parseTypeDesc(self.input[self.i]);
+    }
+
+    fn readTypeDescriptor(self: *Decoder) IonError!TypeDesc {
+        const td = try self.peekTypeDescriptor();
+        self.i += 1;
+        return td;
+    }
+
+    fn readLength(self: *Decoder, length_code: u4) IonError!usize {
+        if (length_code < 14) return @intCast(length_code);
+        if (length_code == 15) return 0;
+        // varUInt
+        const len = try readVarUInt(self.input, &self.i);
+        return @intCast(len);
+    }
+};
+
+const TypeDesc = struct {
+    type_id: u4,
+    length_code: u4,
+    is_null: bool,
+    length_bytes: usize = 0,
+};
+
+fn parseTypeDesc(b: u8) TypeDesc {
+    const type_id: u4 = @intCast(b >> 4);
+    const lc: u4 = @intCast(b & 0x0F);
+    return .{ .type_id = type_id, .length_code = lc, .is_null = lc == 15, .length_bytes = 0 };
+}
+
+fn isLeapYear(year: i32) bool {
+    if (@mod(year, 4) != 0) return false;
+    if (@mod(year, 100) != 0) return true;
+    return @mod(year, 400) == 0;
+}
+
+fn daysInMonth(year: i32, month: u8) u8 {
+    return switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeapYear(year)) 29 else 28,
+        else => 0,
+    };
+}
+
+fn typeIdToIonType(type_id: u4) ?value.IonType {
+    return switch (type_id) {
+        0 => .null,
+        1 => .bool,
+        2, 3 => .int,
+        4 => .float,
+        5 => .decimal,
+        6 => .timestamp,
+        7 => .symbol,
+        8 => .string,
+        9 => .clob,
+        10 => .blob,
+        11 => .list,
+        12 => .sexp,
+        13 => .@"struct",
+        else => null,
+    };
+}
+
+fn isSystemValue(elem: value.Element) bool {
+    if (elem.annotations.len == 1 and elem.value == .@"struct") {
+        const ann = elem.annotations[0].text orelse return false;
+        return std.mem.eql(u8, ann, "$ion_symbol_table") or std.mem.eql(u8, ann, "$ion_shared_symbol_table");
+    }
+    return false;
+}
+
+fn decodeBool(length_code: u4) IonError!value.Value {
+    return switch (length_code) {
+        0 => value.Value{ .bool = false },
+        1 => value.Value{ .bool = true },
+        15 => value.Value{ .null = .bool },
+        else => IonError.InvalidIon,
+    };
+}
+
+fn decodePosInt(body: []const u8) IonError!value.Value {
+    if (body.len == 0) return value.Value{ .int = 0 };
+    const mag = readFixedUInt(body) catch return IonError.InvalidIon;
+    if (mag > @as(u128, std.math.maxInt(i128))) return IonError.Unsupported;
+    return value.Value{ .int = @intCast(mag) };
+}
+
+fn decodeNegInt(body: []const u8) IonError!value.Value {
+    if (body.len == 0) return IonError.InvalidIon;
+    const mag = readFixedUInt(body) catch return IonError.InvalidIon;
+    if (mag == 0) return IonError.InvalidIon;
+    if (mag > @as(u128, std.math.maxInt(i128))) return IonError.Unsupported;
+    const v: i128 = @intCast(mag);
+    return value.Value{ .int = -v };
+}
+
+fn decodeFloat(body: []const u8) IonError!value.Value {
+    return switch (body.len) {
+        0 => value.Value{ .float = 0.0 },
+        4 => {
+            const bits = std.mem.readInt(u32, @as(*const [4]u8, @ptrCast(body[0..4].ptr)), .big);
+            const f32v: f32 = @bitCast(bits);
+            return value.Value{ .float = @as(f64, @floatCast(f32v)) };
+        },
+        8 => value.Value{ .float = @bitCast(std.mem.readInt(u64, @as(*const [8]u8, @ptrCast(body[0..8].ptr)), .big)) },
+        else => IonError.InvalidIon,
+    };
+}
+
+fn decodeDecimal(body: []const u8) IonError!value.Value {
+    if (body.len == 0) return value.Value{ .decimal = .{ .is_negative = false, .coefficient = 0, .exponent = 0 } };
+    var cursor: usize = 0;
+    const exp = try readVarInt(body, &cursor);
+    const coeff_bytes = body[cursor..];
+    if (coeff_bytes.len == 0) {
+        return value.Value{ .decimal = .{ .is_negative = false, .coefficient = 0, .exponent = @intCast(exp.value) } };
+    }
+    const coeff = try readFixedInt(coeff_bytes);
+    return value.Value{ .decimal = .{ .is_negative = coeff.is_negative, .coefficient = @intCast(coeff.magnitude), .exponent = @intCast(exp.value) } };
+}
+
+fn decodeString(body: []const u8) IonError!value.Value {
+    if (!std.unicode.utf8ValidateSlice(body)) return IonError.InvalidIon;
+    return value.Value{ .string = body };
+}
+
+fn readFixedUInt(body: []const u8) !u128 {
+    if (body.len > 16) return error.Overflow;
+    var v: u128 = 0;
+    for (body) |b| {
+        v = (v << 8) | b;
+    }
+    return v;
+}
+
+const FixedInt = struct {
+    is_negative: bool,
+    magnitude: u128,
+    is_negative_zero: bool,
+};
+
+fn readFixedInt(body: []const u8) IonError!FixedInt {
+    if (body.len == 0) return .{ .is_negative = false, .magnitude = 0, .is_negative_zero = false };
+    if (body.len > 16) return IonError.Unsupported;
+    const first = body[0];
+    const neg = (first & 0x80) != 0;
+    // Use a small stack buffer instead of allocations.
+    var buf: [16]u8 = undefined;
+    std.mem.copyForwards(u8, buf[0..body.len], body);
+    buf[0] &= 0x7F;
+    const mag = readFixedUInt(buf[0..body.len]) catch return IonError.InvalidIon;
+    return .{ .is_negative = neg, .magnitude = mag, .is_negative_zero = neg and mag == 0 };
+}
+
+const VarIntResult = struct {
+    value: i64,
+    is_negative_zero: bool,
+};
+
+fn readVarUInt(bytes: []const u8, cursor: *usize) IonError!u64 {
+    var v: u64 = 0;
+    var saw_end = false;
+    while (cursor.* < bytes.len) : (cursor.* += 1) {
+        const b = bytes[cursor.*];
+        const is_end = (b & 0x80) != 0;
+        v = (v << 7) | @as(u64, b & 0x7F);
+        if (is_end) {
+            cursor.* += 1;
+            saw_end = true;
+            break;
+        }
+    }
+    if (!saw_end) return IonError.Incomplete;
+    return v;
+}
+
+fn readVarInt(bytes: []const u8, cursor: *usize) IonError!VarIntResult {
+    if (cursor.* >= bytes.len) return IonError.Incomplete;
+    const first = bytes[cursor.*];
+    const sign = (first & 0x40) != 0;
+    var v: u64 = first & 0x3F;
+    cursor.* += 1;
+    if ((first & 0x80) != 0) {
+        if (v > @as(u64, std.math.maxInt(i64))) return IonError.Unsupported;
+        const mag: i64 = @intCast(v);
+        if (sign and mag == 0) return .{ .value = 0, .is_negative_zero = true };
+        return .{ .value = if (sign) -mag else mag, .is_negative_zero = false };
+    }
+
+    while (cursor.* < bytes.len) {
+        const b = bytes[cursor.*];
+        const is_end = (b & 0x80) != 0;
+        v = (v << 7) | @as(u64, b & 0x7F);
+        cursor.* += 1;
+        if (is_end) break;
+    }
+    if (cursor.* == 0 or (bytes[cursor.* - 1] & 0x80) == 0) return IonError.Incomplete;
+    if (v > @as(u64, std.math.maxInt(i64))) return IonError.Unsupported;
+    const mag: i64 = @intCast(v);
+    if (sign and mag == 0) return .{ .value = 0, .is_negative_zero = true };
+    return .{ .value = if (sign) -mag else mag, .is_negative_zero = false };
+}
+
+fn skipNop(slice: []const u8) IonError!usize {
+    if (slice.len == 0) return IonError.Incomplete;
+    const opcode = slice[0];
+    if ((opcode >> 4) != 0) return IonError.InvalidIon;
+    const lc: u4 = @intCast(opcode & 0x0F);
+    if (lc == 15) return IonError.InvalidIon;
+    var cursor: usize = 1;
+    var body_len: usize = 0;
+    if (lc < 14) {
+        body_len = @intCast(lc);
+    } else if (lc == 14) {
+        body_len = @intCast(try readVarUInt(slice, &cursor));
+    } else {
+        body_len = 0;
+    }
+    if (cursor + body_len > slice.len) return IonError.Incomplete;
+    return cursor + body_len;
+}

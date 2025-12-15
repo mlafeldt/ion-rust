@@ -1,19 +1,15 @@
+//! Zig test harness for the Ion Zig port.
+//!
+//! Walks `ion-tests/iontestdata` and enforces:
+//! - `bad/` files must be rejected
+//! - `good/equivs/` groups must be equivalent
+//! - `good/non-equivs/` groups must not be equivalent across members
+//! - `good/` roundtrips across a format matrix
+//!
+//! Some fixtures are intentionally skipped; each skip has an inline comment explaining why.
+
 const std = @import("std");
-
-extern fn ionrs_clear_error() void;
-extern fn ionrs_last_error_ptr() [*]const u8;
-extern fn ionrs_last_error_len() usize;
-
-extern fn ionrs_parse_ok(data: ?[*]const u8, len: usize) bool;
-extern fn ionrs_roundtrip_eq(data: ?[*]const u8, len: usize, format1: u32, format2: u32) bool;
-extern fn ionrs_check_equivs(data: ?[*]const u8, len: usize) bool;
-extern fn ionrs_check_non_equivs(data: ?[*]const u8, len: usize) bool;
-
-fn lastError(allocator: std.mem.Allocator) ![]u8 {
-    const ptr = ionrs_last_error_ptr();
-    const len = ionrs_last_error_len();
-    return try allocator.dupe(u8, ptr[0..len]);
-}
+const ion = @import("ion.zig");
 
 fn isSkipped(path: []const u8, skip_list: []const []const u8) bool {
     for (skip_list) |skip| {
@@ -62,49 +58,49 @@ fn walkAndTest(
 }
 
 const global_skip_list = [_][]const u8{
-    "ion-tests/iontestdata/bad/listWithValueLargerThanSize.10n",
-    "ion-tests/iontestdata/good/subfieldVarInt.ion",
-    "ion-tests/iontestdata/good/subfieldVarUInt.ion",
-    "ion-tests/iontestdata/good/subfieldVarUInt15bit.ion",
-    "ion-tests/iontestdata/good/subfieldVarUInt16bit.ion",
-    "ion-tests/iontestdata/good/subfieldVarUInt32bit.ion",
-    "ion-tests/iontestdata/good/typecodes/T7-large.10n",
-    "ion-tests/iontestdata/good/item1.10n",
-    "ion-tests/iontestdata/good/localSymbolTableImportZeroMaxId.ion",
-    "ion-tests/iontestdata/good/testfile35.ion",
-    "ion-tests/iontestdata/good/utf16.ion",
-    "ion-tests/iontestdata/good/utf32.ion",
-    "ion-tests/iontestdata/good/non-equivs/localSymbolTableWithAnnotations.ion",
-    "ion-tests/iontestdata/good/non-equivs/symbolTablesUnknownText.ion",
-    "ion-tests/iontestdata/good/intBigSize16.10n",
-    "ion-tests/iontestdata/good/intBigSize256.ion",
-    "ion-tests/iontestdata/good/intBigSize256.10n",
-    "ion-tests/iontestdata/good/intBigSize512.ion",
-    "ion-tests/iontestdata/good/intBigSize1201.10n",
-    "ion-tests/iontestdata/good/equivs/bigInts.ion",
-    "ion-tests/iontestdata/good/equivs/intsLargePositive3.10n",
-    "ion-tests/iontestdata/good/equivs/intsLargeNegative3.10n",
+    "ion-tests/iontestdata/bad/listWithValueLargerThanSize.10n", // Exercises binary container length edge cases; currently not enforced by the harness.
+    "ion-tests/iontestdata/good/subfieldVarInt.ion", // Subfield encodings are not implemented/preserved.
+    "ion-tests/iontestdata/good/subfieldVarUInt.ion", // Subfield encodings are not implemented/preserved.
+    "ion-tests/iontestdata/good/subfieldVarUInt15bit.ion", // Subfield encodings are not implemented/preserved.
+    "ion-tests/iontestdata/good/subfieldVarUInt16bit.ion", // Subfield encodings are not implemented/preserved.
+    "ion-tests/iontestdata/good/subfieldVarUInt32bit.ion", // Subfield encodings are not implemented/preserved.
+    "ion-tests/iontestdata/good/typecodes/T7-large.10n", // Depends on large/edge binary encodings not covered by this port.
+    "ion-tests/iontestdata/good/item1.10n", // Requires additional binary features beyond the current subset.
+    "ion-tests/iontestdata/good/localSymbolTableImportZeroMaxId.ion", // Full local symbol table import semantics not implemented.
+    "ion-tests/iontestdata/good/testfile35.ion", // Requires features not implemented yet (kept skipped to avoid misleading failures).
+    "ion-tests/iontestdata/good/utf16.ion", // Input is treated as UTF-8 bytes; UTF-16 decoding not implemented.
+    "ion-tests/iontestdata/good/utf32.ion", // Input is treated as UTF-8 bytes; UTF-32 decoding not implemented.
+    "ion-tests/iontestdata/good/non-equivs/localSymbolTableWithAnnotations.ion", // Symbol table + annotation interactions not fully modeled.
+    "ion-tests/iontestdata/good/non-equivs/symbolTablesUnknownText.ion", // Unknown-text symbol table behavior not fully modeled.
+    "ion-tests/iontestdata/good/intBigSize16.10n", // Exceeds i128 (this port stores ints in i128).
+    "ion-tests/iontestdata/good/intBigSize256.ion", // Exceeds i128 (this port stores ints in i128).
+    "ion-tests/iontestdata/good/intBigSize256.10n", // Exceeds i128 (this port stores ints in i128).
+    "ion-tests/iontestdata/good/intBigSize512.ion", // Exceeds i128 (this port stores ints in i128).
+    "ion-tests/iontestdata/good/intBigSize1201.10n", // Exceeds i128 (this port stores ints in i128).
+    "ion-tests/iontestdata/good/equivs/bigInts.ion", // Exceeds i128 (this port stores ints in i128).
+    "ion-tests/iontestdata/good/equivs/intsLargePositive3.10n", // Exceeds i128 (this port stores ints in i128).
+    "ion-tests/iontestdata/good/equivs/intsLargeNegative3.10n", // Exceeds i128 (this port stores ints in i128).
 };
 
 const round_trip_skip_list = [_][]const u8{
-    "ion-tests/iontestdata/good/item1.10n",
-    "ion-tests/iontestdata/good/localSymbolTableImportZeroMaxId.ion",
-    "ion-tests/iontestdata/good/notVersionMarkers.ion",
-    "ion-tests/iontestdata/good/subfieldInt.ion",
-    "ion-tests/iontestdata/good/subfieldUInt.ion",
-    "ion-tests/iontestdata/good/subfieldVarInt.ion",
-    "ion-tests/iontestdata/good/subfieldVarUInt.ion",
-    "ion-tests/iontestdata/good/subfieldVarUInt15bit.ion",
-    "ion-tests/iontestdata/good/subfieldVarUInt16bit.ion",
-    "ion-tests/iontestdata/good/subfieldVarUInt32bit.ion",
-    "ion-tests/iontestdata/good/utf16.ion",
-    "ion-tests/iontestdata/good/utf32.ion",
+    "ion-tests/iontestdata/good/item1.10n", // Requires additional binary features beyond the current subset; roundtrip would be misleading.
+    "ion-tests/iontestdata/good/localSymbolTableImportZeroMaxId.ion", // Full local symbol table import semantics not implemented; roundtrip is not meaningful.
+    "ion-tests/iontestdata/good/notVersionMarkers.ion", // Roundtrip can change how $ion_* tokens are interpreted/serialized; not implemented faithfully.
+    "ion-tests/iontestdata/good/subfieldInt.ion", // Subfield encodings are not preserved across serialize/parse.
+    "ion-tests/iontestdata/good/subfieldUInt.ion", // Subfield encodings are not preserved across serialize/parse.
+    "ion-tests/iontestdata/good/subfieldVarInt.ion", // Subfield encodings are not preserved across serialize/parse.
+    "ion-tests/iontestdata/good/subfieldVarUInt.ion", // Subfield encodings are not preserved across serialize/parse.
+    "ion-tests/iontestdata/good/subfieldVarUInt15bit.ion", // Subfield encodings are not preserved across serialize/parse.
+    "ion-tests/iontestdata/good/subfieldVarUInt16bit.ion", // Subfield encodings are not preserved across serialize/parse.
+    "ion-tests/iontestdata/good/subfieldVarUInt32bit.ion", // Subfield encodings are not preserved across serialize/parse.
+    "ion-tests/iontestdata/good/utf16.ion", // Input is treated as UTF-8 bytes; UTF-16 decoding not implemented.
+    "ion-tests/iontestdata/good/utf32.ion", // Input is treated as UTF-8 bytes; UTF-32 decoding not implemented.
 };
 
 const equivs_skip_list = [_][]const u8{
-    "ion-tests/iontestdata/good/equivs/localSymbolTableAppend.ion",
-    "ion-tests/iontestdata/good/equivs/localSymbolTableNullSlots.ion",
-    "ion-tests/iontestdata/good/equivs/nonIVMNoOps.ion",
+    "ion-tests/iontestdata/good/equivs/localSymbolTableAppend.ion", // Symbol table state across documents/values not fully modeled.
+    "ion-tests/iontestdata/good/equivs/localSymbolTableNullSlots.ion", // Symbol table null-slot equivalence not fully modeled.
+    "ion-tests/iontestdata/good/equivs/nonIVMNoOps.ion", // Non-IVM NOP stream equivalence not fully modeled.
 };
 
 fn concatSkipLists(allocator: std.mem.Allocator, lists: []const []const []const u8) ![][]const u8 {
@@ -132,15 +128,22 @@ test "ion-tests bad files reject" {
         &global_skip_list,
         struct {
             fn run(path: []const u8, data: []const u8) !void {
-                ionrs_clear_error();
-                const ok = ionrs_parse_ok(if (data.len == 0) null else data.ptr, data.len);
-                if (ok) {
+                const parsed = ion.parseDocument(std.testing.allocator, data);
+                if (parsed) |doc| {
+                    var d = doc;
+                    d.deinit();
                     std.debug.print("unexpectedly parsed bad file: {s}\n", .{path});
                     return error.UnexpectedSuccess;
-                }
+                } else |_| {}
             }
         }.run,
     );
+}
+
+test "zig ion parses simple text" {
+    var doc = try ion.parseDocument(std.testing.allocator, "1");
+    defer doc.deinit();
+    try std.testing.expect(doc.elements.len == 1);
 }
 
 test "ion-tests equiv groups" {
@@ -155,14 +158,10 @@ test "ion-tests equiv groups" {
         skip,
         struct {
             fn run(path: []const u8, data: []const u8) !void {
-                ionrs_clear_error();
-                const ok = ionrs_check_equivs(if (data.len == 0) null else data.ptr, data.len);
-                if (!ok) {
-                    const msg = try lastError(std.testing.allocator);
-                    defer std.testing.allocator.free(msg);
-                    std.debug.print("equivs failed: {s}\n{s}\n", .{ path, msg });
-                    return error.EquivsFailed;
-                }
+                checkGroup(data, true) catch |e| {
+                    std.debug.print("equivs failed: {s}: {s}\n", .{ path, @errorName(e) });
+                    return e;
+                };
             }
         }.run,
     );
@@ -178,14 +177,10 @@ test "ion-tests non-equiv groups" {
         &global_skip_list,
         struct {
             fn run(path: []const u8, data: []const u8) !void {
-                ionrs_clear_error();
-                const ok = ionrs_check_non_equivs(if (data.len == 0) null else data.ptr, data.len);
-                if (!ok) {
-                    const msg = try lastError(std.testing.allocator);
-                    defer std.testing.allocator.free(msg);
-                    std.debug.print("non-equivs failed: {s}\n{s}\n", .{ path, msg });
-                    return error.NonEquivsFailed;
-                }
+                checkGroup(data, false) catch |e| {
+                    std.debug.print("non-equivs failed: {s}: {s}\n", .{ path, @errorName(e) });
+                    return e;
+                };
             }
         }.run,
     );
@@ -221,24 +216,148 @@ test "ion-tests good roundtrip (format matrix)" {
         struct {
             fn run(path: []const u8, data: []const u8) !void {
                 for (format_pairs) |pair| {
-                    ionrs_clear_error();
-                    const ok = ionrs_roundtrip_eq(
-                        if (data.len == 0) null else data.ptr,
-                        data.len,
-                        pair.from,
-                        pair.to,
-                    );
-                    if (!ok) {
-                        const msg = try lastError(std.testing.allocator);
-                        defer std.testing.allocator.free(msg);
-                        std.debug.print(
-                            "roundtrip failed: {s} (formats {d}->{d})\n{s}\n",
-                            .{ path, pair.from, pair.to, msg },
-                        );
-                        return error.RoundTripFailed;
-                    }
+                    roundtripEq(std.testing.allocator, data, @enumFromInt(pair.from), @enumFromInt(pair.to)) catch |e| {
+                        std.debug.print("roundtrip failed: {s} (formats {d}->{d}): {s}\n", .{ path, pair.from, pair.to, @errorName(e) });
+                        return e;
+                    };
                 }
             }
         }.run,
     );
+}
+
+fn roundtripEq(allocator: std.mem.Allocator, data: []const u8, format1: ion.Format, format2: ion.Format) !void {
+    var src = try ion.parseDocument(allocator, data);
+    defer src.deinit();
+
+    const b1 = try ion.serializeDocument(allocator, format1, src.elements);
+    defer allocator.free(b1);
+    var d1 = try ion.parseDocument(allocator, b1);
+    defer d1.deinit();
+
+    const b2 = try ion.serializeDocument(allocator, format2, d1.elements);
+    defer allocator.free(b2);
+    var d2 = ion.parseDocument(allocator, b2) catch |e| {
+        if (format2 != .binary) {
+            std.debug.print("roundtrip produced unparsable text:\n{s}\n", .{b2});
+        }
+        return e;
+    };
+    defer d2.deinit();
+
+    if (!ion.eq.ionEqElements(src.elements, d2.elements)) {
+        const src_dbg = ion.serializeDocument(allocator, .text_pretty, src.elements) catch "";
+        defer if (src_dbg.len != 0) allocator.free(src_dbg);
+        const dst_dbg = ion.serializeDocument(allocator, .text_pretty, d2.elements) catch "";
+        defer if (dst_dbg.len != 0) allocator.free(dst_dbg);
+        if (src_dbg.len != 0 and dst_dbg.len != 0) {
+            std.debug.print("roundtrip mismatch src(pretty):\n{s}\n", .{src_dbg});
+            std.debug.print("roundtrip mismatch dst(pretty):\n{s}\n", .{dst_dbg});
+        }
+        return error.RoundTripFailed;
+    }
+}
+
+fn hasAnnotation(elem: ion.value.Element, text: []const u8) bool {
+    for (elem.annotations) |a| {
+        if (a.text) |t| {
+            if (std.mem.eql(u8, t, text)) return true;
+        }
+    }
+    return false;
+}
+
+fn parseEmbeddedDoc(elem: ion.value.Element) !ion.Document {
+    return switch (elem.value) {
+        .string => |s| try ion.parseDocument(std.testing.allocator, s),
+        .blob => |b| try ion.parseDocument(std.testing.allocator, b),
+        else => error.InvalidEmbeddedDocument,
+    };
+}
+
+fn checkGroup(data: []const u8, expect_equivs: bool) !void {
+    var doc = try ion.parseDocument(std.testing.allocator, data);
+    defer doc.deinit();
+
+    for (doc.elements) |group_container| {
+        const embedded = hasAnnotation(group_container, "embedded_documents");
+        switch (group_container.value) {
+            .list => |group| try compareGroupSequence(group, embedded, expect_equivs),
+            .sexp => |group| try compareGroupSequence(group, embedded, expect_equivs),
+            .@"struct" => |st| try compareGroupStruct(st, embedded, expect_equivs),
+            else => return error.InvalidGroupContainer,
+        }
+    }
+}
+
+fn compareGroupSequence(group: []const ion.value.Element, embedded: bool, expect_equivs: bool) !void {
+    var docs = std.ArrayListUnmanaged(ion.Document){};
+    defer {
+        for (docs.items) |*d| d.deinit();
+        docs.deinit(std.testing.allocator);
+    }
+
+    var elems = std.ArrayListUnmanaged(ion.value.Element){};
+    defer elems.deinit(std.testing.allocator);
+
+    if (embedded) {
+        for (group) |e| {
+            const d = try parseEmbeddedDoc(e);
+            docs.append(std.testing.allocator, d) catch return error.OutOfMemory;
+            const wrapper: ion.value.Element = .{ .annotations = &.{}, .value = ion.value.Value{ .sexp = d.elements } };
+            elems.append(std.testing.allocator, wrapper) catch return error.OutOfMemory;
+        }
+    } else {
+        elems.appendSlice(std.testing.allocator, group) catch return error.OutOfMemory;
+    }
+
+    const g = elems.items;
+    for (g, 0..) |a, i| {
+        for (g, 0..) |b, j| {
+            const eq = ion.eq.ionEqElement(a, b);
+            if (i == j) {
+                if (!eq) return error.IdentityNotEq;
+            } else if (expect_equivs) {
+                if (!eq) return error.ExpectedEquivsFailed;
+            } else {
+                if (eq) return error.ExpectedNonEquivsFailed;
+            }
+        }
+    }
+}
+
+fn compareGroupStruct(st: ion.value.Struct, embedded: bool, expect_equivs: bool) !void {
+    var docs = std.ArrayListUnmanaged(ion.Document){};
+    defer {
+        for (docs.items) |*d| d.deinit();
+        docs.deinit(std.testing.allocator);
+    }
+
+    var values = std.ArrayListUnmanaged(ion.value.Element){};
+    defer values.deinit(std.testing.allocator);
+
+    if (embedded) {
+        for (st.fields) |f| {
+            const d = try parseEmbeddedDoc(f.value);
+            docs.append(std.testing.allocator, d) catch return error.OutOfMemory;
+            const wrapper: ion.value.Element = .{ .annotations = &.{}, .value = ion.value.Value{ .sexp = d.elements } };
+            values.append(std.testing.allocator, wrapper) catch return error.OutOfMemory;
+        }
+    } else {
+        for (st.fields) |f| values.append(std.testing.allocator, f.value) catch return error.OutOfMemory;
+    }
+
+    const g = values.items;
+    for (g, 0..) |a, i| {
+        for (g, 0..) |b, j| {
+            const eq = ion.eq.ionEqElement(a, b);
+            if (i == j) {
+                if (!eq) return error.IdentityNotEq;
+            } else if (expect_equivs) {
+                if (!eq) return error.ExpectedEquivsFailed;
+            } else {
+                if (eq) return error.ExpectedNonEquivsFailed;
+            }
+        }
+    }
 }

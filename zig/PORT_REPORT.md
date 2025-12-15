@@ -1,0 +1,213 @@
+# Ion Zig Port Report (`zig/`)
+
+## Overview
+
+This repository contains a Zig 0.15.2 implementation of an Amazon Ion reader/writer under `zig/`, plus a Zig-only test harness that exercises the official `ion-tests/iontestdata` corpus.
+
+Key properties:
+
+1) No original Rust code removed; the port lives under `zig/`.
+2) Zig toolchain: tested with `/opt/homebrew/bin/zig` (Zig 0.15.2).
+3) Tests run via Zig only: `cd zig && /opt/homebrew/bin/zig build test --summary all`.
+4) “All tests pass” means: all tests in the Zig harness pass, with an explicit skip list of currently-out-of-scope fixtures documented in `zig/src/tests.zig`.
+
+## What’s implemented
+
+### High-level API
+
+- `zig/src/ion.zig`
+  - `parseDocument(allocator, bytes)`:
+    - Detects binary Ion 1.0 via IVM (`E0 01 00 EA`) and dispatches to the binary parser.
+    - Otherwise parses as text Ion.
+  - `serializeDocument(allocator, format, elements)`:
+    - Supports `Format.binary`, and text formats (compact/lines/pretty) via the text writer.
+  - `Document` owns an arena and a slice of parsed `Element`s; `deinit()` frees the arena.
+
+### Data model
+
+- `zig/src/ion/value.zig`
+  - Arena allocator (`value.Arena`) for all parsed/created values.
+  - `Value` union over Ion types.
+  - `Element` = `{ annotations: []Symbol, value: Value }`.
+  - `Symbol` tracks both `sid` (optional) and `text` (optional).
+
+### Text Ion parsing
+
+- `zig/src/ion/text.zig`
+  - Parses top-level streams and containers: lists, sexps, structs.
+  - Literals implemented: nulls, bool, ints, floats (`nan`, `±inf`), decimals, timestamps, strings, symbols, clobs/blobs.
+  - Local symbol tables: minimal `$ion_symbol_table::{symbols:[...]}` support sufficient for ion-tests needs.
+  - Whitespace handling includes HT/VT/FF/CR/LF per corpus expectations.
+  - Includes a debugging helper `parseTopLevelWithErrorIndex(...)` intended for ad-hoc repro tooling.
+
+### Binary Ion 1.0 parsing
+
+- `zig/src/ion/binary.zig`
+  - Parses binary Ion 1.0 TLV stream after IVM.
+  - Handles:
+    - Annotation wrappers (T14)
+    - NOP pads (T0) (and rejects null.nop)
+    - Containers: list/sexp/struct (including NOP padding inside)
+    - Numerics, decimals, timestamps, strings, clobs, blobs, symbols
+    - Local symbol tables
+    - IVM appearing inside the stream (ignored if it’s `E0 01 00 EA`)
+    - “Ordered struct” encoding variant (as used by ion-tests)
+
+### Writer (text + binary)
+
+- `zig/src/ion/writer.zig`
+  - Binary writer:
+    - Emits IVM.
+    - Emits a basic local symbol table for newly encountered symbol text.
+    - Writes values with correct Ion binary encodings for supported types.
+    - Handles signed-magnitude integer fields in decimals and timestamp fractionals (sign-bit padding rules).
+  - Text writer:
+    - Produces legal text Ion consumable by our parser and by ion-tests expectations.
+    - Handles timestamps with correct “trailing `T`” rules at year/month precision.
+    - Uses `\\xNN` escapes for non-ASCII bytes in clobs.
+    - Avoids accidental string literal concatenation by alternating short (`"..."`) and long (`'''...'''`) forms for adjacent string values at top-level and in sexps.
+
+### Equality semantics
+
+- `zig/src/ion/eq.zig`
+  - Structural equality for values/elements to support equiv/non-equiv fixtures and roundtrip checks.
+  - Notably:
+    - NaN equals NaN for equivalence purposes.
+    - Signed zero for floats treated distinctly.
+    - Struct field comparison is order-insensitive.
+
+## Tests and harness
+
+- `zig/src/tests.zig` is a Zig test suite that walks `ion-tests/iontestdata` and enforces:
+  - `bad/` must reject
+  - `good/equivs/` groups must all be equivalent
+  - `good/non-equivs/` groups must not be equivalent across group members
+  - `good/` roundtrip through a format matrix (binary/text variants)
+
+### Skip list
+
+There are intentional skips, each with an inline comment explaining why:
+
+- `global_skip_list`: skipped everywhere (bad/good/equivs/non-equivs/roundtrip)
+- `round_trip_skip_list`: skipped only for the roundtrip matrix
+- `equivs_skip_list`: skipped only for equiv grouping
+
+See `zig/src/tests.zig` for the exact items and reasons.
+
+## To-dos (to remove skips / broaden coverage)
+
+### 1) Big integers (> i128)
+
+Currently skipped fixtures contain integers larger than `i128`.
+
+Options:
+
+- Implement BigInt and update `Value.int`, parsers/writers, and equality.
+
+### 2) UTF-16 / UTF-32 text inputs
+
+`utf16.ion` / `utf32.ion` are skipped because the parser assumes UTF-8 bytes.
+
+Options:
+
+- Add BOM/encoding detection and transcode to UTF-8 before parsing.
+
+### 3) Full symbol table/import semantics
+
+Some symbol-table-heavy fixtures are skipped (imports, unknown text behaviors, annotation interactions with symbol tables).
+
+Options:
+
+- Expand symbol table model:
+  - imports: shared symbol tables, versioning, max_id rules
+  - unknown slots behavior through parsing/writing
+  - persist symbol table context appropriately through embedded documents and across stream segments
+
+### 4) Subfield encodings / bit-level preservation
+
+The `subfield*` fixtures are skipped for roundtrip because the writer doesn’t preserve those encoding-specific forms.
+
+Options:
+
+1) parse-only correctness
+2) canonical re-encoding
+3) preserve exact subfield encoding forms
+
+### 5) `typecodes/T7-large.10n`, `item1.10n`, `testfile35.ion`
+
+These are currently marked “requires additional features beyond the subset”. The next step is to identify the missing constructs each file uses and implement them.
+
+## Gotchas encountered (and fixes)
+
+### 1) Triple-quote field names vs quoted symbols
+
+Ion allows struct field names that are strings (short and long). `'''foo'''` field names were initially misparsed as quoted symbols because both start with `'`.
+
+Fix: in `parseFieldName`, check `startsWith(\"'''\")` before `startsWith(\"'\")`.
+
+### 2) `+` handling inside s-expressions
+
+`(+1)` must tokenize as `'+'` and `1` (not `+1` as a number).
+
+Fix: rely on sexp tokenization rules rather than forcing leading `+` to always become a symbol.
+
+### 3) Decimal encoding sign-bit rules (binary)
+
+Ion decimal coefficient is a signed-magnitude integer field. If the magnitude’s high bit would be 1, positive values must be prefixed with `0x00` to keep the sign bit clear; negative values may need `0x80` prefix.
+
+Fix: `writeDecimalBinary` prefixes `0x00` for positive coefficients with MSB set, and handles negative sign-bit/prefix rules.
+
+### 4) NOP pads inside structs with non-zero SIDs
+
+The corpus includes cases where a struct field name is followed by a NOP (padding) before the value, and the field name SID can be non-zero.
+
+Fix: in `decodeStruct`, treat `(sid, nop)` pairs as padding regardless of sid value, and continue scanning.
+
+### 5) “Ordered struct” binary encoding
+
+Some `.10n` fixtures use Ion’s ordered struct encoding (where the length code encodes the size of the length field).
+
+Fix: implement ordered-struct detection/decoding for T13 with length codes < 14, and reject empty ordered structs per corpus.
+
+### 6) Line comments with CR (old Mac EOL)
+
+`//` comments must terminate at either `\\n` or `\\r`, not just `\\n`.
+
+Fix: `skipWsComments` ends line comments on `\\r` too.
+
+### 7) Special whitespace/control characters in strings/symbols
+
+Some fixtures include literal HT/VT/FF inside quoted strings and quoted symbols.
+
+Fix: allow `\\t`, `0x0B`, `0x0C` where corpus expects it.
+
+### 8) Clob non-ASCII bytes
+
+Binary clobs can contain bytes ≥ `0x80`. When emitting text clobs, those must be escaped so the text parser can accept them as bytes.
+
+Fix: writer emits `\\xNN` for non-ASCII bytes in clobs; parser accepts `\\xNN` into clobs as raw bytes.
+
+### 9) Avoiding accidental string concatenation in emitted text
+
+Ion text concatenates adjacent string literals. A naive printer can accidentally merge consecutive string values.
+
+Fix: text writer alternates short/long string literal styles for adjacent string values.
+
+## Fun facts / notable behavior choices
+
+1) `$0` is treated as “unknown symbol”; it’s allowed in annotations and as a struct field name, but unresolved non-zero `$sid` must map to symbol text (else invalid), matching corpus expectations.
+2) Lists require commas; sexps do not allow commas, matching “bad” fixtures.
+3) Timestamps are validated tightly (ranges, precision rules, explicit offsets for time precision).
+4) Binary streams can contain IVM mid-stream; the parser tolerates Ion 1.0 IVM and ignores it.
+
+## Repo pointers
+
+- Entry API: `zig/src/ion.zig`
+- Data model: `zig/src/ion/value.zig`
+- Text parser: `zig/src/ion/text.zig`
+- Binary parser: `zig/src/ion/binary.zig`
+- Writer: `zig/src/ion/writer.zig`
+- Equality: `zig/src/ion/eq.zig`
+- Test harness & skip reasons: `zig/src/tests.zig`
+- Zig build (Zig-only tests): `zig/build.zig`
+
