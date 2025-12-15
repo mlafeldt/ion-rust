@@ -58,30 +58,10 @@ fn walkAndTest(
 }
 
 const global_skip_list = [_][]const u8{
-    "ion-tests/iontestdata/good/subfieldVarInt.ion", // Subfield encodings are not implemented/preserved.
-    "ion-tests/iontestdata/good/subfieldVarUInt.ion", // Subfield encodings are not implemented/preserved.
-    "ion-tests/iontestdata/good/subfieldVarUInt15bit.ion", // Subfield encodings are not implemented/preserved.
-    "ion-tests/iontestdata/good/subfieldVarUInt16bit.ion", // Subfield encodings are not implemented/preserved.
-    "ion-tests/iontestdata/good/subfieldVarUInt32bit.ion", // Subfield encodings are not implemented/preserved.
-    "ion-tests/iontestdata/good/intBigSize16.10n", // Exceeds i128 (this port stores ints in i128).
-    "ion-tests/iontestdata/good/intBigSize256.ion", // Exceeds i128 (this port stores ints in i128).
-    "ion-tests/iontestdata/good/intBigSize256.10n", // Exceeds i128 (this port stores ints in i128).
-    "ion-tests/iontestdata/good/intBigSize512.ion", // Exceeds i128 (this port stores ints in i128).
-    "ion-tests/iontestdata/good/intBigSize1201.10n", // Exceeds i128 (this port stores ints in i128).
-    "ion-tests/iontestdata/good/equivs/bigInts.ion", // Exceeds i128 (this port stores ints in i128).
-    "ion-tests/iontestdata/good/equivs/intsLargePositive3.10n", // Exceeds i128 (this port stores ints in i128).
-    "ion-tests/iontestdata/good/equivs/intsLargeNegative3.10n", // Exceeds i128 (this port stores ints in i128).
 };
 
 const round_trip_skip_list = [_][]const u8{
     "ion-tests/iontestdata/good/notVersionMarkers.ion", // Roundtrip can change how $ion_* tokens are interpreted/serialized; not implemented faithfully.
-    "ion-tests/iontestdata/good/subfieldInt.ion", // Subfield encodings are not preserved across serialize/parse.
-    "ion-tests/iontestdata/good/subfieldUInt.ion", // Subfield encodings are not preserved across serialize/parse.
-    "ion-tests/iontestdata/good/subfieldVarInt.ion", // Subfield encodings are not preserved across serialize/parse.
-    "ion-tests/iontestdata/good/subfieldVarUInt.ion", // Subfield encodings are not preserved across serialize/parse.
-    "ion-tests/iontestdata/good/subfieldVarUInt15bit.ion", // Subfield encodings are not preserved across serialize/parse.
-    "ion-tests/iontestdata/good/subfieldVarUInt16bit.ion", // Subfield encodings are not preserved across serialize/parse.
-    "ion-tests/iontestdata/good/subfieldVarUInt32bit.ion", // Subfield encodings are not preserved across serialize/parse.
 };
 
 const equivs_skip_list = [_][]const u8{

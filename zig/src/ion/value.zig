@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const IonError = @import("../ion.zig").IonError;
+const big = std.math.big.int;
 
 /// Arena allocator used by the parser to allocate all decoded values for a document.
 pub const Arena = struct {
@@ -70,8 +71,16 @@ pub const Annotations = []Symbol;
 pub const Decimal = struct {
     // Strict representation; Ion equivalence is representation-sensitive.
     is_negative: bool,
-    coefficient: i128,
+    // Always stores the magnitude (non-negative). The sign is stored separately in `is_negative`
+    // so we can represent negative zero.
+    coefficient: Int,
     exponent: i32,
+};
+
+/// Ion integer representation.
+pub const Int = union(enum) {
+    small: i128,
+    big: big.Managed,
 };
 
 /// Ion timestamp representation (strict / representation-sensitive where applicable).
@@ -105,7 +114,7 @@ pub const Struct = struct {
 pub const Value = union(IonType) {
     null: IonType, // typed null; value is IonType tag of the null (or .null)
     bool: bool,
-    int: i128,
+    int: Int,
     float: f64,
     decimal: Decimal,
     timestamp: Timestamp,

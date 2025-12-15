@@ -188,10 +188,10 @@ const Decoder = struct {
         return switch (td.type_id) {
             0 => return IonError.InvalidIon, // NOP should be handled outside
             1 => return IonError.InvalidIon, // handled above
-            2 => try decodePosInt(body),
-            3 => try decodeNegInt(body),
+            2 => try decodePosInt(self.arena, body),
+            3 => try decodeNegInt(self.arena, body),
             4 => try decodeFloat(body),
-            5 => try decodeDecimal(body),
+            5 => try decodeDecimal(self.arena, body),
             6 => try self.decodeTimestamp(body),
             7 => try self.decodeSymbol(body),
             8 => try decodeString(body),
@@ -262,7 +262,7 @@ const Decoder = struct {
         return value.makeSymbolId(sid, null);
     }
 
-    fn decodeTimestamp(_: *Decoder, body: []const u8) IonError!value.Value {
+    fn decodeTimestamp(self: *Decoder, body: []const u8) IonError!value.Value {
         var cursor: usize = 0;
         const offset = try readVarInt(body, &cursor);
         const year = try readVarUInt(body, &cursor);
@@ -318,27 +318,42 @@ const Decoder = struct {
         if (cursor >= body.len) return value.Value{ .timestamp = ts };
         const frac_exp = try readVarInt(body, &cursor);
         const frac_bytes = body[cursor..];
-        const coeff_int = try readFixedInt(frac_bytes);
-        if (coeff_int.is_negative and coeff_int.magnitude != 0) return IonError.InvalidIon;
+        const coeff_int = try readFixedIntAny(self.arena, frac_bytes);
+        const mag_is_zero = switch (coeff_int.magnitude) {
+            .small => |v| v == 0,
+            .big => |v| v.eqlZero(),
+        };
+        if (coeff_int.is_negative and !mag_is_zero) return IonError.InvalidIon;
         const mag = coeff_int.magnitude;
         // Fractional seconds must be a proper fraction: 0 <= value < 1.
         if (frac_exp.is_negative_zero) return IonError.InvalidIon;
         const exp_i32: i32 = @intCast(frac_exp.value);
-        if (mag != 0 and exp_i32 >= 0) return IonError.InvalidIon;
-        if (mag != 0 and exp_i32 < 0) {
+        if (!mag_is_zero and exp_i32 >= 0) return IonError.InvalidIon;
+        if (!mag_is_zero and exp_i32 < 0) {
             const scale: usize = @intCast(-exp_i32);
-            var digits: usize = 0;
-            var tmp: u128 = mag;
-            while (tmp != 0) : (tmp /= 10) digits += 1;
+            const digits: usize = switch (mag) {
+                .small => |v| blk: {
+                    var digits_n: usize = 0;
+                    var tmp: u128 = @intCast(v);
+                    while (tmp != 0) : (tmp /= 10) digits_n += 1;
+                    break :blk digits_n;
+                },
+                .big => |v| blk: {
+                    var abs_mag = v;
+                    abs_mag.abs();
+                    const s = abs_mag.toString(self.arena.allocator(), 10, .lower) catch return IonError.OutOfMemory;
+                    break :blk s.len;
+                },
+            };
             if (digits > scale) return IonError.InvalidIon;
         }
         // 0d0 is equivalent to having no fractional seconds field.
-        if (mag == 0 and exp_i32 == 0) {
+        if (mag_is_zero and exp_i32 == 0) {
             ts.fractional = null;
             ts.precision = .second;
             return value.Value{ .timestamp = ts };
         }
-        ts.fractional = .{ .is_negative = false, .coefficient = @intCast(mag), .exponent = exp_i32 };
+        ts.fractional = .{ .is_negative = false, .coefficient = mag, .exponent = exp_i32 };
         ts.precision = .fractional;
         return value.Value{ .timestamp = ts };
     }
@@ -365,7 +380,10 @@ const Decoder = struct {
                 }
                 if (std.mem.eql(u8, fname, "version")) {
                     if (f.value.value != .int) return IonError.InvalidIon;
-                    const v_i = f.value.value.int;
+                    const v_i = switch (f.value.value.int) {
+                        .small => |v| v,
+                        .big => return IonError.InvalidIon,
+                    };
                     if (v_i <= 0 or v_i > std.math.maxInt(u32)) return IonError.InvalidIon;
                     version = @intCast(v_i);
                     continue;
@@ -450,14 +468,20 @@ const Decoder = struct {
                     }
                     if (std.mem.eql(u8, nn, "version")) {
                         if (ff.value.value != .int) return IonError.InvalidIon;
-                        const v_i = ff.value.value.int;
+                        const v_i = switch (ff.value.value.int) {
+                            .small => |v| v,
+                            .big => return IonError.InvalidIon,
+                        };
                         if (v_i <= 0 or v_i > std.math.maxInt(u32)) return IonError.InvalidIon;
                         version = @intCast(v_i);
                         continue;
                     }
                     if (std.mem.eql(u8, nn, "max_id")) {
                         if (ff.value.value != .int) return IonError.InvalidIon;
-                        const m_i = ff.value.value.int;
+                        const m_i = switch (ff.value.value.int) {
+                            .small => |v| v,
+                            .big => return IonError.InvalidIon,
+                        };
                         if (m_i < 0 or m_i > std.math.maxInt(u32)) return IonError.InvalidIon;
                         max_id = @intCast(m_i);
                         continue;
@@ -619,20 +643,39 @@ fn decodeBool(length_code: u4) IonError!value.Value {
     };
 }
 
-fn decodePosInt(body: []const u8) IonError!value.Value {
-    if (body.len == 0) return value.Value{ .int = 0 };
-    const mag = readFixedUInt(body) catch return IonError.InvalidIon;
-    if (mag > @as(u128, std.math.maxInt(i128))) return IonError.Unsupported;
-    return value.Value{ .int = @intCast(mag) };
+fn decodePosInt(arena: *value.Arena, body: []const u8) IonError!value.Value {
+    if (body.len == 0) return value.Value{ .int = .{ .small = 0 } };
+    if (body.len <= 16) {
+        const mag = readFixedUInt(body) catch return IonError.InvalidIon;
+        if (mag <= @as(u128, std.math.maxInt(i128))) {
+            return value.Value{ .int = .{ .small = @intCast(mag) } };
+        }
+        var bi = try bigIntFromMagnitudeBytes(arena, body);
+        bi.setSign(true);
+        return value.Value{ .int = .{ .big = bi } };
+    }
+    var bi = try bigIntFromMagnitudeBytes(arena, body);
+    bi.setSign(true);
+    return value.Value{ .int = .{ .big = bi } };
 }
 
-fn decodeNegInt(body: []const u8) IonError!value.Value {
+fn decodeNegInt(arena: *value.Arena, body: []const u8) IonError!value.Value {
     if (body.len == 0) return IonError.InvalidIon;
-    const mag = readFixedUInt(body) catch return IonError.InvalidIon;
-    if (mag == 0) return IonError.InvalidIon;
-    if (mag > @as(u128, std.math.maxInt(i128))) return IonError.Unsupported;
-    const v: i128 = @intCast(mag);
-    return value.Value{ .int = -v };
+    if (body.len <= 16) {
+        const mag = readFixedUInt(body) catch return IonError.InvalidIon;
+        if (mag == 0) return IonError.InvalidIon;
+        if (mag <= @as(u128, std.math.maxInt(i128))) {
+            const v: i128 = @intCast(mag);
+            return value.Value{ .int = .{ .small = -v } };
+        }
+        var bi = try bigIntFromMagnitudeBytes(arena, body);
+        bi.setSign(false);
+        return value.Value{ .int = .{ .big = bi } };
+    }
+    if (allZero(body)) return IonError.InvalidIon;
+    var bi = try bigIntFromMagnitudeBytes(arena, body);
+    bi.setSign(false);
+    return value.Value{ .int = .{ .big = bi } };
 }
 
 fn decodeFloat(body: []const u8) IonError!value.Value {
@@ -648,16 +691,73 @@ fn decodeFloat(body: []const u8) IonError!value.Value {
     };
 }
 
-fn decodeDecimal(body: []const u8) IonError!value.Value {
-    if (body.len == 0) return value.Value{ .decimal = .{ .is_negative = false, .coefficient = 0, .exponent = 0 } };
+fn decodeDecimal(arena: *value.Arena, body: []const u8) IonError!value.Value {
+    if (body.len == 0) return value.Value{ .decimal = .{ .is_negative = false, .coefficient = .{ .small = 0 }, .exponent = 0 } };
     var cursor: usize = 0;
     const exp = try readVarInt(body, &cursor);
     const coeff_bytes = body[cursor..];
     if (coeff_bytes.len == 0) {
-        return value.Value{ .decimal = .{ .is_negative = false, .coefficient = 0, .exponent = @intCast(exp.value) } };
+        return value.Value{ .decimal = .{ .is_negative = false, .coefficient = .{ .small = 0 }, .exponent = @intCast(exp.value) } };
     }
-    const coeff = try readFixedInt(coeff_bytes);
-    return value.Value{ .decimal = .{ .is_negative = coeff.is_negative, .coefficient = @intCast(coeff.magnitude), .exponent = @intCast(exp.value) } };
+
+    const fixed = try readFixedIntAny(arena, coeff_bytes);
+    return value.Value{ .decimal = .{
+        .is_negative = fixed.is_negative,
+        .coefficient = fixed.magnitude,
+        .exponent = @intCast(exp.value),
+    } };
+}
+
+const FixedIntAny = struct {
+    is_negative: bool,
+    magnitude: value.Int, // non-negative magnitude
+    is_negative_zero: bool,
+};
+
+fn readFixedIntAny(arena: *value.Arena, body: []const u8) IonError!FixedIntAny {
+    if (body.len == 0) return .{ .is_negative = false, .magnitude = .{ .small = 0 }, .is_negative_zero = false };
+    const neg = (body[0] & 0x80) != 0;
+    if (body.len <= 16) {
+        var buf: [16]u8 = undefined;
+        std.mem.copyForwards(u8, buf[0..body.len], body);
+        buf[0] &= 0x7F;
+        const mag = readFixedUInt(buf[0..body.len]) catch return IonError.InvalidIon;
+        const mag_i: i128 = @intCast(mag);
+        return .{
+            .is_negative = neg,
+            .magnitude = .{ .small = mag_i },
+            .is_negative_zero = neg and mag == 0,
+        };
+    }
+
+    // Big magnitude.
+    var mag_bytes = try arena.allocator().dupe(u8, body);
+    mag_bytes[0] &= 0x7F;
+    const is_zero = allZero(mag_bytes);
+    var bi = try bigIntFromMagnitudeBytes(arena, mag_bytes);
+    bi.setSign(true);
+    return .{
+        .is_negative = neg,
+        .magnitude = .{ .big = bi },
+        .is_negative_zero = neg and is_zero,
+    };
+}
+
+fn allZero(bytes: []const u8) bool {
+    for (bytes) |b| if (b != 0) return false;
+    return true;
+}
+
+fn bigIntFromMagnitudeBytes(arena: *value.Arena, magnitude_be: []const u8) IonError!std.math.big.int.Managed {
+    var bi = std.math.big.int.Managed.init(arena.allocator()) catch return IonError.OutOfMemory;
+    const hex = arena.allocator().alloc(u8, magnitude_be.len * 2) catch return IonError.OutOfMemory;
+    const table = "0123456789abcdef";
+    for (magnitude_be, 0..) |b, i| {
+        hex[2 * i] = table[b >> 4];
+        hex[2 * i + 1] = table[b & 0x0F];
+    }
+    bi.setString(16, hex) catch return IonError.InvalidIon;
+    return bi;
 }
 
 fn decodeString(body: []const u8) IonError!value.Value {

@@ -401,25 +401,65 @@ fn writeBoolBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8
     try appendByte(out, allocator, (@as(u8, 1) << 4) | lc);
 }
 
-fn writeIntBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), i: i128) IonError!void {
-    if (i == 0) {
-        try appendByte(out, allocator, (2 << 4) | 0);
-        return;
+fn writeIntBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), i: value.Int) IonError!void {
+    const IntSign = enum { pos, neg };
+    var sign: IntSign = .pos;
+
+    switch (i) {
+        .small => |v| {
+            if (v == 0) {
+                try appendByte(out, allocator, (2 << 4) | 0);
+                return;
+            }
+            if (v < 0) sign = .neg;
+            if (v < 0 and v == std.math.minInt(i128)) return IonError.Unsupported;
+            const mag_u128: u128 = if (v < 0) @intCast(@abs(v)) else @intCast(v);
+            var mag_buf: [16]u8 = undefined;
+            var n: usize = 16;
+            var tmp = mag_u128;
+            while (tmp != 0) : (tmp >>= 8) {
+                n -= 1;
+                mag_buf[n] = @intCast(tmp & 0xFF);
+            }
+            const body = mag_buf[n..16];
+            const type_id: u8 = if (sign == .neg) 3 else 2;
+            try writeTypedValueHeader(allocator, out, type_id, body.len);
+            try appendSlice(out, allocator, body);
+        },
+        .big => |bint| {
+            var mag = bint; // copy
+            if (mag.eqlZero()) {
+                try appendByte(out, allocator, (2 << 4) | 0);
+                return;
+            }
+            if (!mag.isPositive()) {
+                sign = .neg;
+                mag.abs();
+            }
+
+            var hex = mag.toString(allocator, 16, .lower) catch return IonError.OutOfMemory;
+            defer allocator.free(hex);
+            if ((hex.len & 1) == 1) {
+                const padded = allocator.alloc(u8, hex.len + 1) catch return IonError.OutOfMemory;
+                padded[0] = '0';
+                @memcpy(padded[1..], hex);
+                allocator.free(hex);
+                hex = padded;
+            }
+            const bytes = allocator.alloc(u8, hex.len / 2) catch return IonError.OutOfMemory;
+            defer allocator.free(bytes);
+            var j: usize = 0;
+            while (j < bytes.len) : (j += 1) {
+                const hi = std.fmt.charToDigit(hex[2 * j], 16) catch return IonError.InvalidIon;
+                const lo = std.fmt.charToDigit(hex[2 * j + 1], 16) catch return IonError.InvalidIon;
+                bytes[j] = @intCast((hi << 4) | lo);
+            }
+
+            const type_id: u8 = if (sign == .neg) 3 else 2;
+            try writeTypedValueHeader(allocator, out, type_id, bytes.len);
+            try appendSlice(out, allocator, bytes);
+        },
     }
-    const neg = i < 0;
-    if (neg and i == std.math.minInt(i128)) return IonError.Unsupported;
-    const mag_u128: u128 = if (neg) @intCast(@abs(i)) else @intCast(i);
-    var mag_buf: [16]u8 = undefined;
-    var n: usize = 16;
-    var tmp = mag_u128;
-    while (tmp != 0) : (tmp >>= 8) {
-        n -= 1;
-        mag_buf[n] = @intCast(tmp & 0xFF);
-    }
-    const body = mag_buf[n..16];
-    const type_id: u8 = if (neg) 3 else 2;
-    try writeTypedValueHeader(allocator, out, type_id, body.len);
-    try appendSlice(out, allocator, body);
 }
 
 fn writeFloatBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), f: f64) IonError!void {
@@ -434,7 +474,11 @@ fn writeFloatBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u
 }
 
 fn writeDecimalBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), d: value.Decimal) IonError!void {
-    if (d.coefficient == 0 and d.exponent == 0 and !d.is_negative) {
+    const coeff_is_zero = switch (d.coefficient) {
+        .small => |v| v == 0,
+        .big => |v| v.eqlZero(),
+    };
+    if (coeff_is_zero and d.exponent == 0 and !d.is_negative) {
         try appendByte(out, allocator, (5 << 4) | 0);
         return;
     }
@@ -444,20 +488,52 @@ fn writeDecimalBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged
 
     try writeVarInt(allocator, &body, d.exponent);
 
-    if (d.coefficient == 0) {
+    if (coeff_is_zero) {
         if (d.is_negative) {
             // negative zero as Int field
             try appendByte(&body, allocator, 0x80);
         }
     } else {
         var mag_buf: [16]u8 = undefined;
-        var n: usize = 16;
-        var tmp: u128 = @intCast(d.coefficient);
-        while (tmp != 0) : (tmp >>= 8) {
-            n -= 1;
-            mag_buf[n] = @intCast(tmp & 0xFF);
+        var bytes: []u8 = undefined;
+        var bytes_owned: ?[]u8 = null;
+        defer if (bytes_owned) |b| allocator.free(b);
+
+        switch (d.coefficient) {
+            .small => |v| {
+                if (v < 0) return IonError.InvalidIon;
+                var n: usize = 16;
+                var tmp: u128 = @intCast(v);
+                while (tmp != 0) : (tmp >>= 8) {
+                    n -= 1;
+                    mag_buf[n] = @intCast(tmp & 0xFF);
+                }
+                bytes = mag_buf[n..16];
+            },
+            .big => |bint| {
+                var mag = bint;
+                mag.abs();
+                var hex = mag.toString(allocator, 16, .lower) catch return IonError.OutOfMemory;
+                defer allocator.free(hex);
+                if ((hex.len & 1) == 1) {
+                    const padded = allocator.alloc(u8, hex.len + 1) catch return IonError.OutOfMemory;
+                    padded[0] = '0';
+                    @memcpy(padded[1..], hex);
+                    allocator.free(hex);
+                    hex = padded;
+                }
+                const tmp_bytes = allocator.alloc(u8, hex.len / 2) catch return IonError.OutOfMemory;
+                bytes_owned = tmp_bytes;
+                var j: usize = 0;
+                while (j < tmp_bytes.len) : (j += 1) {
+                    const hi = std.fmt.charToDigit(hex[2 * j], 16) catch return IonError.InvalidIon;
+                    const lo = std.fmt.charToDigit(hex[2 * j + 1], 16) catch return IonError.InvalidIon;
+                    tmp_bytes[j] = @intCast((hi << 4) | lo);
+                }
+                bytes = tmp_bytes;
+            },
         }
-        var bytes = mag_buf[n..16];
+
         if (d.is_negative) {
             // Decimal coefficient is a signed-magnitude Int field; if the top bit is already set,
             // we need an extra leading byte to avoid losing a magnitude bit.
@@ -525,19 +601,55 @@ fn writeTimestampBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanag
     const frac = ts.fractional orelse return IonError.InvalidIon;
     try writeVarInt(allocator, &body, frac.exponent);
     // coefficient as Int field (fixed-length signed magnitude)
-    if (frac.coefficient == 0) {
+    const frac_coeff_is_zero = switch (frac.coefficient) {
+        .small => |v| v == 0,
+        .big => |v| v.eqlZero(),
+    };
+    if (frac_coeff_is_zero) {
         if (frac.is_negative) {
             try appendByte(&body, allocator, 0x80);
         }
     } else {
         var mag_buf: [16]u8 = undefined;
-        var n: usize = 16;
-        var tmp: u128 = @intCast(frac.coefficient);
-        while (tmp != 0) : (tmp >>= 8) {
-            n -= 1;
-            mag_buf[n] = @intCast(tmp & 0xFF);
+        var bytes: []u8 = undefined;
+        var bytes_owned: ?[]u8 = null;
+        defer if (bytes_owned) |b| allocator.free(b);
+
+        switch (frac.coefficient) {
+            .small => |v| {
+                if (v < 0) return IonError.InvalidIon;
+                var n: usize = 16;
+                var tmp: u128 = @intCast(v);
+                while (tmp != 0) : (tmp >>= 8) {
+                    n -= 1;
+                    mag_buf[n] = @intCast(tmp & 0xFF);
+                }
+                bytes = mag_buf[n..16];
+            },
+            .big => |bint| {
+                var mag = bint;
+                mag.abs();
+                var hex = mag.toString(allocator, 16, .lower) catch return IonError.OutOfMemory;
+                defer allocator.free(hex);
+                if ((hex.len & 1) == 1) {
+                    const padded = allocator.alloc(u8, hex.len + 1) catch return IonError.OutOfMemory;
+                    padded[0] = '0';
+                    @memcpy(padded[1..], hex);
+                    allocator.free(hex);
+                    hex = padded;
+                }
+                const tmp_bytes = allocator.alloc(u8, hex.len / 2) catch return IonError.OutOfMemory;
+                bytes_owned = tmp_bytes;
+                var j: usize = 0;
+                while (j < tmp_bytes.len) : (j += 1) {
+                    const hi = std.fmt.charToDigit(hex[2 * j], 16) catch return IonError.InvalidIon;
+                    const lo = std.fmt.charToDigit(hex[2 * j + 1], 16) catch return IonError.InvalidIon;
+                    tmp_bytes[j] = @intCast((hi << 4) | lo);
+                }
+                bytes = tmp_bytes;
+            },
         }
-        var bytes = mag_buf[n..16];
+
         if (frac.is_negative) {
             if ((bytes[0] & 0x80) != 0) {
                 try appendByte(&body, allocator, 0x80);
@@ -701,9 +813,18 @@ fn writeValueText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
         },
         .bool => |b| try appendSlice(out, allocator, if (b) "true" else "false"),
         .int => |i| {
-            var buf: [64]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{}", .{i}) catch return IonError.InvalidIon;
-            try appendSlice(out, allocator, s);
+            switch (i) {
+                .small => |v_i| {
+                    var buf: [64]u8 = undefined;
+                    const s = std.fmt.bufPrint(&buf, "{}", .{v_i}) catch return IonError.InvalidIon;
+                    try appendSlice(out, allocator, s);
+                },
+                .big => |v_i| {
+                    const s = v_i.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
+                    defer allocator.free(s);
+                    try appendSlice(out, allocator, s);
+                },
+            }
         },
         .float => |f| {
             if (std.math.isNan(f)) return appendSlice(out, allocator, "nan");
@@ -721,10 +842,22 @@ fn writeValueText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
         },
         .decimal => |d| {
             if (d.is_negative) try appendByte(out, allocator, '-');
-            var buf: [64]u8 = undefined;
-            const coeff_s = std.fmt.bufPrint(&buf, "{}", .{d.coefficient}) catch return IonError.InvalidIon;
-            try appendSlice(out, allocator, coeff_s);
+            switch (d.coefficient) {
+                .small => |c| {
+                    var buf: [128]u8 = undefined;
+                    const coeff_s = std.fmt.bufPrint(&buf, "{}", .{c}) catch return IonError.InvalidIon;
+                    try appendSlice(out, allocator, coeff_s);
+                },
+                .big => |c| {
+                    var mag = c;
+                    mag.abs();
+                    const coeff_s = mag.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
+                    defer allocator.free(coeff_s);
+                    try appendSlice(out, allocator, coeff_s);
+                },
+            }
             try appendByte(out, allocator, 'd');
+            var buf: [64]u8 = undefined;
             const exp_s = std.fmt.bufPrint(&buf, "{}", .{d.exponent}) catch return IonError.InvalidIon;
             try appendSlice(out, allocator, exp_s);
         },
@@ -808,12 +941,32 @@ fn writeTimestampText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged
             const digits: usize = @intCast(-frac.exponent);
             try appendByte(out, allocator, '.');
             // Print coefficient with leading zeros to width.
-            const coeff_buf = std.fmt.bufPrint(&buf, "{}", .{frac.coefficient}) catch return IonError.InvalidIon;
-            if (coeff_buf.len < digits) {
-                var pad: usize = digits - coeff_buf.len;
-                while (pad != 0) : (pad -= 1) try appendByte(out, allocator, '0');
+            var coeff_owned: ?[]u8 = null;
+            defer if (coeff_owned) |b| allocator.free(b);
+            var coeff_s: []const u8 = undefined;
+            switch (frac.coefficient) {
+                .small => |c| {
+                    var tmp: [256]u8 = undefined;
+                    coeff_s = std.fmt.bufPrint(&tmp, "{}", .{c}) catch return IonError.InvalidIon;
+                    if (coeff_s.len < digits) {
+                        var pad: usize = digits - coeff_s.len;
+                        while (pad != 0) : (pad -= 1) try appendByte(out, allocator, '0');
+                    }
+                    try appendSlice(out, allocator, coeff_s);
+                },
+                .big => |c| {
+                    var mag = c;
+                    mag.abs();
+                    const s = mag.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
+                    coeff_owned = s;
+                    coeff_s = s;
+                    if (coeff_s.len < digits) {
+                        var pad: usize = digits - coeff_s.len;
+                        while (pad != 0) : (pad -= 1) try appendByte(out, allocator, '0');
+                    }
+                    try appendSlice(out, allocator, coeff_s);
+                },
             }
-            try appendSlice(out, allocator, coeff_buf);
         }
     } else if (ts.precision != .minute) {
         return IonError.InvalidIon;

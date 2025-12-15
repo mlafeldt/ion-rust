@@ -12,6 +12,25 @@
 const std = @import("std");
 const value = @import("value.zig");
 
+pub fn ionEqInt(a: value.Int, b: value.Int) bool {
+    return switch (a) {
+        .small => |ai| switch (b) {
+            .small => |bi| ai == bi,
+            .big => |bb| blk: {
+                const bi = bb.toConst().toInt(i128) catch break :blk false;
+                break :blk ai == bi;
+            },
+        },
+        .big => |aa| switch (b) {
+            .small => |bi| blk: {
+                const ai = aa.toConst().toInt(i128) catch break :blk false;
+                break :blk ai == bi;
+            },
+            .big => |bb| aa.eql(bb),
+        },
+    };
+}
+
 /// Symbol equality: compares by `text` when available, otherwise by SID presence/value.
 pub fn ionEqSymbol(a: value.Symbol, b: value.Symbol) bool {
     if (a.text != null and b.text != null) return std.mem.eql(u8, a.text.?, b.text.?);
@@ -34,7 +53,7 @@ pub fn ionEqF64(a: f64, b: f64) bool {
 
 /// Decimal equality (representation-sensitive).
 pub fn ionEqDecimal(a: value.Decimal, b: value.Decimal) bool {
-    return a.is_negative == b.is_negative and a.coefficient == b.coefficient and a.exponent == b.exponent;
+    return a.is_negative == b.is_negative and ionEqInt(a.coefficient, b.coefficient) and a.exponent == b.exponent;
 }
 
 /// Timestamp equality (representation-sensitive for stored fields).
@@ -56,7 +75,7 @@ pub fn ionEqValue(a: value.Value, b: value.Value) bool {
     return switch (a) {
         .null => |t| t == b.null,
         .bool => |v| v == b.bool,
-        .int => |v| v == b.int,
+        .int => |v| ionEqInt(v, b.int),
         .float => |v| ionEqF64(v, b.float),
         .decimal => |v| ionEqDecimal(v, b.decimal),
         .timestamp => |v| ionEqTimestamp(v, b.timestamp),

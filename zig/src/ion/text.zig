@@ -686,10 +686,23 @@ const Parser = struct {
             try validateUnderscoresHex(raw);
             const digits = try stripUnderscores(self.arena.allocator(), raw);
             defer self.arena.allocator().free(digits);
-            const mag = std.fmt.parseInt(u128, digits, 16) catch return IonError.InvalidIon;
-            if (mag > @as(u128, std.math.maxInt(i128))) return IonError.Unsupported;
-            const signed: i128 = @intCast(mag);
-            return value.Value{ .int = if (neg) -signed else signed };
+            const mag_u128 = std.fmt.parseInt(u128, digits, 16) catch |e| switch (e) {
+                error.Overflow => null,
+                else => return IonError.InvalidIon,
+            };
+            if (mag_u128) |mag| {
+                if (mag > @as(u128, std.math.maxInt(i128))) {
+                    // Fall through to BigInt handling.
+                } else {
+                    const signed: i128 = @intCast(mag);
+                    return value.Value{ .int = .{ .small = if (neg) -signed else signed } };
+                }
+            }
+
+            var bi = std.math.big.int.Managed.init(self.arena.allocator()) catch return IonError.OutOfMemory;
+            bi.setString(16, digits) catch return IonError.InvalidIon;
+            if (neg) bi.negate();
+            return value.Value{ .int = .{ .big = bi } };
         }
         if (self.startsWith("0b") or self.startsWith("0B")) {
             self.consume(2);
@@ -709,10 +722,23 @@ const Parser = struct {
             try validateUnderscoresBinary(raw);
             const digits = try stripUnderscores(self.arena.allocator(), raw);
             defer self.arena.allocator().free(digits);
-            const mag = std.fmt.parseInt(u128, digits, 2) catch return IonError.InvalidIon;
-            if (mag > @as(u128, std.math.maxInt(i128))) return IonError.Unsupported;
-            const signed: i128 = @intCast(mag);
-            return value.Value{ .int = if (neg) -signed else signed };
+            const mag_u128 = std.fmt.parseInt(u128, digits, 2) catch |e| switch (e) {
+                error.Overflow => null,
+                else => return IonError.InvalidIon,
+            };
+            if (mag_u128) |mag| {
+                if (mag > @as(u128, std.math.maxInt(i128))) {
+                    // Fall through to BigInt handling.
+                } else {
+                    const signed: i128 = @intCast(mag);
+                    return value.Value{ .int = .{ .small = if (neg) -signed else signed } };
+                }
+            }
+
+            var bi = std.math.big.int.Managed.init(self.arena.allocator()) catch return IonError.OutOfMemory;
+            bi.setString(2, digits) catch return IonError.InvalidIon;
+            if (neg) bi.negate();
+            return value.Value{ .int = .{ .big = bi } };
         }
 
         // Decimal / float / decimal with d exponent.
@@ -767,7 +793,20 @@ const Parser = struct {
             tmp_buf.appendSlice(self.arena.allocator(), left) catch return IonError.OutOfMemory;
             tmp_buf.appendSlice(self.arena.allocator(), right) catch return IonError.OutOfMemory;
             const digits = tmp_buf.items;
-            const mag = if (digits.len == 0) 0 else std.fmt.parseInt(i128, digits, 10) catch return IonError.InvalidIon;
+            const mag: value.Int = blk: {
+                if (digits.len == 0) break :blk .{ .small = 0 };
+                const mag_i128 = std.fmt.parseInt(i128, digits, 10) catch |e| switch (e) {
+                    error.Overflow => null,
+                    else => return IonError.InvalidIon,
+                };
+                if (mag_i128) |m| {
+                    if (m < 0) return IonError.InvalidIon;
+                    break :blk .{ .small = m };
+                }
+                var bi = std.math.big.int.Managed.init(self.arena.allocator()) catch return IonError.OutOfMemory;
+                bi.setString(10, digits) catch return IonError.InvalidIon;
+                break :blk .{ .big = bi };
+            };
             const base_exp: i32 = -@as(i32, @intCast(right.len));
             return value.Value{ .decimal = .{ .is_negative = coeff_neg, .coefficient = mag, .exponent = base_exp + exp_adjust } };
         }
@@ -801,7 +840,20 @@ const Parser = struct {
             tmp_buf.appendSlice(self.arena.allocator(), left) catch return IonError.OutOfMemory;
             tmp_buf.appendSlice(self.arena.allocator(), right) catch return IonError.OutOfMemory;
             const digits = tmp_buf.items;
-            const mag = if (digits.len == 0) 0 else std.fmt.parseInt(i128, digits, 10) catch return IonError.InvalidIon;
+            const mag: value.Int = blk: {
+                if (digits.len == 0) break :blk .{ .small = 0 };
+                const mag_i128 = std.fmt.parseInt(i128, digits, 10) catch |e| switch (e) {
+                    error.Overflow => null,
+                    else => return IonError.InvalidIon,
+                };
+                if (mag_i128) |m| {
+                    if (m < 0) return IonError.InvalidIon;
+                    break :blk .{ .small = m };
+                }
+                var bi = std.math.big.int.Managed.init(self.arena.allocator()) catch return IonError.OutOfMemory;
+                bi.setString(10, digits) catch return IonError.InvalidIon;
+                break :blk .{ .big = bi };
+            };
             const exp: i32 = -@as(i32, @intCast(right.len));
             return value.Value{ .decimal = .{ .is_negative = coeff_neg, .coefficient = mag, .exponent = exp } };
         }
@@ -809,8 +861,22 @@ const Parser = struct {
         // Int base-10
         if (tok.len == 0) return IonError.InvalidIon;
         if (tok[0] == '+') return IonError.InvalidIon;
-        const v = std.fmt.parseInt(i128, tok, 10) catch return IonError.InvalidIon;
-        return value.Value{ .int = v };
+        const v_i128 = std.fmt.parseInt(i128, tok, 10) catch |e| switch (e) {
+            error.Overflow => null,
+            else => return IonError.InvalidIon,
+        };
+        if (v_i128) |v| return value.Value{ .int = .{ .small = v } };
+
+        var neg2 = false;
+        var digits2 = tok;
+        if (digits2[0] == '-') {
+            neg2 = true;
+            digits2 = digits2[1..];
+        }
+        var bi = std.math.big.int.Managed.init(self.arena.allocator()) catch return IonError.OutOfMemory;
+        bi.setString(10, digits2) catch return IonError.InvalidIon;
+        if (neg2) bi.negate();
+        return value.Value{ .int = .{ .big = bi } };
     }
 
     fn parseTimestamp(self: *Parser) IonError!value.Timestamp {
@@ -890,7 +956,16 @@ const Parser = struct {
                 while (!self.eof() and std.ascii.isDigit(self.peek().?)) : (self.i += 1) {}
                 if (self.i == frac_start) return IonError.InvalidIon;
                 const frac_digits = self.input[frac_start..self.i];
-                const mag = std.fmt.parseInt(i128, frac_digits, 10) catch return IonError.InvalidIon;
+                const mag: value.Int = blk: {
+                    const mag_i128 = std.fmt.parseInt(i128, frac_digits, 10) catch |e| switch (e) {
+                        error.Overflow => null,
+                        else => return IonError.InvalidIon,
+                    };
+                    if (mag_i128) |m| break :blk .{ .small = m };
+                    var bi = std.math.big.int.Managed.init(self.arena.allocator()) catch return IonError.OutOfMemory;
+                    bi.setString(10, frac_digits) catch return IonError.InvalidIon;
+                    break :blk .{ .big = bi };
+                };
                 const exp: i32 = -@as(i32, @intCast(frac_digits.len));
                 ts.fractional = .{ .is_negative = false, .coefficient = mag, .exponent = exp };
                 ts.precision = .fractional;
@@ -963,7 +1038,10 @@ const Parser = struct {
                 }
                 if (std.mem.eql(u8, fname, "version")) {
                     if (f.value.value != .int) return IonError.InvalidIon;
-                    const v_i = f.value.value.int;
+                    const v_i = switch (f.value.value.int) {
+                        .small => |v| v,
+                        .big => return IonError.InvalidIon,
+                    };
                     if (v_i <= 0 or v_i > std.math.maxInt(u32)) return IonError.InvalidIon;
                     version = @intCast(v_i);
                     continue;
@@ -1040,14 +1118,20 @@ const Parser = struct {
                     }
                     if (std.mem.eql(u8, nn, "version")) {
                         if (ff.value.value != .int) return IonError.InvalidIon;
-                        const v_i = ff.value.value.int;
+                        const v_i = switch (ff.value.value.int) {
+                            .small => |v| v,
+                            .big => return IonError.InvalidIon,
+                        };
                         if (v_i <= 0 or v_i > std.math.maxInt(u32)) return IonError.InvalidIon;
                         version = @intCast(v_i);
                         continue;
                     }
                     if (std.mem.eql(u8, nn, "max_id")) {
                         if (ff.value.value != .int) return IonError.InvalidIon;
-                        const m_i = ff.value.value.int;
+                        const m_i = switch (ff.value.value.int) {
+                            .small => |v| v,
+                            .big => return IonError.InvalidIon,
+                        };
                         if (m_i < 0 or m_i > std.math.maxInt(u32)) return IonError.InvalidIon;
                         max_id = @intCast(m_i);
                         continue;
