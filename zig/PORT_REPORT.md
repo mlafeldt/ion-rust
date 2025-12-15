@@ -103,6 +103,41 @@ There are intentional skips, each with an inline comment explaining why:
 
 See `zig/src/tests.zig` for the exact items and reasons.
 
+## ion-tests status (what runs vs what is missing)
+
+The `ion-tests/` repo contains multiple suites. The Zig harness currently covers the two corpus suites below and does not yet run the Ion 1.1 conformance suite.
+
+### 1) Ion 1.0 corpus: `ion-tests/iontestdata/**`
+
+1) Files in suite: 785 (`.ion` + `.10n`)
+2) What the Zig harness runs:
+   - `bad/` reject: 496 files
+   - `good/equivs/` equivalence: 60 files
+   - `good/non-equivs/` non-equivalence: 21 files
+   - `good/` roundtrip: 289 files across a 12-pair format matrix (binary/text variants)
+3) Current result in Zig: all pass (no skips in `zig/src/tests.zig`).
+
+### 2) Ion 1.1 text corpus: `ion-tests/iontestdata_1_1/**`
+
+1) Files in suite: 606 (`.ion`)
+2) What the Zig harness runs:
+   - `bad/` reject: 400 files
+   - `good/equivs/` equivalence: 52 files
+   - `good/non-equivs/` non-equivalence: 21 files
+   - `good/` roundtrip: 206 files (text lines -> text lines)
+3) Current result in Zig: all pass (no skips in `zig/src/tests.zig`).
+
+### 3) Ion 1.1 conformance: `ion-tests/conformance/**/*.ion` (NOT RUN)
+
+1) Files in suite: 55 (`.ion`)
+2) Current result in Zig: not implemented / not run.
+3) What needs to be implemented to run this suite:
+   - Conformance DSL runner (test collection parsing/execution, signals, and "produces" verification)
+   - Ion 1.1 macro system beyond the limited corpus macros (`none`, `values`, `make_string`)
+   - E-expressions (eexp) and their binary encodings
+   - Ion 1.1 binary features used by conformance (various flex_* encodings, additional symbol/macro table mechanics)
+   - System macros used by conformance (e.g. `annotate`, `make_field`, `make_decimal`, `make_timestamp`, `parse_ion`, `use`, etc.)
+
 ## To-dos (to remove skips / broaden coverage)
 
 ### 1) Ion 1.1 binary
