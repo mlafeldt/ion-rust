@@ -732,6 +732,9 @@ fn allZero(bytes: []const u8) bool {
 }
 
 fn bigIntFromMagnitudeBytes(arena: *value.Arena, magnitude_be: []const u8) IonError!*std.math.big.int.Managed {
+    // Performance: avoid `bytes -> hex string -> bigInt.setString()` conversions.
+    // The corpus/conformance suites exercise a lot of large integers/decimals, and string formatting
+    // here quickly becomes a dominant allocation + CPU cost.
     const bi = try arena.makeBigInt();
     const bit_count: usize = magnitude_be.len * 8;
     const limb_bits: usize = @bitSizeOf(std.math.big.Limb);

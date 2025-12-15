@@ -31,6 +31,11 @@ fn makeCtor1(arena: *value.Arena, name: []const u8, arg: value.Element) DenoteEr
     return makeSexp(arena, &.{ head, arg });
 }
 
+fn makeCtor2(arena: *value.Arena, name: []const u8, a1: value.Element, a2: value.Element) DenoteError!value.Element {
+    const head = makeElem(arena, .{ .symbol = try makeSymbol(arena, name) });
+    return makeSexp(arena, &.{ head, a1, a2 });
+}
+
 fn makeTextBytesSexp(arena: *value.Arena, bytes: []const u8) DenoteError!value.Element {
     var elems = std.ArrayListUnmanaged(value.Element){};
     defer elems.deinit(arena.allocator());
@@ -87,9 +92,13 @@ pub fn denoteElement(arena: *value.Arena, elem: value.Element) DenoteError!value
         _ = elem.annotations;
     }
     return switch (elem.value) {
-        .null => try makeCtor0(arena, "Null"),
-        .bool => |b| makeElem(arena, .{ .bool = b }),
-        .int => |i| makeElem(arena, .{ .int = i }),
+        .null => |t| blk: {
+            if (t == .null) break :blk try makeCtor0(arena, "Null");
+            const type_sym = makeElem(arena, .{ .symbol = try makeSymbol(arena, @tagName(t)) });
+            break :blk try makeCtor1(arena, "Null", type_sym);
+        },
+        .bool => |b| try makeCtor1(arena, "Bool", makeElem(arena, .{ .bool = b })),
+        .int => |i| try makeCtor1(arena, "Int", makeElem(arena, .{ .int = i })),
         .float => |f| makeElem(arena, .{ .float = f }),
         .decimal => |d| makeElem(arena, .{ .decimal = d }),
         .timestamp => |t| makeElem(arena, .{ .timestamp = t }),
@@ -154,7 +163,14 @@ pub fn normalizeDenoteExpected(arena: *value.Arena, expected: value.Element) Den
     // Turns shorthand forms in expected-denotes into the canonical representation produced by `denoteElement`.
     return switch (expected.value) {
         .string => |s| try denoteString(arena, s),
-        .bool, .int, .float, .decimal, .timestamp, .blob, .clob, .null => expected,
+        .bool => |b| try makeCtor1(arena, "Bool", makeElem(arena, .{ .bool = b })),
+        .int => |i| try makeCtor1(arena, "Int", makeElem(arena, .{ .int = i })),
+        .null => |t| blk: {
+            if (t == .null) break :blk try makeCtor0(arena, "Null");
+            const type_sym = makeElem(arena, .{ .symbol = try makeSymbol(arena, @tagName(t)) });
+            break :blk try makeCtor1(arena, "Null", type_sym);
+        },
+        .float, .decimal, .timestamp, .blob, .clob => expected,
         .symbol => expected,
         .list => |l| blk: {
             var out = std.ArrayListUnmanaged(value.Element){};
@@ -210,6 +226,23 @@ pub fn normalizeDenoteExpected(arena: *value.Arena, expected: value.Element) Den
                     out.append(arena.allocator(), new_pair) catch return DenoteError.OutOfMemory;
                 }
                 break :blk makeElem(arena, .{ .sexp = out.toOwnedSlice(arena.allocator()) catch return DenoteError.OutOfMemory });
+            }
+
+            if (isCtor(sx, "Bool")) {
+                if (sx.len != 2) return DenoteError.Unsupported;
+                if (sx[1].value != .bool) return DenoteError.Unsupported;
+                return makeCtor1(arena, "Bool", sx[1]);
+            }
+            if (isCtor(sx, "Int")) {
+                if (sx.len != 2) return DenoteError.Unsupported;
+                if (sx[1].value != .int) return DenoteError.Unsupported;
+                return makeCtor1(arena, "Int", sx[1]);
+            }
+            if (isCtor(sx, "Null")) {
+                if (sx.len == 1) return makeCtor0(arena, "Null");
+                if (sx.len != 2) return DenoteError.Unsupported;
+                if (sx[1].value != .symbol) return DenoteError.Unsupported;
+                return makeCtor1(arena, "Null", sx[1]);
             }
 
             var out = std.ArrayListUnmanaged(value.Element){};

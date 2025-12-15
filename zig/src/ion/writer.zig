@@ -62,24 +62,41 @@ pub fn writeBinary(allocator: std.mem.Allocator, doc: []const value.Element) Ion
 ///
 /// Ownership: returns an allocated `[]u8` owned by `allocator`; caller must free it.
 pub fn writeText(allocator: std.mem.Allocator, doc: []const value.Element) IonError![]u8 {
+    return writeTextImpl(allocator, doc, .roundtrip);
+}
+
+/// Serializes top-level Ion elements to Ion text for use by the Ion 1.1 conformance DSL runner.
+///
+/// Unlike `writeText`, this does *not* auto-insert a synthetic `$ion_symbol_table` import to
+/// make `$<sid>` tokens parseable. The conformance suite relies on invalid/out-of-range symbol
+/// addresses to signal errors, so we must not "helpfully" make them parseable here.
+pub fn writeTextConformance(allocator: std.mem.Allocator, doc: []const value.Element) IonError![]u8 {
+    return writeTextImpl(allocator, doc, .conformance);
+}
+
+const TextMode = enum { roundtrip, conformance };
+
+fn writeTextImpl(allocator: std.mem.Allocator, doc: []const value.Element, mode: TextMode) IonError![]u8 {
     var out = std.ArrayListUnmanaged(u8){};
     errdefer out.deinit(allocator);
 
-    if (maxUnknownLocalSid(doc)) |max_sid| {
-        const max_id: u32 = max_sid - symtab.SystemSymtab.max_id;
-        // Emit a minimal symbol table that makes `$<sid>` tokens parseable as unknown symbols
-        // without materializing a gigantic `symbols:[null, null, ...]` list.
-        //
-        // We intentionally use an import to a likely-nonexistent shared table; if the reader
-        // doesn't have it, the imported slots remain unknown (which is what `$<sid>` encodes).
-        var buf: [128]u8 = undefined;
-        const header = std.fmt.bufPrint(
-            &buf,
-            "'$ion_symbol_table'::{{imports:[{{name:\"$ion_symbol_table\",version:1,max_id:{d}}}]}}",
-            .{max_id},
-        ) catch return IonError.InvalidIon;
-        try appendSlice(&out, allocator, header);
-        try appendByte(&out, allocator, '\n');
+    if (mode == .roundtrip) {
+        if (maxUnknownLocalSid(doc)) |max_sid| {
+            const max_id: u32 = max_sid - symtab.SystemSymtab.max_id;
+            // Emit a minimal symbol table that makes `$<sid>` tokens parseable as unknown symbols
+            // without materializing a gigantic `symbols:[null, null, ...]` list.
+            //
+            // We intentionally use an import to a likely-nonexistent shared table; if the reader
+            // doesn't have it, the imported slots remain unknown (which is what `$<sid>` encodes).
+            var buf: [128]u8 = undefined;
+            const header = std.fmt.bufPrint(
+                &buf,
+                "'$ion_symbol_table'::{{imports:[{{name:\"$ion_symbol_table\",version:1,max_id:{d}}}]}}",
+                .{max_id},
+            ) catch return IonError.InvalidIon;
+            try appendSlice(&out, allocator, header);
+            try appendByte(&out, allocator, '\n');
+        }
     }
 
     var first: bool = true;

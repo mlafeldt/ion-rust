@@ -92,6 +92,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
+  - As of 2025-12-15, `cd zig && /opt/homebrew/bin/zig build test --summary all` runs 13 Zig tests; all pass.
 
 ### Skip list
 
@@ -127,12 +128,21 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
    - `good/` roundtrip: 206 files (text lines -> text lines)
 3) Current result in Zig: all pass (no skips in `zig/src/tests.zig`).
 
-### 3) Ion 1.1 conformance: `ion-tests/conformance/**/*.ion` (NOT RUN)
+### 3) Ion 1.1 conformance: `ion-tests/conformance/**/*.ion` (PARTIALLY RUN)
 
 1) Files in suite: 55 (`.ion`)
 2) Current result in Zig:
-   - Partially run: `ion-tests/conformance/core/*.ion` via `test "ion-tests conformance core (partial)"` in `zig/src/tests.zig`.
-   - Not run yet: everything else under `ion-tests/conformance/` (data_model, eexp, system_macros, tdl, and top-level conformance files like `system_symbols.ion`).
+   - Run: 7/55 conformance files
+     - `ion-tests/conformance/core/*.ion` (4 files)
+     - `ion-tests/conformance/system_symbols.ion`
+     - `ion-tests/conformance/local_symtab.ion`
+     - `ion-tests/conformance/ivm.ion`
+   - Not run yet: 48/55 conformance files
+     - `ion-tests/conformance/local_symtab_imports.ion`
+     - `ion-tests/conformance/data_model/*.ion` (7 files)
+     - `ion-tests/conformance/eexp/*.ion` (4 files)
+     - `ion-tests/conformance/system_macros/*.ion` (24 files)
+     - `ion-tests/conformance/tdl/*.ion` (10 files)
 3) What needs to be implemented to fully run this suite:
    - Conformance DSL runner (test collection parsing/execution, signals, and "produces" verification)
    - Ion 1.1 macro system beyond the limited corpus macros (`none`, `values`, `make_string`)
@@ -205,6 +215,18 @@ Fix: writer emits `\\xNN` for non-ASCII bytes in clobs; parser accepts `\\xNN` i
 Ion text concatenates adjacent string literals. A naive printer can accidentally merge consecutive string values.
 
 Fix: text writer alternates short/long string literal styles for adjacent string values.
+
+### 10) BigInt magnitude imports (binary) must avoid string paths
+
+Some binary numeric encodings carry big integer magnitudes as bytes. Converting those bytes to hex/decimal strings and then calling BigInt `setString()` is very allocation-heavy and slows the suite down.
+
+Fix: use `std.math.big.int.Mutable.readTwosComplement(..., .unsigned)` to import magnitudes directly from bytes (see `zig/src/ion/binary.zig`).
+
+### 11) Conformance runner must not “help” invalid symbol addresses
+
+The conformance suite includes cases that expect invalid/out-of-range symbol addresses to `signals` an error. A roundtrip-focused text writer may emit synthetic `$ion_symbol_table` imports to make `$<sid>` tokens parseable, which would mask those errors.
+
+Fix: the text writer exposes `writeTextConformance(...)` which does not inject symbol table imports; the conformance runner also parses its DSL using a mode that disables adjacent string literal concatenation.
 
 ### 10) Imports with very large `max_id`
 
