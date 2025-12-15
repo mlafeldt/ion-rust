@@ -196,6 +196,15 @@ Ion text concatenates adjacent string literals. A naive printer can accidentally
 
 Fix: text writer alternates short/long string literal styles for adjacent string values.
 
+### 10) Imports with very large `max_id`
+
+Some fixtures (notably `ion-tests/iontestdata/good/subfieldVarUInt32bit.ion`) declare imports with very large `max_id`
+values (on the order of 2^31). Materializing symbol table slots up to `max_id` (e.g. appending billions of null slots)
+is both unnecessary and catastrophically slow.
+
+Fix: track `declared_max_id` separately from any dense slot storage and treat unknown slots as implicit; only store
+known texts sparsely. See `zig/src/ion/symtab.zig` (`SymbolTable.addImport()` and `slotForSid()`).
+
 ## Fun facts / notable behavior choices
 
 1) `$0` is treated as “unknown symbol”; it’s allowed in annotations and as a struct field name. Non-zero `$sid` is allowed if the SID is defined by the current symbol table (even if its text is unknown via a null slot).

@@ -339,9 +339,10 @@ const Decoder = struct {
                     break :blk digits_n;
                 },
                 .big => |v| blk: {
-                    var abs_mag = v;
+                    var abs_mag = v.*;
                     abs_mag.abs();
-                    const s = abs_mag.toString(self.arena.allocator(), 10, .lower) catch return IonError.OutOfMemory;
+                    const s = abs_mag.toString(self.arena.gpa, 10, .lower) catch return IonError.OutOfMemory;
+                    defer self.arena.gpa.free(s);
                     break :blk s.len;
                 },
             };
@@ -425,27 +426,9 @@ const Decoder = struct {
                 const arena_alloc = d.arena.allocator();
                 const key = std.fmt.allocPrint(arena_alloc, "{s}:{d}", .{ import_name, import_version }) catch return IonError.OutOfMemory;
                 if (d.shared.get(key)) |shared_st| {
-                    const available: u32 = @intCast(shared_st.symbols.len);
-                    const take: u32 = if (import_max_id < available) import_max_id else available;
-
-                    var sid_in_table: u32 = 1;
-                    while (sid_in_table <= take) : (sid_in_table += 1) {
-                        const idx: usize = @intCast(sid_in_table - 1);
-                        if (shared_st.symbols[idx]) |t| {
-                            _ = try d.st.addSymbolText(t);
-                        } else {
-                            _ = try d.st.addNullSlot();
-                        }
-                    }
-                    var remaining: u32 = import_max_id - take;
-                    while (remaining != 0) : (remaining -= 1) {
-                        _ = try d.st.addNullSlot();
-                    }
+                    try d.st.addImport(shared_st.symbols, import_max_id);
                 } else {
-                    var remaining: u32 = import_max_id;
-                    while (remaining != 0) : (remaining -= 1) {
-                        _ = try d.st.addNullSlot();
-                    }
+                    try d.st.addImport(&.{}, import_max_id);
                 }
             }
         }.run;
@@ -650,11 +633,11 @@ fn decodePosInt(arena: *value.Arena, body: []const u8) IonError!value.Value {
         if (mag <= @as(u128, std.math.maxInt(i128))) {
             return value.Value{ .int = .{ .small = @intCast(mag) } };
         }
-        var bi = try bigIntFromMagnitudeBytes(arena, body);
+        const bi = try bigIntFromMagnitudeBytes(arena, body);
         bi.setSign(true);
         return value.Value{ .int = .{ .big = bi } };
     }
-    var bi = try bigIntFromMagnitudeBytes(arena, body);
+    const bi = try bigIntFromMagnitudeBytes(arena, body);
     bi.setSign(true);
     return value.Value{ .int = .{ .big = bi } };
 }
@@ -668,12 +651,12 @@ fn decodeNegInt(arena: *value.Arena, body: []const u8) IonError!value.Value {
             const v: i128 = @intCast(mag);
             return value.Value{ .int = .{ .small = -v } };
         }
-        var bi = try bigIntFromMagnitudeBytes(arena, body);
+        const bi = try bigIntFromMagnitudeBytes(arena, body);
         bi.setSign(false);
         return value.Value{ .int = .{ .big = bi } };
     }
     if (allZero(body)) return IonError.InvalidIon;
-    var bi = try bigIntFromMagnitudeBytes(arena, body);
+    const bi = try bigIntFromMagnitudeBytes(arena, body);
     bi.setSign(false);
     return value.Value{ .int = .{ .big = bi } };
 }
@@ -734,7 +717,7 @@ fn readFixedIntAny(arena: *value.Arena, body: []const u8) IonError!FixedIntAny {
     var mag_bytes = try arena.allocator().dupe(u8, body);
     mag_bytes[0] &= 0x7F;
     const is_zero = allZero(mag_bytes);
-    var bi = try bigIntFromMagnitudeBytes(arena, mag_bytes);
+    const bi = try bigIntFromMagnitudeBytes(arena, mag_bytes);
     bi.setSign(true);
     return .{
         .is_negative = neg,
@@ -748,15 +731,15 @@ fn allZero(bytes: []const u8) bool {
     return true;
 }
 
-fn bigIntFromMagnitudeBytes(arena: *value.Arena, magnitude_be: []const u8) IonError!std.math.big.int.Managed {
-    var bi = std.math.big.int.Managed.init(arena.allocator()) catch return IonError.OutOfMemory;
-    const hex = arena.allocator().alloc(u8, magnitude_be.len * 2) catch return IonError.OutOfMemory;
-    const table = "0123456789abcdef";
-    for (magnitude_be, 0..) |b, i| {
-        hex[2 * i] = table[b >> 4];
-        hex[2 * i + 1] = table[b & 0x0F];
-    }
-    bi.setString(16, hex) catch return IonError.InvalidIon;
+fn bigIntFromMagnitudeBytes(arena: *value.Arena, magnitude_be: []const u8) IonError!*std.math.big.int.Managed {
+    const bi = try arena.makeBigInt();
+    const bit_count: usize = magnitude_be.len * 8;
+    const limb_bits: usize = @bitSizeOf(std.math.big.Limb);
+    const needed_limbs: usize = if (bit_count == 0) 1 else (bit_count + limb_bits - 1) / limb_bits;
+    bi.ensureCapacity(needed_limbs) catch return IonError.OutOfMemory;
+    var m = bi.toMutable();
+    m.readTwosComplement(magnitude_be, bit_count, .big, .unsigned);
+    bi.setMetadata(true, m.len);
     return bi;
 }
 

@@ -26,7 +26,7 @@ pub fn ionEqInt(a: value.Int, b: value.Int) bool {
                 const ai = aa.toConst().toInt(i128) catch break :blk false;
                 break :blk ai == bi;
             },
-            .big => |bb| aa.eql(bb),
+            .big => |bb| aa.eql(bb.*),
         },
     };
 }

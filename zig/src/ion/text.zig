@@ -684,8 +684,8 @@ const Parser = struct {
             }
             const raw = self.input[digits_start..self.i];
             try validateUnderscoresHex(raw);
-            const digits = try stripUnderscores(self.arena.allocator(), raw);
-            defer self.arena.allocator().free(digits);
+            const digits = try stripUnderscores(self.arena.gpa, raw);
+            defer self.arena.gpa.free(digits);
             const mag_u128 = std.fmt.parseInt(u128, digits, 16) catch |e| switch (e) {
                 error.Overflow => null,
                 else => return IonError.InvalidIon,
@@ -699,7 +699,7 @@ const Parser = struct {
                 }
             }
 
-            var bi = std.math.big.int.Managed.init(self.arena.allocator()) catch return IonError.OutOfMemory;
+            const bi = try self.arena.makeBigInt();
             bi.setString(16, digits) catch return IonError.InvalidIon;
             if (neg) bi.negate();
             return value.Value{ .int = .{ .big = bi } };
@@ -720,8 +720,8 @@ const Parser = struct {
             }
             const raw = self.input[digits_start..self.i];
             try validateUnderscoresBinary(raw);
-            const digits = try stripUnderscores(self.arena.allocator(), raw);
-            defer self.arena.allocator().free(digits);
+            const digits = try stripUnderscores(self.arena.gpa, raw);
+            defer self.arena.gpa.free(digits);
             const mag_u128 = std.fmt.parseInt(u128, digits, 2) catch |e| switch (e) {
                 error.Overflow => null,
                 else => return IonError.InvalidIon,
@@ -735,7 +735,7 @@ const Parser = struct {
                 }
             }
 
-            var bi = std.math.big.int.Managed.init(self.arena.allocator()) catch return IonError.OutOfMemory;
+            const bi = try self.arena.makeBigInt();
             bi.setString(2, digits) catch return IonError.InvalidIon;
             if (neg) bi.negate();
             return value.Value{ .int = .{ .big = bi } };
@@ -758,8 +758,8 @@ const Parser = struct {
         }
         const tok_raw = self.input[start..self.i];
         try validateUnderscoresDecimal(tok_raw);
-        const tok = try stripUnderscores(self.arena.allocator(), tok_raw);
-        defer self.arena.allocator().free(tok);
+        const tok = try stripUnderscores(self.arena.gpa, tok_raw);
+        defer self.arena.gpa.free(tok);
 
         try validateNoLeadingZero(tok);
 
@@ -789,9 +789,9 @@ const Parser = struct {
             for (right) |c| if (!std.ascii.isDigit(c)) return IonError.InvalidIon;
 
             var tmp_buf = std.ArrayListUnmanaged(u8){};
-            defer tmp_buf.deinit(self.arena.allocator());
-            tmp_buf.appendSlice(self.arena.allocator(), left) catch return IonError.OutOfMemory;
-            tmp_buf.appendSlice(self.arena.allocator(), right) catch return IonError.OutOfMemory;
+            defer tmp_buf.deinit(self.arena.gpa);
+            tmp_buf.appendSlice(self.arena.gpa, left) catch return IonError.OutOfMemory;
+            tmp_buf.appendSlice(self.arena.gpa, right) catch return IonError.OutOfMemory;
             const digits = tmp_buf.items;
             const mag: value.Int = blk: {
                 if (digits.len == 0) break :blk .{ .small = 0 };
@@ -803,8 +803,8 @@ const Parser = struct {
                     if (m < 0) return IonError.InvalidIon;
                     break :blk .{ .small = m };
                 }
-                var bi = std.math.big.int.Managed.init(self.arena.allocator()) catch return IonError.OutOfMemory;
-                bi.setString(10, digits) catch return IonError.InvalidIon;
+                const bi = try self.arena.makeBigInt();
+                try value.setBigIntFromUnsignedDecimalDigitsFast(bi, digits);
                 break :blk .{ .big = bi };
             };
             const base_exp: i32 = -@as(i32, @intCast(right.len));
@@ -836,9 +836,9 @@ const Parser = struct {
             for (right) |c| if (!std.ascii.isDigit(c)) return IonError.InvalidIon;
 
             var tmp_buf = std.ArrayListUnmanaged(u8){};
-            defer tmp_buf.deinit(self.arena.allocator());
-            tmp_buf.appendSlice(self.arena.allocator(), left) catch return IonError.OutOfMemory;
-            tmp_buf.appendSlice(self.arena.allocator(), right) catch return IonError.OutOfMemory;
+            defer tmp_buf.deinit(self.arena.gpa);
+            tmp_buf.appendSlice(self.arena.gpa, left) catch return IonError.OutOfMemory;
+            tmp_buf.appendSlice(self.arena.gpa, right) catch return IonError.OutOfMemory;
             const digits = tmp_buf.items;
             const mag: value.Int = blk: {
                 if (digits.len == 0) break :blk .{ .small = 0 };
@@ -850,8 +850,8 @@ const Parser = struct {
                     if (m < 0) return IonError.InvalidIon;
                     break :blk .{ .small = m };
                 }
-                var bi = std.math.big.int.Managed.init(self.arena.allocator()) catch return IonError.OutOfMemory;
-                bi.setString(10, digits) catch return IonError.InvalidIon;
+                const bi = try self.arena.makeBigInt();
+                try value.setBigIntFromUnsignedDecimalDigitsFast(bi, digits);
                 break :blk .{ .big = bi };
             };
             const exp: i32 = -@as(i32, @intCast(right.len));
@@ -873,8 +873,8 @@ const Parser = struct {
             neg2 = true;
             digits2 = digits2[1..];
         }
-        var bi = std.math.big.int.Managed.init(self.arena.allocator()) catch return IonError.OutOfMemory;
-        bi.setString(10, digits2) catch return IonError.InvalidIon;
+        const bi = try self.arena.makeBigInt();
+        try value.setBigIntFromUnsignedDecimalDigitsFast(bi, digits2);
         if (neg2) bi.negate();
         return value.Value{ .int = .{ .big = bi } };
     }
@@ -962,8 +962,8 @@ const Parser = struct {
                         else => return IonError.InvalidIon,
                     };
                     if (mag_i128) |m| break :blk .{ .small = m };
-                    var bi = std.math.big.int.Managed.init(self.arena.allocator()) catch return IonError.OutOfMemory;
-                    bi.setString(10, frac_digits) catch return IonError.InvalidIon;
+                    const bi = try self.arena.makeBigInt();
+                    try value.setBigIntFromUnsignedDecimalDigitsFast(bi, frac_digits);
                     break :blk .{ .big = bi };
                 };
                 const exp: i32 = -@as(i32, @intCast(frac_digits.len));
@@ -1078,27 +1078,9 @@ const Parser = struct {
 
                 const key = std.fmt.allocPrint(p.arena.allocator(), "{s}:{d}", .{ import_name, import_version }) catch return IonError.OutOfMemory;
                 if (p.shared.get(key)) |shared_st| {
-                    const available: u32 = @intCast(shared_st.symbols.len);
-                    const take: u32 = if (import_max_id < available) import_max_id else available;
-
-                    var sid_in_table: u32 = 1;
-                    while (sid_in_table <= take) : (sid_in_table += 1) {
-                        const idx: usize = @intCast(sid_in_table - 1);
-                        if (shared_st.symbols[idx]) |t| {
-                            _ = try p.st.addSymbolText(t);
-                        } else {
-                            _ = try p.st.addNullSlot();
-                        }
-                    }
-                    var remaining: u32 = import_max_id - take;
-                    while (remaining != 0) : (remaining -= 1) {
-                        _ = try p.st.addNullSlot();
-                    }
+                    try p.st.addImport(shared_st.symbols, import_max_id);
                 } else {
-                    var remaining: u32 = import_max_id;
-                    while (remaining != 0) : (remaining -= 1) {
-                        _ = try p.st.addNullSlot();
-                    }
+                    try p.st.addImport(&.{}, import_max_id);
                 }
             }
         }.run;

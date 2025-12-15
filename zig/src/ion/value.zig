@@ -8,11 +8,13 @@
 const std = @import("std");
 const IonError = @import("../ion.zig").IonError;
 const big = std.math.big.int;
+const Limb = std.math.big.Limb;
 
 /// Arena allocator used by the parser to allocate all decoded values for a document.
 pub const Arena = struct {
     gpa: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
+    bigints: std.ArrayListUnmanaged(*big.Managed) = .{},
 
     /// Initializes an arena backed by `gpa`.
     pub fn init(gpa: std.mem.Allocator) !Arena {
@@ -25,6 +27,13 @@ pub const Arena = struct {
         return self.arena.allocator();
     }
 
+    pub fn makeBigInt(self: *Arena) IonError!*big.Managed {
+        const p = self.allocator().create(big.Managed) catch return IonError.OutOfMemory;
+        p.* = big.Managed.init(self.gpa) catch return IonError.OutOfMemory;
+        self.bigints.append(self.gpa, p) catch return IonError.OutOfMemory;
+        return p;
+    }
+
     /// Duplicates a byte slice into the arena.
     pub fn dupe(self: *Arena, bytes: []const u8) IonError![]const u8 {
         return self.allocator().dupe(u8, bytes) catch return IonError.OutOfMemory;
@@ -32,6 +41,8 @@ pub const Arena = struct {
 
     /// Frees all allocations made in the arena.
     pub fn deinit(self: *Arena) void {
+        for (self.bigints.items) |p| p.deinit();
+        self.bigints.deinit(self.gpa);
         self.arena.deinit();
     }
 };
@@ -80,7 +91,7 @@ pub const Decimal = struct {
 /// Ion integer representation.
 pub const Int = union(enum) {
     small: i128,
-    big: big.Managed,
+    big: *big.Managed,
 };
 
 /// Ion timestamp representation (strict / representation-sensitive where applicable).
@@ -146,4 +157,48 @@ pub fn makeSymbolId(sid: ?u32, text: ?[]const u8) Symbol {
 /// Returns the unknown symbol (`$0`), i.e. `sid = 0` and no text.
 pub fn unknownSymbol() Symbol {
     return .{ .sid = 0, .text = null };
+}
+
+pub fn setBigIntFromUnsignedDecimalDigitsFast(dst: *big.Managed, digits: []const u8) IonError!void {
+    if (digits.len == 0) {
+        dst.set(@as(u8, 0)) catch return IonError.OutOfMemory;
+        return;
+    }
+
+    // `big.Managed.setString(10, digits)` is O(n) multiplications by 10, which is extremely slow for
+    // the corpus' very large decimal literals (thousands of digits). Chunking reduces the number of
+    // BigInt operations by ~18x.
+    const chunk_digits: usize = 18;
+    const chunk_base: u64 = 1_000_000_000_000_000_000; // 10^18 (fits in u64 and Limb on 64-bit targets)
+
+    dst.ensureCapacity(big.calcSetStringLimbCount(10, digits.len)) catch return IonError.OutOfMemory;
+    const limbs_buffer = dst.allocator.alloc(Limb, big.calcSetStringLimbsBufferLen(10, digits.len)) catch return IonError.OutOfMemory;
+    defer dst.allocator.free(limbs_buffer);
+
+    var m = dst.toMutable();
+
+    var first_len: usize = digits.len % chunk_digits;
+    if (first_len == 0) first_len = chunk_digits;
+    const first_chunk = digits[0..first_len];
+    const first_val = std.fmt.parseInt(u64, first_chunk, 10) catch return IonError.InvalidIon;
+    m.set(first_val);
+
+    const base_limb: Limb = @intCast(chunk_base);
+    const base_const: big.Const = .{ .limbs = (&base_limb)[0..1], .positive = true };
+
+    var pos: usize = first_len;
+    while (pos < digits.len) : (pos += chunk_digits) {
+        const part = digits[pos .. pos + chunk_digits];
+        const part_val = std.fmt.parseInt(u64, part, 10) catch return IonError.InvalidIon;
+
+        // Pass `null` allocator: for 1-limb multipliers (base 10^18) the fallback algorithm is
+        // plenty fast and avoids allocator churn.
+        m.mul(m.toConst(), base_const, limbs_buffer, null);
+
+        var part_limb: Limb = @intCast(part_val);
+        const part_const: big.Const = .{ .limbs = (&part_limb)[0..1], .positive = true };
+        m.add(m.toConst(), part_const);
+    }
+
+    dst.setMetadata(m.positive, m.len);
 }

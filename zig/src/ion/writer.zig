@@ -427,7 +427,7 @@ fn writeIntBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
             try appendSlice(out, allocator, body);
         },
         .big => |bint| {
-            var mag = bint; // copy
+            var mag = bint.*; // copy
             if (mag.eqlZero()) {
                 try appendByte(out, allocator, (2 << 4) | 0);
                 return;
@@ -436,24 +436,12 @@ fn writeIntBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
                 sign = .neg;
                 mag.abs();
             }
-
-            var hex = mag.toString(allocator, 16, .lower) catch return IonError.OutOfMemory;
-            defer allocator.free(hex);
-            if ((hex.len & 1) == 1) {
-                const padded = allocator.alloc(u8, hex.len + 1) catch return IonError.OutOfMemory;
-                padded[0] = '0';
-                @memcpy(padded[1..], hex);
-                allocator.free(hex);
-                hex = padded;
-            }
-            const bytes = allocator.alloc(u8, hex.len / 2) catch return IonError.OutOfMemory;
+            const bits: usize = mag.toConst().bitCountAbs();
+            const byte_len: usize = (bits + 7) / 8;
+            const bytes = allocator.alloc(u8, byte_len) catch return IonError.OutOfMemory;
             defer allocator.free(bytes);
-            var j: usize = 0;
-            while (j < bytes.len) : (j += 1) {
-                const hi = std.fmt.charToDigit(hex[2 * j], 16) catch return IonError.InvalidIon;
-                const lo = std.fmt.charToDigit(hex[2 * j + 1], 16) catch return IonError.InvalidIon;
-                bytes[j] = @intCast((hi << 4) | lo);
-            }
+            @memset(bytes, 0);
+            mag.toConst().writeTwosComplement(bytes, .big);
 
             const type_id: u8 = if (sign == .neg) 3 else 2;
             try writeTypedValueHeader(allocator, out, type_id, bytes.len);
@@ -511,25 +499,14 @@ fn writeDecimalBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged
                 bytes = mag_buf[n..16];
             },
             .big => |bint| {
-                var mag = bint;
+                var mag = bint.*;
                 mag.abs();
-                var hex = mag.toString(allocator, 16, .lower) catch return IonError.OutOfMemory;
-                defer allocator.free(hex);
-                if ((hex.len & 1) == 1) {
-                    const padded = allocator.alloc(u8, hex.len + 1) catch return IonError.OutOfMemory;
-                    padded[0] = '0';
-                    @memcpy(padded[1..], hex);
-                    allocator.free(hex);
-                    hex = padded;
-                }
-                const tmp_bytes = allocator.alloc(u8, hex.len / 2) catch return IonError.OutOfMemory;
+                const bits: usize = mag.toConst().bitCountAbs();
+                const byte_len: usize = (bits + 7) / 8;
+                const tmp_bytes = allocator.alloc(u8, byte_len) catch return IonError.OutOfMemory;
                 bytes_owned = tmp_bytes;
-                var j: usize = 0;
-                while (j < tmp_bytes.len) : (j += 1) {
-                    const hi = std.fmt.charToDigit(hex[2 * j], 16) catch return IonError.InvalidIon;
-                    const lo = std.fmt.charToDigit(hex[2 * j + 1], 16) catch return IonError.InvalidIon;
-                    tmp_bytes[j] = @intCast((hi << 4) | lo);
-                }
+                @memset(tmp_bytes, 0);
+                mag.toConst().writeTwosComplement(tmp_bytes, .big);
                 bytes = tmp_bytes;
             },
         }
@@ -627,25 +604,14 @@ fn writeTimestampBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanag
                 bytes = mag_buf[n..16];
             },
             .big => |bint| {
-                var mag = bint;
+                var mag = bint.*;
                 mag.abs();
-                var hex = mag.toString(allocator, 16, .lower) catch return IonError.OutOfMemory;
-                defer allocator.free(hex);
-                if ((hex.len & 1) == 1) {
-                    const padded = allocator.alloc(u8, hex.len + 1) catch return IonError.OutOfMemory;
-                    padded[0] = '0';
-                    @memcpy(padded[1..], hex);
-                    allocator.free(hex);
-                    hex = padded;
-                }
-                const tmp_bytes = allocator.alloc(u8, hex.len / 2) catch return IonError.OutOfMemory;
+                const bits: usize = mag.toConst().bitCountAbs();
+                const byte_len: usize = (bits + 7) / 8;
+                const tmp_bytes = allocator.alloc(u8, byte_len) catch return IonError.OutOfMemory;
                 bytes_owned = tmp_bytes;
-                var j: usize = 0;
-                while (j < tmp_bytes.len) : (j += 1) {
-                    const hi = std.fmt.charToDigit(hex[2 * j], 16) catch return IonError.InvalidIon;
-                    const lo = std.fmt.charToDigit(hex[2 * j + 1], 16) catch return IonError.InvalidIon;
-                    tmp_bytes[j] = @intCast((hi << 4) | lo);
-                }
+                @memset(tmp_bytes, 0);
+                mag.toConst().writeTwosComplement(tmp_bytes, .big);
                 bytes = tmp_bytes;
             },
         }
@@ -820,7 +786,7 @@ fn writeValueText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
                     try appendSlice(out, allocator, s);
                 },
                 .big => |v_i| {
-                    const s = v_i.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
+                    const s = v_i.*.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
                     defer allocator.free(s);
                     try appendSlice(out, allocator, s);
                 },
@@ -849,7 +815,7 @@ fn writeValueText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
                     try appendSlice(out, allocator, coeff_s);
                 },
                 .big => |c| {
-                    var mag = c;
+                    var mag = c.*;
                     mag.abs();
                     const coeff_s = mag.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
                     defer allocator.free(coeff_s);
@@ -955,7 +921,7 @@ fn writeTimestampText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged
                     try appendSlice(out, allocator, coeff_s);
                 },
                 .big => |c| {
-                    var mag = c;
+                    var mag = c.*;
                     mag.abs();
                     const s = mag.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
                     coeff_owned = s;
