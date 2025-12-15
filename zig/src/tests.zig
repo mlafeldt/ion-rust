@@ -273,7 +273,7 @@ test "ion-tests 1_1 good roundtrip (text lines)" {
     );
 }
 
-test "ion-tests conformance core (partial)" {
+test "ion-tests conformance suite (partial)" {
     const allocator = std.testing.allocator;
     var stats: conformance.Stats = .{};
 
@@ -281,7 +281,7 @@ test "ion-tests conformance core (partial)" {
         var stats_ptr: *conformance.Stats = undefined;
         fn run(path: []const u8, data: []const u8) !void {
             conformance.runConformanceFile(std.testing.allocator, data, stats_ptr) catch |e| {
-                std.debug.print("conformance core failed: {s}: {s}\n", .{ path, @errorName(e) });
+                std.debug.print("conformance failed: {s}: {s}\n", .{ path, @errorName(e) });
                 return e;
             };
         }
@@ -290,137 +290,11 @@ test "ion-tests conformance core (partial)" {
 
     try walkAndTest(
         allocator,
-        "ion-tests/conformance/core",
+        "ion-tests/conformance",
         &.{ ".ion" },
         &.{},
         Runner.run,
     );
-
-    try std.testing.expect(stats.passed + stats.skipped == stats.branches);
-}
-
-test "ion-tests conformance system_symbols (partial)" {
-    const allocator = std.testing.allocator;
-    var stats: conformance.Stats = .{};
-
-    const path = "ion-tests/conformance/system_symbols.ion";
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const data = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-    defer allocator.free(data);
-
-    conformance.runConformanceFile(allocator, data, &stats) catch |e| {
-        std.debug.print("conformance failed: {s}: {s}\n", .{ path, @errorName(e) });
-        return e;
-    };
-
-    try std.testing.expect(stats.passed + stats.skipped == stats.branches);
-}
-
-test "ion-tests conformance local_symtab (partial)" {
-    const allocator = std.testing.allocator;
-    var stats: conformance.Stats = .{};
-
-    const path = "ion-tests/conformance/local_symtab.ion";
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const data = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-    defer allocator.free(data);
-
-    conformance.runConformanceFile(allocator, data, &stats) catch |e| {
-        std.debug.print("conformance failed: {s}: {s}\n", .{ path, @errorName(e) });
-        return e;
-    };
-
-    try std.testing.expect(stats.passed + stats.skipped == stats.branches);
-}
-
-test "ion-tests conformance ivm (partial)" {
-    const allocator = std.testing.allocator;
-    var stats: conformance.Stats = .{};
-
-    const path = "ion-tests/conformance/ivm.ion";
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const data = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-    defer allocator.free(data);
-
-    conformance.runConformanceFile(allocator, data, &stats) catch |e| {
-        std.debug.print("conformance failed: {s}: {s}\n", .{ path, @errorName(e) });
-        return e;
-    };
-
-    try std.testing.expect(stats.passed + stats.skipped == stats.branches);
-}
-
-test "ion-tests conformance local_symtab_imports (partial)" {
-    const allocator = std.testing.allocator;
-    var stats: conformance.Stats = .{};
-
-    const path = "ion-tests/conformance/local_symtab_imports.ion";
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const data = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-    defer allocator.free(data);
-
-    conformance.runConformanceFile(allocator, data, &stats) catch |e| {
-        std.debug.print("conformance failed: {s}: {s}\n", .{ path, @errorName(e) });
-        return e;
-    };
-
-    try std.testing.expect(stats.passed + stats.skipped == stats.branches);
-}
-
-test "ion-tests conformance data_model null (partial)" {
-    const allocator = std.testing.allocator;
-    var stats: conformance.Stats = .{};
-
-    const path = "ion-tests/conformance/data_model/null.ion";
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const data = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-    defer allocator.free(data);
-
-    conformance.runConformanceFile(allocator, data, &stats) catch |e| {
-        std.debug.print("conformance failed: {s}: {s}\n", .{ path, @errorName(e) });
-        return e;
-    };
-
-    try std.testing.expect(stats.passed + stats.skipped == stats.branches);
-}
-
-test "ion-tests conformance data_model boolean (partial)" {
-    const allocator = std.testing.allocator;
-    var stats: conformance.Stats = .{};
-
-    const path = "ion-tests/conformance/data_model/boolean.ion";
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const data = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-    defer allocator.free(data);
-
-    conformance.runConformanceFile(allocator, data, &stats) catch |e| {
-        std.debug.print("conformance failed: {s}: {s}\n", .{ path, @errorName(e) });
-        return e;
-    };
-
-    try std.testing.expect(stats.passed + stats.skipped == stats.branches);
-}
-
-test "ion-tests conformance data_model annotations (partial)" {
-    const allocator = std.testing.allocator;
-    var stats: conformance.Stats = .{};
-
-    const path = "ion-tests/conformance/data_model/annotations.ion";
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const data = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-    defer allocator.free(data);
-
-    conformance.runConformanceFile(allocator, data, &stats) catch |e| {
-        std.debug.print("conformance failed: {s}: {s}\n", .{ path, @errorName(e) });
-        return e;
-    };
 
     try std.testing.expect(stats.passed + stats.skipped == stats.branches);
 }

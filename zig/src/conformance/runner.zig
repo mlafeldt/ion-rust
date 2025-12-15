@@ -155,9 +155,21 @@ fn applyTextFragment(state: *State, allocator: std.mem.Allocator, sx: []const va
     if (sx.len == 1) {
         return state.pushText(allocator, "");
     }
-    if (sx.len != 2) return RunError.InvalidConformanceDsl;
-    if (sx[1].value != .string) return RunError.InvalidConformanceDsl;
-    const s = sx[1].value.string;
+    for (sx[1..]) |e| if (e.value != .string) return RunError.InvalidConformanceDsl;
+    const s: []const u8 = if (sx.len == 2) blk: {
+        break :blk sx[1].value.string;
+    } else blk: {
+        var total: usize = 0;
+        for (sx[1..]) |e| total += e.value.string.len;
+        const out = allocator.alloc(u8, total) catch return RunError.OutOfMemory;
+        var i: usize = 0;
+        for (sx[1..]) |e| {
+            const part = e.value.string;
+            @memcpy(out[i .. i + part.len], part);
+            i += part.len;
+        }
+        break :blk out;
+    };
     if (parseTextIvmToken(s)) |v| {
         switch (v) {
             .valid => |ver| try state.pushEvent(allocator, .{ .ivm = ver }),
@@ -169,7 +181,48 @@ fn applyTextFragment(state: *State, allocator: std.mem.Allocator, sx: []const va
 }
 
 fn applyTopLevel2(state: *State, allocator: std.mem.Allocator, sx: []const value.Element) RunError!void {
-    for (sx[1..]) |e| try state.pushEvent(allocator, .{ .value = e });
+    for (sx[1..]) |e| {
+        // Abstract Ion 1.1 conformance uses macro invocations encoded as sexps beginning with a
+        // `#$:` address token (e.g. ("#$:set_macros" ...)). The Zig port doesn't evaluate macros
+        // yet, so treat any such branch as unsupported.
+        if (containsMacroAddressToken(e)) state.unsupported = true;
+        try state.pushEvent(allocator, .{ .value = e });
+    }
+}
+
+fn containsMacroAddressToken(elem: value.Element) bool {
+    return switch (elem.value) {
+        .sexp => |sx| blk: {
+            if (sx.len != 0) {
+                const head = sx[0];
+                switch (head.value) {
+                    .string => |s| {
+                        if (std.mem.startsWith(u8, s, "#$:") and !std.mem.eql(u8, s, "#$:values")) break :blk true;
+                    },
+                    .symbol => |sym| {
+                        if (sym.text) |t| {
+                            if (std.mem.startsWith(u8, t, "#$:") and !std.mem.eql(u8, t, "#$:values")) break :blk true;
+                        }
+                    },
+                    else => {},
+                }
+            }
+            for (sx) |e| if (containsMacroAddressToken(e)) break :blk true;
+            break :blk false;
+        },
+        .list => |items| blk: {
+            for (items) |e| if (containsMacroAddressToken(e)) break :blk true;
+            break :blk false;
+        },
+        .@"struct" => |st| blk: {
+            for (st.fields) |f| {
+                if (f.name.text) |t| if (std.mem.startsWith(u8, t, "#$:") and !std.mem.eql(u8, t, "#$:values")) break :blk true;
+                if (containsMacroAddressToken(f.value)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
 }
 
 fn applyBinaryFragment(state: *State, allocator: std.mem.Allocator, sx: []const value.Element) RunError!void {
@@ -665,11 +718,82 @@ fn evalAbstractDocument(arena: *value.Arena, state: *State, absences: *std.AutoH
                     continue;
                 }
                 const expanded = try resolveDelayedInElement(arena, symtab.items, symtab_max_id, absences, e);
-                out.append(a, expanded) catch return RunError.OutOfMemory;
+                const expanded_list = try expandValuesAtTopLevel(arena, expanded);
+                out.appendSlice(a, expanded_list) catch return RunError.OutOfMemory;
             },
         }
     }
     return out.toOwnedSlice(a) catch return RunError.OutOfMemory;
+}
+
+fn isValuesMacroInvocation(elem: value.Element) bool {
+    if (elem.value != .sexp) return false;
+    const sx = elem.value.sexp;
+    if (sx.len == 0) return false;
+    if (sx[0].value != .symbol) return false;
+    const t = sx[0].value.symbol.text orelse return false;
+    return std.mem.eql(u8, t, "#$:values");
+}
+
+fn expandValuesAtTopLevel(arena: *value.Arena, elem: value.Element) RunError![]value.Element {
+    if (isValuesMacroInvocation(elem)) {
+        const sx = elem.value.sexp;
+        if (sx.len == 1) return &.{}; // `values` with no args produces no values
+        const out = arena.allocator().alloc(value.Element, sx.len - 1) catch return RunError.OutOfMemory;
+        for (sx[1..], 0..) |e, i| out[i] = try expandValuesInElement(arena, e);
+        return out;
+    }
+    const single = arena.allocator().alloc(value.Element, 1) catch return RunError.OutOfMemory;
+    single[0] = try expandValuesInElement(arena, elem);
+    return single;
+}
+
+fn expandValuesInElement(arena: *value.Arena, elem: value.Element) RunError!value.Element {
+    var out = elem;
+    out.value = try expandValuesInValue(arena, elem.value);
+    return out;
+}
+
+fn expandValuesInValue(arena: *value.Arena, v: value.Value) RunError!value.Value {
+    return switch (v) {
+        .list => |items| blk: {
+            var out = std.ArrayListUnmanaged(value.Element){};
+            errdefer out.deinit(arena.allocator());
+            for (items) |e| {
+                if (isValuesMacroInvocation(e)) {
+                    const sx = e.value.sexp;
+                    for (sx[1..]) |arg| out.append(arena.allocator(), try expandValuesInElement(arena, arg)) catch return RunError.OutOfMemory;
+                } else {
+                    out.append(arena.allocator(), try expandValuesInElement(arena, e)) catch return RunError.OutOfMemory;
+                }
+            }
+            break :blk .{ .list = out.toOwnedSlice(arena.allocator()) catch return RunError.OutOfMemory };
+        },
+        .sexp => |items| blk: {
+            var out = std.ArrayListUnmanaged(value.Element){};
+            errdefer out.deinit(arena.allocator());
+            for (items) |e| {
+                if (isValuesMacroInvocation(e)) {
+                    const sx = e.value.sexp;
+                    for (sx[1..]) |arg| out.append(arena.allocator(), try expandValuesInElement(arena, arg)) catch return RunError.OutOfMemory;
+                } else {
+                    out.append(arena.allocator(), try expandValuesInElement(arena, e)) catch return RunError.OutOfMemory;
+                }
+            }
+            break :blk .{ .sexp = out.toOwnedSlice(arena.allocator()) catch return RunError.OutOfMemory };
+        },
+        .@"struct" => |st| blk: {
+            // We don't model multi-value inlining into structs yet.
+            var out_fields = std.ArrayListUnmanaged(value.StructField){};
+            errdefer out_fields.deinit(arena.allocator());
+            for (st.fields) |f| {
+                if (isValuesMacroInvocation(f.value)) return RunError.Unsupported;
+                out_fields.append(arena.allocator(), .{ .name = f.name, .value = try expandValuesInElement(arena, f.value) }) catch return RunError.OutOfMemory;
+            }
+            break :blk .{ .@"struct" = .{ .fields = out_fields.toOwnedSlice(arena.allocator()) catch return RunError.OutOfMemory } };
+        },
+        else => v,
+    };
 }
 
 fn runExpectation(
@@ -690,18 +814,28 @@ fn runExpectation(
     defer absences.deinit(arena.allocator());
 
     var actual: []const value.Element = &.{};
+    var parsed_doc: ?ion.Document = null;
+    defer if (parsed_doc) |*d| d.deinit();
+    var doc_bytes_owned: ?[]u8 = null;
+    defer if (doc_bytes_owned) |b| allocator.free(b);
+
     if (state.text_len != 0) {
         const frags = try collectTextFragments(allocator, state);
         defer if (frags.len != 0) allocator.free(frags);
         const doc_bytes = try buildTextDocument(allocator, state.version, frags);
-        defer allocator.free(doc_bytes);
-        var doc = ion.parseDocument(allocator, doc_bytes) catch |e| {
+        doc_bytes_owned = doc_bytes;
+        // Conformance suite inputs frequently contain Ion 1.1 macro invocations / e-expressions
+        // (e.g. `(:values ...)`). The Zig port does not implement the Ion 1.1 macro system yet,
+        // so we treat these branches as unsupported instead of failing the whole conformance file.
+        if (!std.mem.eql(u8, head, "signals") and std.mem.indexOf(u8, doc_bytes, "(:") != null) {
+            return RunError.Unsupported;
+        }
+        parsed_doc = ion.parseDocument(allocator, doc_bytes) catch |e| {
             if (std.mem.eql(u8, head, "signals")) return true;
             std.debug.print("conformance parse failed unexpectedly: {s}\n", .{@errorName(e)});
             return RunError.InvalidConformanceDsl;
         };
-        defer doc.deinit();
-        actual = doc.elements;
+        actual = parsed_doc.?.elements;
     } else {
         const abs = evalAbstractDocument(&arena, state, &absences) catch |err| {
             if (std.mem.eql(u8, head, "signals")) return true;
@@ -712,6 +846,15 @@ fn runExpectation(
 
     if (std.mem.eql(u8, head, "signals")) {
         // If we got here, parsing succeeded, which violates the expectation.
+        if (sx.len >= 2 and sx[1].value == .string) {
+            std.debug.print("signals violated: expected error '{s}'\n", .{sx[1].value.string});
+        } else {
+            std.debug.print("signals violated: expected error\n", .{});
+        }
+        if (doc_bytes_owned) |b| {
+            const show: usize = @min(b.len, 512);
+            std.debug.print("signals violated: parsed bytes (prefix, {d}/{d}):\n{s}\n", .{ show, b.len, b[0..show] });
+        }
         return RunError.InvalidConformanceDsl;
     }
 

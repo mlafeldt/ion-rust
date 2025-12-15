@@ -106,20 +106,54 @@ fn denoteStruct(arena: *value.Arena, st: value.Struct) DenoteError!value.Element
 fn denoteFloat(arena: *value.Arena, f: f64) DenoteError!value.Element {
     // Conformance denotes floats via a canonical Ion text representation string.
     //
-    // Zig's `{e}` formatting matches the conformance suite's expected encodings for finite values
-    // (e.g. `0e0`, `6.125e0`, `1.401298464324817e-45`, `5e-324`).
-    var buf: [128]u8 = undefined;
-    const s: []const u8 = if (std.math.isNan(f))
-        "nan"
-    else if (std.math.isInf(f))
-        (if (f > 0) "+inf" else "-inf")
-    else if (f == 0.0 and std.math.signbit(f))
-        "-0e0"
-    else if (f == 0.0)
-        "0e0"
-    else
-        (std.fmt.bufPrint(&buf, "{e}", .{f}) catch return DenoteError.Unsupported);
+    // The conformance suite expects Ion-style formatting:
+    // - all floats include an exponent (`e`), even when it is `e0`
+    // - integer-valued floats are written in plain decimal with `e0`
+    // - non-integer values use scientific notation for very small magnitudes
+    //
+    // This is intentionally *not* Zig's default float formatting.
+    if (std.math.isNan(f)) return makeCtor1(arena, "Float", try denoteString(arena, "nan"));
+    if (std.math.isInf(f)) return makeCtor1(arena, "Float", try denoteString(arena, if (f > 0) "+inf" else "-inf"));
+    if (f == 0.0) return makeCtor1(arena, "Float", try denoteString(arena, if (std.math.signbit(f)) "-0e0" else "0e0"));
 
+    // Integer-valued float: format as decimal digits and append `e0`.
+    if (std.math.trunc(f) == f) {
+        // Zig's float->decimal formatting is allowed to pick *any* decimal that roundtrips back
+        // to the same float. Conformance expects a specific canonical form for integer-valued
+        // floats, so we compute the exact integer value from IEEE-754 bits and format it exactly.
+        const bits: u64 = @bitCast(f);
+        const sign_bit: bool = (bits >> 63) != 0;
+        const exp_bits: u64 = (bits >> 52) & 0x7FF;
+        const frac: u64 = bits & ((@as(u64, 1) << 52) - 1);
+        if (exp_bits == 0 or exp_bits == 0x7FF) return DenoteError.Unsupported;
+
+        const exp_unbiased: i32 = @as(i32, @intCast(exp_bits)) - 1023;
+        const mantissa: u64 = (@as(u64, 1) << 52) | frac;
+        const shift: i32 = exp_unbiased - 52;
+
+        const mag = arena.makeBigInt() catch return DenoteError.OutOfMemory;
+        mag.set(mantissa) catch return DenoteError.OutOfMemory;
+        if (shift > 0) {
+            mag.shiftLeft(mag, @intCast(shift)) catch return DenoteError.OutOfMemory;
+        } else if (shift < 0) {
+            mag.shiftRight(mag, @intCast(-shift)) catch return DenoteError.OutOfMemory;
+        }
+        if (sign_bit) mag.setSign(false);
+
+        const dec = mag.toString(arena.gpa, 10, .lower) catch return DenoteError.OutOfMemory;
+        defer arena.gpa.free(dec);
+
+        const out = arena.gpa.alloc(u8, dec.len + 2) catch return DenoteError.OutOfMemory;
+        defer arena.gpa.free(out);
+        @memcpy(out[0..dec.len], dec);
+        out[dec.len] = 'e';
+        out[dec.len + 1] = '0';
+        return makeCtor1(arena, "Float", try denoteString(arena, out));
+    }
+
+    // Non-integer float: use scientific notation and rely on `{e}` for exponent formatting.
+    var buf: [128]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{e}", .{f}) catch return DenoteError.Unsupported;
     return makeCtor1(arena, "Float", try denoteString(arena, s));
 }
 

@@ -189,6 +189,7 @@ const Parser = struct {
 
         var args = std.ArrayListUnmanaged(value.Element){};
         errdefer args.deinit(self.arena.allocator());
+        var arg_exprs: usize = 0;
 
         while (true) {
             try self.skipWsComments();
@@ -201,17 +202,20 @@ const Parser = struct {
             if (c == ',') return IonError.InvalidIon;
 
             if (try self.hasMacroInvocationStart()) {
+                arg_exprs += 1;
                 const expanded = try self.parseMacroInvocationElems();
                 args.appendSlice(self.arena.allocator(), expanded) catch return IonError.OutOfMemory;
                 continue;
             }
 
+            arg_exprs += 1;
             const elem = try self.parseElement(.sexp);
             args.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
         }
 
         if (std.mem.eql(u8, macro_name, "none")) {
-            if (args.items.len != 0) return IonError.InvalidIon;
+            // `(:none)` takes no arguments, even if an argument expression would expand to nothing.
+            if (arg_exprs != 0) return IonError.InvalidIon;
             return &.{};
         }
 
@@ -494,7 +498,6 @@ const Parser = struct {
         try self.skipWsComments();
         var fields = std.ArrayListUnmanaged(value.StructField){};
         errdefer fields.deinit(self.arena.allocator());
-        var expect_field = true;
         while (true) {
             try self.skipWsComments();
             if (self.eof()) return IonError.Incomplete;
@@ -503,13 +506,6 @@ const Parser = struct {
                 self.consume(1);
                 break;
             }
-            if (c == ',') {
-                if (expect_field) return IonError.InvalidIon;
-                self.consume(1);
-                expect_field = true;
-                continue;
-            }
-            if (!expect_field) expect_field = true;
 
             if (try self.hasMacroInvocationStart()) {
                 const expanded = try self.parseMacroInvocationElems();
@@ -522,25 +518,37 @@ const Parser = struct {
                         else => return IonError.InvalidIon,
                     }
                 }
-                expect_field = false;
-                continue;
+            } else {
+                const name = try self.parseFieldName();
+                try self.skipWsComments();
+                if (self.eof() or self.peek().? != ':') return IonError.InvalidIon;
+                self.consume(1);
+                try self.skipWsComments();
+                if (try self.hasMacroInvocationStart()) {
+                    const expanded = try self.parseMacroInvocationElems();
+                    for (expanded) |e| {
+                        fields.append(self.arena.allocator(), .{ .name = name, .value = e }) catch return IonError.OutOfMemory;
+                    }
+                } else {
+                    const v = try self.parseElement(.@"struct");
+                    fields.append(self.arena.allocator(), .{ .name = name, .value = v }) catch return IonError.OutOfMemory;
+                }
             }
 
-            const name = try self.parseFieldName();
+            // After a field (or injected fields), the next token must be either ',' or '}'.
+            // Whitespace is not a valid separator between fields.
             try self.skipWsComments();
-            if (self.eof() or self.peek().? != ':') return IonError.InvalidIon;
-            self.consume(1);
-            try self.skipWsComments();
-            if (try self.hasMacroInvocationStart()) {
-                const expanded = try self.parseMacroInvocationElems();
-                for (expanded) |e| {
-                    fields.append(self.arena.allocator(), .{ .name = name, .value = e }) catch return IonError.OutOfMemory;
-                }
-            } else {
-                const v = try self.parseElement(.@"struct");
-                fields.append(self.arena.allocator(), .{ .name = name, .value = v }) catch return IonError.OutOfMemory;
+            if (self.eof()) return IonError.Incomplete;
+            const sep = self.peek().?;
+            if (sep == ',') {
+                self.consume(1);
+                continue;
             }
-            expect_field = false;
+            if (sep == '}') {
+                self.consume(1);
+                break;
+            }
+            return IonError.InvalidIon;
         }
         return value.Value{ .@"struct" = .{ .fields = fields.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory } };
     }
