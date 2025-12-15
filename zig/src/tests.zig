@@ -1,6 +1,6 @@
 //! Zig test harness for the Ion Zig port.
 //!
-//! Walks `ion-tests/iontestdata` and enforces:
+//! Walks `ion-tests/iontestdata` and `ion-tests/iontestdata_1_1` and enforces:
 //! - `bad/` files must be rejected
 //! - `good/equivs/` groups must be equivalent
 //! - `good/non-equivs/` groups must not be equivalent across members
@@ -61,7 +61,6 @@ const global_skip_list = [_][]const u8{
 };
 
 const round_trip_skip_list = [_][]const u8{
-    "ion-tests/iontestdata/good/notVersionMarkers.ion", // Roundtrip can change how $ion_* tokens are interpreted/serialized; not implemented faithfully.
 };
 
 const equivs_skip_list = [_][]const u8{
@@ -104,6 +103,28 @@ test "ion-tests bad files reject" {
     );
 }
 
+test "ion-tests 1_1 bad files reject" {
+    const allocator = std.testing.allocator;
+
+    try walkAndTest(
+        allocator,
+        "ion-tests/iontestdata_1_1/bad",
+        &.{ ".ion" },
+        &global_skip_list,
+        struct {
+            fn run(path: []const u8, data: []const u8) !void {
+                const parsed = ion.parseDocument(std.testing.allocator, data);
+                if (parsed) |doc| {
+                    var d = doc;
+                    d.deinit();
+                    std.debug.print("unexpectedly parsed bad file: {s}\n", .{path});
+                    return error.UnexpectedSuccess;
+                } else |_| {}
+            }
+        }.run,
+    );
+}
+
 test "zig ion parses simple text" {
     var doc = try ion.parseDocument(std.testing.allocator, "1");
     defer doc.deinit();
@@ -131,12 +152,52 @@ test "ion-tests equiv groups" {
     );
 }
 
+test "ion-tests 1_1 equiv groups" {
+    const allocator = std.testing.allocator;
+    const skip = try concatSkipLists(allocator, &.{ &global_skip_list, &equivs_skip_list });
+    defer allocator.free(skip);
+
+    try walkAndTest(
+        allocator,
+        "ion-tests/iontestdata_1_1/good/equivs",
+        &.{ ".ion" },
+        skip,
+        struct {
+            fn run(path: []const u8, data: []const u8) !void {
+                checkGroup(data, true) catch |e| {
+                    std.debug.print("equivs failed: {s}: {s}\n", .{ path, @errorName(e) });
+                    return e;
+                };
+            }
+        }.run,
+    );
+}
+
 test "ion-tests non-equiv groups" {
     const allocator = std.testing.allocator;
 
     try walkAndTest(
         allocator,
         "ion-tests/iontestdata/good/non-equivs",
+        &.{ ".ion" },
+        &global_skip_list,
+        struct {
+            fn run(path: []const u8, data: []const u8) !void {
+                checkGroup(data, false) catch |e| {
+                    std.debug.print("non-equivs failed: {s}: {s}\n", .{ path, @errorName(e) });
+                    return e;
+                };
+            }
+        }.run,
+    );
+}
+
+test "ion-tests 1_1 non-equiv groups" {
+    const allocator = std.testing.allocator;
+
+    try walkAndTest(
+        allocator,
+        "ion-tests/iontestdata_1_1/good/non-equivs",
         &.{ ".ion" },
         &global_skip_list,
         struct {
@@ -185,6 +246,27 @@ test "ion-tests good roundtrip (format matrix)" {
                         return e;
                     };
                 }
+            }
+        }.run,
+    );
+}
+
+test "ion-tests 1_1 good roundtrip (text lines)" {
+    const allocator = std.testing.allocator;
+    const skip = try concatSkipLists(allocator, &.{ &global_skip_list, &round_trip_skip_list });
+    defer allocator.free(skip);
+
+    try walkAndTest(
+        allocator,
+        "ion-tests/iontestdata_1_1/good",
+        &.{ ".ion" },
+        skip,
+        struct {
+            fn run(path: []const u8, data: []const u8) !void {
+                roundtripEq(std.testing.allocator, data, .text_lines, .text_lines) catch |e| {
+                    std.debug.print("roundtrip failed: {s} (formats lines->lines): {s}\n", .{ path, @errorName(e) });
+                    return e;
+                };
             }
         }.run,
     );

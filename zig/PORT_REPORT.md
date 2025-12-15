@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository contains a Zig 0.15.2 implementation of an Amazon Ion reader/writer under `zig/`, plus a Zig-only test harness that exercises the official `ion-tests/iontestdata` corpus.
+This repository contains a Zig 0.15.2 implementation of an Amazon Ion reader/writer under `zig/`, plus a Zig-only test harness that exercises the official `ion-tests/iontestdata` and `ion-tests/iontestdata_1_1` corpora.
 
 Key properties:
 
@@ -42,6 +42,7 @@ Key properties:
     - Supports unknown symbol IDs when the symbol table slot exists but has unknown text (null slot).
   - Whitespace handling includes HT/VT/FF/CR/LF per corpus expectations.
   - Includes a debugging helper `parseTopLevelWithErrorIndex(...)` intended for ad-hoc repro tooling.
+  - Ion 1.1: supports the macro invocations used by the `iontestdata_1_1` corpus (`(:none)`, `(:values ...)`, `(:make_string ...)`) by expanding them during parsing after a `$ion_1_1` text IVM.
 
 ### Binary Ion 1.0 parsing
 
@@ -90,6 +91,7 @@ Key properties:
   - `good/equivs/` groups must all be equivalent
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
+  - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
 
 ### Skip list
 
@@ -103,42 +105,13 @@ See `zig/src/tests.zig` for the exact items and reasons.
 
 ## To-dos (to remove skips / broaden coverage)
 
-### 1) Big integers (> i128)
+### 1) Ion 1.1 binary
 
-Currently skipped fixtures contain integers larger than `i128`.
+`iontestdata_1_1` currently covers text only in the Zig harness. Binary Ion 1.1 is not implemented.
 
-Options:
+### 2) Macro system breadth
 
-- Implement BigInt and update `Value.int`, parsers/writers, and equality.
-
-### 2) UTF-16 / UTF-32 text inputs
-
-Done: `parseDocument()` detects BOM-less UTF-16/UTF-32 (and BOM variants) and transcodes to UTF-8 before parsing.
-
-### 3) Full symbol table/import semantics
-
-Some symbol-table-heavy fixtures are still skipped (symbol table state across multiple symbol tables/documents; null-slot equivalence; some import edge cases).
-
-Options:
-
-- Expand symbol table model:
-  - imports: shared symbol tables, versioning, max_id rules
-  - unknown slots behavior through parsing/writing
-  - persist symbol table context appropriately through embedded documents and across stream segments
-
-### 4) Subfield encodings / bit-level preservation
-
-The `subfield*` fixtures are skipped for roundtrip because the writer doesn’t preserve those encoding-specific forms.
-
-Options:
-
-1) parse-only correctness
-2) canonical re-encoding
-3) preserve exact subfield encoding forms
-
-### 5) `subfield*` fixtures
-
-These are currently skipped because the port does not preserve the encoding-specific subfield forms across roundtrips.
+Only the built-in macros used by the corpus are implemented (`none`, `values`, `make_string`). A complete Ion 1.1 macro system is out of scope for the current port.
 
 ## Gotchas encountered (and fixes)
 

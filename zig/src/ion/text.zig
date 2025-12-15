@@ -44,6 +44,7 @@ const Parser = struct {
     arena: *value.Arena,
     input: []const u8,
     i: usize = 0,
+    version: enum { v1_0, v1_1 } = .v1_0,
     st: symtab.SymbolTable,
     shared: std.StringHashMapUnmanaged(SharedSymtab) = .{},
 
@@ -52,6 +53,7 @@ const Parser = struct {
             .arena = arena,
             .input = input,
             .i = 0,
+            .version = .v1_0,
             .st = try symtab.SymbolTable.init(arena),
             .shared = .{},
         };
@@ -67,6 +69,18 @@ const Parser = struct {
         while (true) {
             try self.skipWsComments();
             if (self.eof()) break;
+
+            if (try self.hasMacroInvocationStart()) {
+                const expanded = try self.parseMacroInvocationElems();
+                for (expanded) |elem| {
+                    if (isSystemValue(elem)) {
+                        try self.maybeConsumeSymbolTable(elem);
+                    } else {
+                        out.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
+                    }
+                }
+                continue;
+            }
 
             // Ion Version Marker in text: $ion_1_0 at top-level (not annotated) is a system value.
             // It can also appear as a normal symbol if annotated/inside containers; we only treat
@@ -90,7 +104,7 @@ const Parser = struct {
                                 for (minor_str) |c| {
                                     if (!std.ascii.isDigit(c)) minor_all_digits = false;
                                 }
-                                if (major_all_digits and minor_all_digits and !std.mem.eql(u8, t, "$ion_1_0")) {
+                                if (major_all_digits and minor_all_digits and !std.mem.eql(u8, t, "$ion_1_0") and !std.mem.eql(u8, t, "$ion_1_1")) {
                                     return IonError.InvalidIon;
                                 }
                             }
@@ -100,6 +114,15 @@ const Parser = struct {
             }
             if (isSystemValue(elem)) {
                 // Apply symbol table if present, otherwise ignore.
+                if (elem.annotations.len == 0 and elem.value == .symbol) {
+                    if (elem.value.symbol.text) |t| {
+                        if (std.mem.eql(u8, t, "$ion_1_1")) {
+                            self.version = .v1_1;
+                        } else if (std.mem.eql(u8, t, "$ion_1_0")) {
+                            self.version = .v1_0;
+                        }
+                    }
+                }
                 try self.maybeConsumeSymbolTable(elem);
             } else {
                 out.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
@@ -110,6 +133,100 @@ const Parser = struct {
         }
 
         return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+    }
+
+    fn hasMacroInvocationStart(self: *Parser) IonError!bool {
+        // Ion 1.0 does not allow macro invocations (and ':' is not a valid token start there).
+        // Only enable `(:...)` parsing after seeing `$ion_1_1`.
+        if (self.version != .v1_1) return false;
+        if (!self.startsWith("(")) return false;
+        const save = self.i;
+        self.consume(1);
+        // Macros are sexp-like; allow whitespace/comments after '('.
+        self.skipWsComments() catch {
+            self.i = save;
+            return false;
+        };
+        const yes = !self.eof() and self.peek().? == ':';
+        self.i = save;
+        return yes;
+    }
+
+    fn parseMacroInvocationElems(self: *Parser) IonError![]value.Element {
+        if (!self.startsWith("(")) return IonError.InvalidIon;
+        self.consume(1);
+        try self.skipWsComments();
+
+        if (self.eof() or self.peek().? != ':') return IonError.InvalidIon;
+        self.consume(1);
+        if (self.eof()) return IonError.Incomplete;
+        const name_start = self.i;
+        if (!std.ascii.isAlphabetic(self.peek().?) and self.peek().? != '_') return IonError.InvalidIon;
+        self.i += 1;
+        while (!self.eof()) {
+            const c = self.peek().?;
+            if (std.ascii.isAlphanumeric(c) or c == '_') {
+                self.i += 1;
+                continue;
+            }
+            break;
+        }
+        const macro_name = self.input[name_start..self.i];
+
+        var args = std.ArrayListUnmanaged(value.Element){};
+        errdefer args.deinit(self.arena.allocator());
+
+        while (true) {
+            try self.skipWsComments();
+            if (self.eof()) return IonError.Incomplete;
+            const c = self.peek().?;
+            if (c == ')') {
+                self.consume(1);
+                break;
+            }
+            if (c == ',') return IonError.InvalidIon;
+
+            if (try self.hasMacroInvocationStart()) {
+                const expanded = try self.parseMacroInvocationElems();
+                args.appendSlice(self.arena.allocator(), expanded) catch return IonError.OutOfMemory;
+                continue;
+            }
+
+            const elem = try self.parseElement(.sexp);
+            args.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
+        }
+
+        if (std.mem.eql(u8, macro_name, "none")) {
+            if (args.items.len != 0) return IonError.InvalidIon;
+            return &.{};
+        }
+
+        if (std.mem.eql(u8, macro_name, "values")) {
+            return args.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+        }
+
+        if (std.mem.eql(u8, macro_name, "make_string")) {
+            var buf = std.ArrayListUnmanaged(u8){};
+            errdefer buf.deinit(self.arena.allocator());
+            for (args.items) |e| {
+                if (e.annotations.len != 0) return IonError.InvalidIon;
+                switch (e.value) {
+                    .string => |s| buf.appendSlice(self.arena.allocator(), s) catch return IonError.OutOfMemory,
+                    .symbol => |s| {
+                        const t = s.text orelse return IonError.InvalidIon;
+                        buf.appendSlice(self.arena.allocator(), t) catch return IonError.OutOfMemory;
+                    },
+                    else => return IonError.InvalidIon,
+                }
+            }
+            const out_str = buf.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+            const out_elem = value.Element{ .annotations = &.{}, .value = .{ .string = out_str } };
+            const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+            out[0] = out_elem;
+            return out;
+        }
+
+        return IonError.InvalidIon;
     }
 
     fn eof(self: *const Parser) bool {
@@ -313,8 +430,13 @@ const Parser = struct {
             }
             if (!expect_value) return IonError.InvalidIon;
 
-            const elem = try self.parseElement(.list);
-            elems.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
+            if (try self.hasMacroInvocationStart()) {
+                const expanded = try self.parseMacroInvocationElems();
+                elems.appendSlice(self.arena.allocator(), expanded) catch return IonError.OutOfMemory;
+            } else {
+                const elem = try self.parseElement(.list);
+                elems.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
+            }
             expect_value = false;
         }
         return value.Value{ .list = elems.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory };
@@ -335,8 +457,13 @@ const Parser = struct {
                 break;
             }
             if (c == ',') return IonError.InvalidIon;
-            const elem = try self.parseElement(.sexp);
-            elems.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
+            if (try self.hasMacroInvocationStart()) {
+                const expanded = try self.parseMacroInvocationElems();
+                elems.appendSlice(self.arena.allocator(), expanded) catch return IonError.OutOfMemory;
+            } else {
+                const elem = try self.parseElement(.sexp);
+                elems.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
+            }
         }
         return value.Value{ .sexp = elems.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory };
     }
@@ -364,12 +491,35 @@ const Parser = struct {
             }
             if (!expect_field) expect_field = true;
 
+            if (try self.hasMacroInvocationStart()) {
+                const expanded = try self.parseMacroInvocationElems();
+                for (expanded) |e| {
+                    if (e.annotations.len != 0) return IonError.InvalidIon;
+                    switch (e.value) {
+                        .@"struct" => |st| {
+                            fields.appendSlice(self.arena.allocator(), st.fields) catch return IonError.OutOfMemory;
+                        },
+                        else => return IonError.InvalidIon,
+                    }
+                }
+                expect_field = false;
+                continue;
+            }
+
             const name = try self.parseFieldName();
             try self.skipWsComments();
             if (self.eof() or self.peek().? != ':') return IonError.InvalidIon;
             self.consume(1);
-            const v = try self.parseElement(.@"struct");
-            fields.append(self.arena.allocator(), .{ .name = name, .value = v }) catch return IonError.OutOfMemory;
+            try self.skipWsComments();
+            if (try self.hasMacroInvocationStart()) {
+                const expanded = try self.parseMacroInvocationElems();
+                for (expanded) |e| {
+                    fields.append(self.arena.allocator(), .{ .name = name, .value = e }) catch return IonError.OutOfMemory;
+                }
+            } else {
+                const v = try self.parseElement(.@"struct");
+                fields.append(self.arena.allocator(), .{ .name = name, .value = v }) catch return IonError.OutOfMemory;
+            }
             expect_field = false;
         }
         return value.Value{ .@"struct" = .{ .fields = fields.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory } };
@@ -1200,7 +1350,7 @@ fn isSystemValue(elem: value.Element) bool {
     // top-level symbol with no annotations; treat that as system.
     if (elem.annotations.len == 0 and elem.value == .symbol) {
         const t = elem.value.symbol.text orelse return false;
-        return std.mem.eql(u8, t, "$ion_1_0");
+        return std.mem.eql(u8, t, "$ion_1_0") or std.mem.eql(u8, t, "$ion_1_1");
     }
     // Local symbol table struct is system.
     if (elem.annotations.len >= 1 and elem.value == .@"struct") {
@@ -1215,6 +1365,7 @@ fn parseNullType(text: []const u8) ?value.IonType {
 }
 
 fn isIdentStart(c: u8) bool {
+    // Note: ':' is intentionally excluded; Ion 1.1 macro invocations are handled separately.
     return std.ascii.isAlphabetic(c) or c == '_' or c == '$';
 }
 
