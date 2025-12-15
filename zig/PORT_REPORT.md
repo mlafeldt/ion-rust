@@ -42,7 +42,11 @@ Key properties:
     - Supports unknown symbol IDs when the symbol table slot exists but has unknown text (null slot).
   - Whitespace handling includes HT/VT/FF/CR/LF per corpus expectations.
   - Includes a debugging helper `parseTopLevelWithErrorIndex(...)` intended for ad-hoc repro tooling.
-  - Ion 1.1: supports the macro invocations used by the `iontestdata_1_1` corpus (`(:none)`, `(:values ...)`, `(:make_string ...)`) by expanding them during parsing after a `$ion_1_1` text IVM.
+  - Ion 1.1: supports a growing subset of macro invocations used by `iontestdata_1_1` and conformance:
+    - Expression groups: `(:: <expr>*)`
+    - Macro IDs: unqualified/qualified names and numeric addresses (e.g. `(:values ...)`, `(:1 ...)`, `(:$ion::values ...)`, `(:$ion::1 ...)`)
+    - Implemented expansions: `none`, `values`, `make_string`, `make_symbol`, `make_decimal`, `make_list`, `make_sexp`
+    - This is still far from a complete Ion 1.1 macro system.
 
 ### Binary Ion 1.0 parsing
 
@@ -133,13 +137,18 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
 1) Files in suite: 55 (`.ion`)
 2) Current result in Zig:
    - Run: 55/55 conformance files (via a single walker test in `zig/src/tests.zig`)
+   - Branch-level status (2025-12-15):
+     - Total branches: 2647
+     - Passed: 1397
+     - Skipped (unsupported): 1250
+     - To reproduce totals: `cd zig && for f in ../ion-tests/conformance/**/*.ion; do /opt/homebrew/bin/zig run src/conformance_debug.zig -- "$f"; done`
    - Many branches are currently marked “unsupported” and counted as skipped:
-     - Ion 1.1 macro system / system macros / e-expressions are not implemented
+     - Large parts of the Ion 1.1 macro system / TDL are not implemented (only a subset of system macros expand during parsing)
      - Binary Ion 1.1 is not implemented
      - Many `binary` fragments are not executed (beyond minimal IVM recognition)
 3) What needs to be implemented to fully run this suite:
    - Conformance DSL runner (test collection parsing/execution, signals, and "produces" verification)
-   - Ion 1.1 macro system beyond the limited corpus macros (`none`, `values`, `make_string`)
+   - Ion 1.1 macro system beyond the currently-expanded subset (`none`, `values`, `make_string`, `make_symbol`, `make_decimal`, `make_list`, `make_sexp`, plus `(::...)`)
    - E-expressions (eexp) and their binary encodings
    - Ion 1.1 binary features used by conformance (various flex_* encodings, additional symbol/macro table mechanics)
    - System macros used by conformance (e.g. `annotate`, `make_field`, `make_decimal`, `make_timestamp`, `parse_ion`, `use`, etc.)
@@ -152,7 +161,14 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
 
 ### 2) Macro system breadth
 
-Only the built-in macros used by the corpus are implemented (`none`, `values`, `make_string`). A complete Ion 1.1 macro system is out of scope for the current port.
+Only a small subset of Ion 1.1 macro expansions are implemented (`none`, `values`, `make_string`, `make_symbol`, `make_decimal`, `make_list`, `make_sexp`, `(::...)`). A complete Ion 1.1 macro system is out of scope for the current port.
+
+### 3) Performance
+
+Large integer/decimal fixtures can be dominated by BigInt string formatting/parsing.
+
+- `zig/src/ion/binary.zig` uses `std.math.big.int.Mutable.readTwosComplement(..., .unsigned)` to build magnitudes directly from bytes (no hex string conversions).
+- `zig/src/ion/writer.zig` writes BigInt magnitudes directly to big-endian bytes via `writeTwosComplement()` (no toString()/parse round-trips) for Ion binary encodings.
 
 ## Gotchas encountered (and fixes)
 

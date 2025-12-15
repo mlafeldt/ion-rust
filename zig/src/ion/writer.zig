@@ -458,6 +458,7 @@ fn writeIntBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
             const bytes = allocator.alloc(u8, byte_len) catch return IonError.OutOfMemory;
             defer allocator.free(bytes);
             @memset(bytes, 0);
+            // Performance: write BigInt directly as big-endian bytes (avoid toString()/parse paths).
             mag.toConst().writeTwosComplement(bytes, .big);
 
             const type_id: u8 = if (sign == .neg) 3 else 2;
@@ -523,6 +524,7 @@ fn writeDecimalBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged
                 const tmp_bytes = allocator.alloc(u8, byte_len) catch return IonError.OutOfMemory;
                 bytes_owned = tmp_bytes;
                 @memset(tmp_bytes, 0);
+                // Performance: write BigInt directly as big-endian bytes (avoid toString()/parse paths).
                 mag.toConst().writeTwosComplement(tmp_bytes, .big);
                 bytes = tmp_bytes;
             },

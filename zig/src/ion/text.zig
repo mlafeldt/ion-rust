@@ -174,18 +174,64 @@ const Parser = struct {
         if (self.eof() or self.peek().? != ':') return IonError.InvalidIon;
         self.consume(1);
         if (self.eof()) return IonError.Incomplete;
-        const name_start = self.i;
-        if (!std.ascii.isAlphabetic(self.peek().?) and self.peek().? != '_') return IonError.InvalidIon;
-        self.i += 1;
-        while (!self.eof()) {
-            const c = self.peek().?;
-            if (std.ascii.isAlphanumeric(c) or c == '_') {
-                self.i += 1;
-                continue;
+
+        // Expression group: `(:: <expr>*)` evaluates each expression and inlines its values.
+        // The conformance suite uses this heavily to feed multi-valued expressions into macros.
+        if (self.peek().? == ':') {
+            self.consume(1);
+            var out = std.ArrayListUnmanaged(value.Element){};
+            errdefer out.deinit(self.arena.allocator());
+            while (true) {
+                try self.skipWsComments();
+                if (self.eof()) return IonError.Incomplete;
+                const c = self.peek().?;
+                if (c == ')') {
+                    self.consume(1);
+                    break;
+                }
+                if (c == ',') return IonError.InvalidIon;
+
+                if (try self.hasMacroInvocationStart()) {
+                    const expanded = try self.parseMacroInvocationElems();
+                    out.appendSlice(self.arena.allocator(), expanded) catch return IonError.OutOfMemory;
+                    continue;
+                }
+
+                const elem = try self.parseElement(.sexp);
+                out.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
             }
-            break;
+            return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
         }
-        const macro_name = self.input[name_start..self.i];
+
+        // Macro identifier: either a name (`values`) or an address (`1`), optionally qualified as
+        // `$ion::...` (as used by the conformance suite for system macro invocations).
+        var macro_addr: ?u32 = null;
+        const id_start = self.i;
+        if (self.startsWith("$ion::")) {
+            self.consume("$ion::".len);
+        }
+        if (self.eof()) return IonError.Incomplete;
+        if (std.ascii.isDigit(self.peek().?)) {
+            var v: u32 = 0;
+            while (!self.eof() and std.ascii.isDigit(self.peek().?)) {
+                v = std.math.mul(u32, v, 10) catch return IonError.InvalidIon;
+                v = std.math.add(u32, v, @intCast(self.peek().? - '0')) catch return IonError.InvalidIon;
+                self.consume(1);
+            }
+            macro_addr = v;
+        } else {
+            if (!std.ascii.isAlphabetic(self.peek().?) and self.peek().? != '_') return IonError.InvalidIon;
+            self.consume(1);
+            while (!self.eof()) {
+                const c = self.peek().?;
+                if (std.ascii.isAlphanumeric(c) or c == '_') {
+                    self.consume(1);
+                    continue;
+                }
+                break;
+            }
+        }
+        const macro_id = self.input[id_start..self.i];
 
         var args = std.ArrayListUnmanaged(value.Element){};
         errdefer args.deinit(self.arena.allocator());
@@ -213,17 +259,50 @@ const Parser = struct {
             args.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
         }
 
-        if (std.mem.eql(u8, macro_name, "none")) {
+        const MacroKind = enum {
+            none,
+            values,
+            make_string,
+            make_symbol,
+            make_list,
+            make_sexp,
+            make_decimal,
+        };
+
+        const kind: MacroKind = blk: {
+            if (macro_addr) |addr| {
+                break :blk switch (addr) {
+                    0 => .none,
+                    1 => .values,
+                    9 => .make_string,
+                    10 => .make_symbol,
+                    11 => .make_decimal,
+                    14 => .make_list,
+                    15 => .make_sexp,
+                    else => return IonError.Unsupported,
+                };
+            }
+            if (std.mem.eql(u8, macro_id, "none") or std.mem.eql(u8, macro_id, "$ion::none")) break :blk .none;
+            if (std.mem.eql(u8, macro_id, "values") or std.mem.eql(u8, macro_id, "$ion::values")) break :blk .values;
+            if (std.mem.eql(u8, macro_id, "make_string") or std.mem.eql(u8, macro_id, "$ion::make_string")) break :blk .make_string;
+            if (std.mem.eql(u8, macro_id, "make_symbol") or std.mem.eql(u8, macro_id, "$ion::make_symbol")) break :blk .make_symbol;
+            if (std.mem.eql(u8, macro_id, "make_decimal") or std.mem.eql(u8, macro_id, "$ion::make_decimal")) break :blk .make_decimal;
+            if (std.mem.eql(u8, macro_id, "make_list") or std.mem.eql(u8, macro_id, "$ion::make_list")) break :blk .make_list;
+            if (std.mem.eql(u8, macro_id, "make_sexp") or std.mem.eql(u8, macro_id, "$ion::make_sexp")) break :blk .make_sexp;
+            return IonError.Unsupported;
+        };
+
+        if (kind == .none) {
             // `(:none)` takes no arguments, even if an argument expression would expand to nothing.
             if (arg_exprs != 0) return IonError.InvalidIon;
             return &.{};
         }
 
-        if (std.mem.eql(u8, macro_name, "values")) {
+        if (kind == .values) {
             return args.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
         }
 
-        if (std.mem.eql(u8, macro_name, "make_string")) {
+        if (kind == .make_string) {
             var buf = std.ArrayListUnmanaged(u8){};
             errdefer buf.deinit(self.arena.allocator());
             for (args.items) |e| {
@@ -244,7 +323,97 @@ const Parser = struct {
             return out;
         }
 
-        return IonError.InvalidIon;
+        if (kind == .make_symbol) {
+            var buf = std.ArrayListUnmanaged(u8){};
+            errdefer buf.deinit(self.arena.allocator());
+            for (args.items) |e| {
+                // Argument annotations are silently dropped.
+                switch (e.value) {
+                    .string => |s| buf.appendSlice(self.arena.allocator(), s) catch return IonError.OutOfMemory,
+                    .symbol => |s| {
+                        const t = s.text orelse return IonError.InvalidIon;
+                        buf.appendSlice(self.arena.allocator(), t) catch return IonError.OutOfMemory;
+                    },
+                    else => return IonError.InvalidIon,
+                }
+            }
+            const out_text = buf.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+            const out_elem = value.Element{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, out_text) } };
+            const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+            out[0] = out_elem;
+            return out;
+        }
+
+        if (kind == .make_list or kind == .make_sexp) {
+            var out_items = std.ArrayListUnmanaged(value.Element){};
+            errdefer out_items.deinit(self.arena.allocator());
+            for (args.items) |e| {
+                // Argument annotations are silently dropped.
+                switch (e.value) {
+                    .list => |items| out_items.appendSlice(self.arena.allocator(), items) catch return IonError.OutOfMemory,
+                    .sexp => |items| out_items.appendSlice(self.arena.allocator(), items) catch return IonError.OutOfMemory,
+                    else => return IonError.InvalidIon,
+                }
+            }
+            const seq = out_items.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+            const out_elem = value.Element{
+                .annotations = &.{},
+                .value = if (kind == .make_list) .{ .list = seq } else .{ .sexp = seq },
+            };
+            const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+            out[0] = out_elem;
+            return out;
+        }
+
+        if (kind == .make_decimal) {
+            if (args.items.len != 2) return IonError.InvalidIon;
+
+            const coeff_elem = args.items[0];
+            const exp_elem = args.items[1];
+
+            if (coeff_elem.value != .int) return IonError.InvalidIon;
+            if (exp_elem.value != .int) return IonError.InvalidIon;
+
+            const exp_i128: i128 = switch (exp_elem.value.int) {
+                .small => |v| v,
+                .big => return IonError.Unsupported,
+            };
+            if (exp_i128 < std.math.minInt(i32) or exp_i128 > std.math.maxInt(i32)) return IonError.InvalidIon;
+
+            var is_negative: bool = false;
+            var magnitude: value.Int = undefined;
+            switch (coeff_elem.value.int) {
+                .small => |v| {
+                    if (v < 0) {
+                        if (v == std.math.minInt(i128)) return IonError.Unsupported;
+                        is_negative = true;
+                        magnitude = .{ .small = @intCast(@abs(v)) };
+                    } else {
+                        magnitude = .{ .small = v };
+                    }
+                },
+                .big => |_| {
+                    return IonError.Unsupported;
+                },
+            }
+
+            // Negative zero is not representable as an int; ensure we don't emit it.
+            const coeff_is_zero = switch (magnitude) {
+                .small => |v| v == 0,
+                .big => |v| v.eqlZero(),
+            };
+            if (coeff_is_zero) is_negative = false;
+
+            const out_elem = value.Element{
+                .annotations = &.{},
+                .value = .{ .decimal = .{ .is_negative = is_negative, .coefficient = magnitude, .exponent = @intCast(exp_i128) } },
+            };
+            const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+            out[0] = out_elem;
+            return out;
+        }
+
+        return IonError.Unsupported;
     }
 
     fn eof(self: *const Parser) bool {

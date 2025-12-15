@@ -824,14 +824,16 @@ fn runExpectation(
         defer if (frags.len != 0) allocator.free(frags);
         const doc_bytes = try buildTextDocument(allocator, state.version, frags);
         doc_bytes_owned = doc_bytes;
-        // Conformance suite inputs frequently contain Ion 1.1 macro invocations / e-expressions
-        // (e.g. `(:values ...)`). The Zig port does not implement the Ion 1.1 macro system yet,
-        // so we treat these branches as unsupported instead of failing the whole conformance file.
-        if (!std.mem.eql(u8, head, "signals") and std.mem.indexOf(u8, doc_bytes, "(:") != null) {
-            return RunError.Unsupported;
-        }
         parsed_doc = ion.parseDocument(allocator, doc_bytes) catch |e| {
             if (std.mem.eql(u8, head, "signals")) return true;
+            // Conformance suite includes many Ion 1.1 macro system / e-expression inputs. We don't
+            // implement those yet, but we still want to run the rest of the suite. Treat parser
+            // "unsupported" as a skip for this branch (rather than a hard failure).
+            if (e == ion.IonError.Unsupported) return false;
+            // Many not-yet-implemented macro invocations currently surface as other parse errors
+            // (InvalidIon/Incomplete/etc). If the input appears to contain an Ion 1.1 macro
+            // invocation, treat it as unsupported to keep conformance progress incremental.
+            if (std.mem.indexOf(u8, doc_bytes, "(:") != null) return false;
             std.debug.print("conformance parse failed unexpectedly: {s}\n", .{@errorName(e)});
             return RunError.InvalidConformanceDsl;
         };
