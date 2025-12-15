@@ -7,8 +7,11 @@ pub const DenoteError = error{
     Unsupported,
 };
 
-fn makeSymbol(arena: *value.Arena, text: []const u8) DenoteError!value.Symbol {
-    return value.makeSymbol(arena, text) catch return DenoteError.OutOfMemory;
+fn makeSymbol(arena: *value.Arena, text: []const u8) value.Symbol {
+    // Denotation constructor names are compile-time strings; avoid arena duplication to keep
+    // denotation evaluation cheap and reduce allocator churn during the conformance suite.
+    _ = arena;
+    return .{ .sid = null, .text = text };
 }
 
 fn makeElem(arena: *value.Arena, v: value.Value) value.Element {
@@ -22,28 +25,28 @@ fn makeSexp(arena: *value.Arena, items: []const value.Element) DenoteError!value
 }
 
 fn makeCtor0(arena: *value.Arena, name: []const u8) DenoteError!value.Element {
-    const head = makeElem(arena, .{ .symbol = try makeSymbol(arena, name) });
+    const head = makeElem(arena, .{ .symbol = makeSymbol(arena, name) });
     return makeSexp(arena, &.{head});
 }
 
 fn makeCtor1(arena: *value.Arena, name: []const u8, arg: value.Element) DenoteError!value.Element {
-    const head = makeElem(arena, .{ .symbol = try makeSymbol(arena, name) });
+    const head = makeElem(arena, .{ .symbol = makeSymbol(arena, name) });
     return makeSexp(arena, &.{ head, arg });
 }
 
 fn makeCtor2(arena: *value.Arena, name: []const u8, a1: value.Element, a2: value.Element) DenoteError!value.Element {
-    const head = makeElem(arena, .{ .symbol = try makeSymbol(arena, name) });
+    const head = makeElem(arena, .{ .symbol = makeSymbol(arena, name) });
     return makeSexp(arena, &.{ head, a1, a2 });
 }
 
 fn makeTextBytesSexp(arena: *value.Arena, bytes: []const u8) DenoteError!value.Element {
-    var elems = std.ArrayListUnmanaged(value.Element){};
-    defer elems.deinit(arena.allocator());
-    elems.append(arena.allocator(), makeElem(arena, .{ .symbol = try makeSymbol(arena, "text") })) catch return DenoteError.OutOfMemory;
-    for (bytes) |b| {
-        elems.append(arena.allocator(), makeElem(arena, .{ .int = .{ .small = @intCast(b) } })) catch return DenoteError.OutOfMemory;
+    // Avoid `ArrayList`/`realloc` churn: conformance uses this encoding heavily.
+    const items = arena.allocator().alloc(value.Element, bytes.len + 1) catch return DenoteError.OutOfMemory;
+    items[0] = makeElem(arena, .{ .symbol = makeSymbol(arena, "text") });
+    for (bytes, 0..) |b, i| {
+        items[i + 1] = makeElem(arena, .{ .int = .{ .small = @intCast(b) } });
     }
-    return makeSexp(arena, elems.items);
+    return makeElem(arena, .{ .sexp = items });
 }
 
 fn denoteString(arena: *value.Arena, s: []const u8) DenoteError!value.Element {
@@ -54,35 +57,98 @@ fn denoteString(arena: *value.Arena, s: []const u8) DenoteError!value.Element {
 }
 
 fn denoteSymbol(arena: *value.Arena, sym: value.Symbol) DenoteError!value.Element {
-    const t = sym.text orelse "";
-    const bytes_sexp = try makeTextBytesSexp(arena, t);
+    if (sym.text) |t| {
+        const bytes_sexp = try makeTextBytesSexp(arena, t);
+        return makeCtor1(arena, "Symbol", bytes_sexp);
+    }
+    if (sym.sid) |sid| {
+        const sid_elem = makeElem(arena, .{ .int = .{ .small = @intCast(sid) } });
+        return makeCtor1(arena, "Symbol", sid_elem);
+    }
+    const bytes_sexp = try makeTextBytesSexp(arena, "");
     return makeCtor1(arena, "Symbol", bytes_sexp);
 }
 
 fn denoteListLike(arena: *value.Arena, ctor: []const u8, elems: []const value.Element) DenoteError!value.Element {
-    var out = std.ArrayListUnmanaged(value.Element){};
-    defer out.deinit(arena.allocator());
-    out.append(arena.allocator(), makeElem(arena, .{ .symbol = try makeSymbol(arena, ctor) })) catch return DenoteError.OutOfMemory;
-    for (elems) |e| {
-        const d = try denoteElement(arena, e);
-        out.append(arena.allocator(), d) catch return DenoteError.OutOfMemory;
-    }
-    return makeSexp(arena, out.items);
+    const items = arena.allocator().alloc(value.Element, elems.len + 1) catch return DenoteError.OutOfMemory;
+    items[0] = makeElem(arena, .{ .symbol = makeSymbol(arena, ctor) });
+    for (elems, 0..) |e, i| items[i + 1] = try denoteElement(arena, e);
+    return makeElem(arena, .{ .sexp = items });
 }
 
 fn denoteStruct(arena: *value.Arena, st: value.Struct) DenoteError!value.Element {
-    var out = std.ArrayListUnmanaged(value.Element){};
-    defer out.deinit(arena.allocator());
-    out.append(arena.allocator(), makeElem(arena, .{ .symbol = try makeSymbol(arena, "Struct") })) catch return DenoteError.OutOfMemory;
+    const items = arena.allocator().alloc(value.Element, st.fields.len + 1) catch return DenoteError.OutOfMemory;
+    items[0] = makeElem(arena, .{ .symbol = makeSymbol(arena, "Struct") });
 
-    for (st.fields) |f| {
-        const name_elem: value.Element = if (f.name.text) |t| makeElem(arena, .{ .string = t }) else makeElem(arena, .{ .int = .{ .small = @intCast(f.name.sid orelse 0) } });
+    for (st.fields, 0..) |f, i| {
+        // Conformance denotes struct field names as either:
+        // - an integer (SID) if a field name was addressed by ID, or
+        // - a string literal if the field name is textual.
+        //
+        // Prefer a known SID when present, since binary Ion often resolves system symbols to both
+        // `sid` and `text`, but the denotation language expects the SID form.
+        const name_elem: value.Element = if (f.name.sid) |sid|
+            makeElem(arena, .{ .int = .{ .small = @intCast(sid) } })
+        else if (f.name.text) |t|
+            makeElem(arena, .{ .string = t })
+        else
+            makeElem(arena, .{ .int = .{ .small = 0 } });
         const val_elem = try denoteElement(arena, f.value);
-        const pair = try makeSexp(arena, &.{ name_elem, val_elem });
-        out.append(arena.allocator(), pair) catch return DenoteError.OutOfMemory;
+        const pair_items = arena.allocator().alloc(value.Element, 2) catch return DenoteError.OutOfMemory;
+        pair_items[0] = name_elem;
+        pair_items[1] = val_elem;
+        items[i + 1] = makeElem(arena, .{ .sexp = pair_items });
     }
 
-    return makeSexp(arena, out.items);
+    return makeElem(arena, .{ .sexp = items });
+}
+
+fn denoteFloat(arena: *value.Arena, f: f64) DenoteError!value.Element {
+    // Conformance denotes floats via a canonical Ion text representation string.
+    //
+    // Zig's `{e}` formatting matches the conformance suite's expected encodings for finite values
+    // (e.g. `0e0`, `6.125e0`, `1.401298464324817e-45`, `5e-324`).
+    var buf: [128]u8 = undefined;
+    const s: []const u8 = if (std.math.isNan(f))
+        "nan"
+    else if (std.math.isInf(f))
+        (if (f > 0) "+inf" else "-inf")
+    else if (f == 0.0 and std.math.signbit(f))
+        "-0e0"
+    else if (f == 0.0)
+        "0e0"
+    else
+        (std.fmt.bufPrint(&buf, "{e}", .{f}) catch return DenoteError.Unsupported);
+
+    return makeCtor1(arena, "Float", try denoteString(arena, s));
+}
+
+fn denoteDecimal(arena: *value.Arena, d: value.Decimal) DenoteError!value.Element {
+    // Conformance denotes decimals as (Decimal <coefficient> <exponent>) where:
+    // - coefficient is an integer, except negative zero which is represented as the string "negative_0"
+    // - exponent is an integer
+    const coeff_is_zero = switch (d.coefficient) {
+        .small => |v| v == 0,
+        .big => |v| v.eqlZero(),
+    };
+
+    const coeff_elem: value.Element = if (coeff_is_zero and d.is_negative) blk: {
+        break :blk try denoteString(arena, "negative_0");
+    } else blk: {
+        const coeff_int: value.Int = switch (d.coefficient) {
+            .small => |v| .{ .small = if (d.is_negative) -v else v },
+            .big => |b| if (!d.is_negative) .{ .big = b } else blk2: {
+                const copy = arena.makeBigInt() catch return DenoteError.OutOfMemory;
+                copy.copy(b.toConst()) catch return DenoteError.OutOfMemory;
+                copy.setSign(false);
+                break :blk2 .{ .big = copy };
+            },
+        };
+        break :blk try makeCtor1(arena, "Int", makeElem(arena, .{ .int = coeff_int }));
+    };
+
+    const exp_elem = try makeCtor1(arena, "Int", makeElem(arena, .{ .int = .{ .small = @intCast(d.exponent) } }));
+    return makeCtor2(arena, "Decimal", coeff_elem, exp_elem);
 }
 
 pub fn denoteElement(arena: *value.Arena, elem: value.Element) DenoteError!value.Element {
@@ -94,13 +160,13 @@ pub fn denoteElement(arena: *value.Arena, elem: value.Element) DenoteError!value
     return switch (elem.value) {
         .null => |t| blk: {
             if (t == .null) break :blk try makeCtor0(arena, "Null");
-            const type_sym = makeElem(arena, .{ .symbol = try makeSymbol(arena, @tagName(t)) });
+            const type_sym = makeElem(arena, .{ .symbol = makeSymbol(arena, @tagName(t)) });
             break :blk try makeCtor1(arena, "Null", type_sym);
         },
         .bool => |b| try makeCtor1(arena, "Bool", makeElem(arena, .{ .bool = b })),
         .int => |i| try makeCtor1(arena, "Int", makeElem(arena, .{ .int = i })),
-        .float => |f| makeElem(arena, .{ .float = f }),
-        .decimal => |d| makeElem(arena, .{ .decimal = d }),
+        .float => |f| try denoteFloat(arena, f),
+        .decimal => |d| try denoteDecimal(arena, d),
         .timestamp => |t| makeElem(arena, .{ .timestamp = t }),
         .string => |s| try denoteString(arena, s),
         .symbol => |s| try denoteSymbol(arena, s),
@@ -167,7 +233,7 @@ pub fn normalizeDenoteExpected(arena: *value.Arena, expected: value.Element) Den
         .int => |i| try makeCtor1(arena, "Int", makeElem(arena, .{ .int = i })),
         .null => |t| blk: {
             if (t == .null) break :blk try makeCtor0(arena, "Null");
-            const type_sym = makeElem(arena, .{ .symbol = try makeSymbol(arena, @tagName(t)) });
+            const type_sym = makeElem(arena, .{ .symbol = makeSymbol(arena, @tagName(t)) });
             break :blk try makeCtor1(arena, "Null", type_sym);
         },
         .float, .decimal, .timestamp, .blob, .clob => expected,
@@ -182,6 +248,11 @@ pub fn normalizeDenoteExpected(arena: *value.Arena, expected: value.Element) Den
             // (Symbol "foo") and (Symbol (text ...))
             if (isCtor(sx, "Symbol")) {
                 if (sx.len != 2) return DenoteError.Unsupported;
+                if (sx[1].value == .int) return makeCtor1(arena, "Symbol", sx[1]);
+                if (sx[1].value == .sexp and isCtor(sx[1].value.sexp, "absent")) {
+                    // Keep `absent` symtok as-is: (Symbol (absent <name> <offset>)).
+                    return makeCtor1(arena, "Symbol", sx[1]);
+                }
                 const str = try evalTextConstructorToString(arena.gpa, sx[1]);
                 defer arena.gpa.free(str);
                 const bytes_sexp = try makeTextBytesSexp(arena, str);

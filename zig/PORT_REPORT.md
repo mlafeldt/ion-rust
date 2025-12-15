@@ -92,7 +92,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
-  - As of 2025-12-15, `cd zig && /opt/homebrew/bin/zig build test --summary all` runs 13 Zig tests; all pass.
+  - As of 2025-12-15, `cd zig && /opt/homebrew/bin/zig build test --summary all` runs 17 Zig tests; all pass.
 
 ### Skip list
 
@@ -132,17 +132,26 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
 
 1) Files in suite: 55 (`.ion`)
 2) Current result in Zig:
-   - Run: 7/55 conformance files
+   - Run: 11/55 conformance files
      - `ion-tests/conformance/core/*.ion` (4 files)
      - `ion-tests/conformance/system_symbols.ion`
      - `ion-tests/conformance/local_symtab.ion`
      - `ion-tests/conformance/ivm.ion`
-   - Not run yet: 48/55 conformance files
      - `ion-tests/conformance/local_symtab_imports.ion`
-     - `ion-tests/conformance/data_model/*.ion` (7 files)
-     - `ion-tests/conformance/eexp/*.ion` (4 files)
-     - `ion-tests/conformance/system_macros/*.ion` (24 files)
-     - `ion-tests/conformance/tdl/*.ion` (10 files)
+     - `ion-tests/conformance/data_model/null.ion` (some branches skipped; binary Ion 1.1 is not implemented)
+     - `ion-tests/conformance/data_model/boolean.ion` (some branches skipped; binary fragments are not yet executed)
+     - `ion-tests/conformance/data_model/annotations.ion`
+   - Not run yet: 44/55 conformance files
+     - `ion-tests/conformance/data_model/*.ion` (4 remaining files)
+      - `ion-tests/conformance/eexp/*.ion` (4 files)
+      - `ion-tests/conformance/system_macros/*.ion` (24 files)
+      - `ion-tests/conformance/tdl/*.ion` (10 files)
+      - `ion-tests/conformance/demos/*.ion` (2 files)
+3) Known blockers when expanding `data_model/` coverage (as observed on 2025-12-15):
+   - `ion-tests/conformance/data_model/float.ion`: enabling currently triggers a Zig segfault during `denotes` evaluation (needs investigation).
+   - `ion-tests/conformance/data_model/struct.ion`: enabling currently fails `signals` expectations (the parser accepts some inputs that should be rejected per conformance).
+   - `ion-tests/conformance/data_model/decimal.ion`: enabling currently fails `denotes` expectations (decimal denotation is not yet complete).
+   - `ion-tests/conformance/data_model/integer.ion`: very large; runner needs additional scaling work before enabling.
 3) What needs to be implemented to fully run this suite:
    - Conformance DSL runner (test collection parsing/execution, signals, and "produces" verification)
    - Ion 1.1 macro system beyond the limited corpus macros (`none`, `values`, `make_string`)

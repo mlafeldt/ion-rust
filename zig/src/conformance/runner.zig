@@ -24,28 +24,90 @@ const AstEvent = union(enum) {
     ivm_invalid: struct { major: u32, minor: u32 },
 };
 
+const Absence = struct {
+    name: []const u8,
+    offset: u32,
+};
+
+const SharedSymtabCatalog = struct {
+    const Entry = struct {
+        name: []const u8,
+        version: u32,
+        symbols: []const ?[]const u8,
+    };
+
+    // Minimal shared symbol table catalog required by the conformance suite.
+    // Entries here are referenced by `ion-tests/conformance/local_symtab_imports.ion`.
+    const entries = [_]Entry{
+        .{ .name = "empty", .version = 1, .symbols = &.{} },
+        .{ .name = "abcs", .version = 1, .symbols = &.{ "a" } },
+        .{ .name = "abcs", .version = 2, .symbols = &.{ "a", "b" } },
+        .{ .name = "mnop", .version = 1, .symbols = &.{ "m", "n", "o", "p" } },
+        // v4 has a gap in the first slot (as referenced by conformance comments).
+        .{ .name = "mnop", .version = 4, .symbols = &.{ null, "n", "o", "p" } },
+    };
+
+    fn lookup(name: []const u8, version: u32) ?Entry {
+        for (entries) |e| {
+            if (e.version == version and std.mem.eql(u8, e.name, name)) return e;
+        }
+        return null;
+    }
+
+    fn bestForName(name: []const u8) ?Entry {
+        var best: ?Entry = null;
+        for (entries) |e| {
+            if (!std.mem.eql(u8, e.name, name)) continue;
+            if (best == null or e.version > best.?.version) best = e;
+        }
+        return best;
+    }
+};
+
 const State = struct {
     version: Version,
-    // Accumulated text fragments (concatenated with whitespace injection).
-    text_fragments: std.ArrayListUnmanaged([]const u8) = .{},
-    // Accumulated abstract AST fragments (`toplevel`) + abstract IVM markers (`ivm`).
-    events: std.ArrayListUnmanaged(AstEvent) = .{},
+    // Persistent stacks of fragment/event nodes to avoid O(n) copies on `each` branching.
+    text_tail: ?*TextNode = null,
+    text_len: usize = 0,
+    event_tail: ?*EventNode = null,
+    event_len: usize = 0,
     // If true, some clause required to evaluate this branch is not yet implemented.
     unsupported: bool = false,
 
     fn deinit(self: *State, allocator: std.mem.Allocator) void {
-        self.text_fragments.deinit(allocator);
-        self.events.deinit(allocator);
+        // Nodes are arena-allocated in `evalSeq` and freed all at once; nothing to do here.
+        _ = self;
+        _ = allocator;
     }
 
     fn clone(self: *const State, allocator: std.mem.Allocator) RunError!State {
-        var out = self.*;
-        out.text_fragments = .{};
-        out.events = .{};
-        out.text_fragments.appendSlice(allocator, self.text_fragments.items) catch return RunError.OutOfMemory;
-        out.events.appendSlice(allocator, self.events.items) catch return RunError.OutOfMemory;
-        return out;
+        _ = allocator;
+        return self.*;
     }
+
+    fn pushText(self: *State, allocator: std.mem.Allocator, frag: []const u8) RunError!void {
+        const n = allocator.create(TextNode) catch return RunError.OutOfMemory;
+        n.* = .{ .prev = self.text_tail, .frag = frag };
+        self.text_tail = n;
+        self.text_len += 1;
+    }
+
+    fn pushEvent(self: *State, allocator: std.mem.Allocator, ev: AstEvent) RunError!void {
+        const n = allocator.create(EventNode) catch return RunError.OutOfMemory;
+        n.* = .{ .prev = self.event_tail, .ev = ev };
+        self.event_tail = n;
+        self.event_len += 1;
+    }
+};
+
+const TextNode = struct {
+    prev: ?*TextNode,
+    frag: []const u8,
+};
+
+const EventNode = struct {
+    prev: ?*EventNode,
+    ev: AstEvent,
 };
 
 fn symText(e: value.Element) ?[]const u8 {
@@ -91,24 +153,23 @@ fn parseDelayedSid(s: value.Symbol) ?u32 {
 fn applyTextFragment(state: *State, allocator: std.mem.Allocator, sx: []const value.Element) RunError!void {
     // (text <string?>)
     if (sx.len == 1) {
-        state.text_fragments.append(allocator, "") catch return RunError.OutOfMemory;
-        return;
+        return state.pushText(allocator, "");
     }
     if (sx.len != 2) return RunError.InvalidConformanceDsl;
     if (sx[1].value != .string) return RunError.InvalidConformanceDsl;
     const s = sx[1].value.string;
     if (parseTextIvmToken(s)) |v| {
         switch (v) {
-            .valid => |ver| state.events.append(allocator, .{ .ivm = ver }) catch return RunError.OutOfMemory,
-            .invalid => |bad| state.events.append(allocator, .{ .ivm_invalid = .{ .major = bad.major, .minor = bad.minor } }) catch return RunError.OutOfMemory,
+            .valid => |ver| try state.pushEvent(allocator, .{ .ivm = ver }),
+            .invalid => |bad| try state.pushEvent(allocator, .{ .ivm_invalid = .{ .major = bad.major, .minor = bad.minor } }),
         }
         return;
     }
-    state.text_fragments.append(allocator, s) catch return RunError.OutOfMemory;
+    try state.pushText(allocator, s);
 }
 
 fn applyTopLevel2(state: *State, allocator: std.mem.Allocator, sx: []const value.Element) RunError!void {
-    for (sx[1..]) |e| state.events.append(allocator, .{ .value = e }) catch return RunError.OutOfMemory;
+    for (sx[1..]) |e| try state.pushEvent(allocator, .{ .value = e });
 }
 
 fn applyBinaryFragment(state: *State, allocator: std.mem.Allocator, sx: []const value.Element) RunError!void {
@@ -151,14 +212,14 @@ fn applyBinaryFragment(state: *State, allocator: std.mem.Allocator, sx: []const 
     const major: u32 = bytes.items[1];
     const minor: u32 = bytes.items[2];
     if (major == 1 and minor == 0) {
-        state.events.append(allocator, .{ .ivm = .ion_1_0 }) catch return RunError.OutOfMemory;
+        try state.pushEvent(allocator, .{ .ivm = .ion_1_0 });
         return;
     }
     if (major == 1 and minor == 1) {
-        state.events.append(allocator, .{ .ivm = .ion_1_1 }) catch return RunError.OutOfMemory;
+        try state.pushEvent(allocator, .{ .ivm = .ion_1_1 });
         return;
     }
-    state.events.append(allocator, .{ .ivm_invalid = .{ .major = major, .minor = minor } }) catch return RunError.OutOfMemory;
+    try state.pushEvent(allocator, .{ .ivm_invalid = .{ .major = major, .minor = minor } });
 }
 
 fn buildTextDocument(allocator: std.mem.Allocator, version: Version, frags: []const []const u8) RunError![]u8 {
@@ -181,6 +242,32 @@ fn buildTextDocument(allocator: std.mem.Allocator, version: Version, frags: []co
     return out.toOwnedSlice(allocator) catch return RunError.OutOfMemory;
 }
 
+fn collectTextFragments(allocator: std.mem.Allocator, state: *const State) RunError![][]const u8 {
+    if (state.text_len == 0) return &.{};
+    const out = allocator.alloc([]const u8, state.text_len) catch return RunError.OutOfMemory;
+    var idx: usize = state.text_len;
+    var n = state.text_tail;
+    while (n) |node| {
+        idx -= 1;
+        out[idx] = node.frag;
+        n = node.prev;
+    }
+    return out;
+}
+
+fn collectEvents(allocator: std.mem.Allocator, state: *const State) RunError![]AstEvent {
+    if (state.event_len == 0) return &.{};
+    const out = allocator.alloc(AstEvent, state.event_len) catch return RunError.OutOfMemory;
+    var idx: usize = state.event_len;
+    var n = state.event_tail;
+    while (n) |node| {
+        idx -= 1;
+        out[idx] = node.ev;
+        n = node.prev;
+    }
+    return out;
+}
+
 fn symtabTextForSid(symtab: []const ?[]const u8, symtab_max_id: u32, sid: u32) ?[]const u8 {
     if (sid == 0) return null;
     if (sid < symtab.len) return symtab[@intCast(sid)];
@@ -195,46 +282,68 @@ fn effectiveSymbolText(symtab: []const ?[]const u8, symtab_max_id: u32, s: value
     return null;
 }
 
-fn resolveDelayedSymbolUsingSymtab(arena: *value.Arena, symtab: []const ?[]const u8, symtab_max_id: u32, s: value.Symbol) RunError!value.Symbol {
+fn resolveDelayedSymbolUsingSymtab(
+    arena: *value.Arena,
+    symtab: []const ?[]const u8,
+    symtab_max_id: u32,
+    absences: *const std.AutoHashMapUnmanaged(u32, Absence),
+    s: value.Symbol,
+) RunError!value.Symbol {
     const sid = parseDelayedSid(s) orelse return s;
     if (sid == 0) return value.makeSymbolId(0, null);
     if (sid > symtab_max_id) return RunError.InvalidConformanceDsl;
     const t = symtabTextForSid(symtab, symtab_max_id, sid);
-    if (t == null) return value.makeSymbolId(0, null);
+    if (t == null) {
+        if (absences.get(sid) != null) return value.makeSymbolId(sid, null);
+        // Conformance: unknown/malformed symbol table entries act like $0.
+        return value.makeSymbolId(0, null);
+    }
     _ = arena;
     return value.makeSymbolId(null, t.?);
 }
 
-fn resolveDelayedInElement(arena: *value.Arena, symtab: []const ?[]const u8, symtab_max_id: u32, elem: value.Element) RunError!value.Element {
+fn resolveDelayedInElement(
+    arena: *value.Arena,
+    symtab: []const ?[]const u8,
+    symtab_max_id: u32,
+    absences: *const std.AutoHashMapUnmanaged(u32, Absence),
+    elem: value.Element,
+) RunError!value.Element {
     var out = elem;
     if (elem.annotations.len != 0) {
         const anns = arena.allocator().dupe(value.Symbol, elem.annotations) catch return RunError.OutOfMemory;
-        for (anns) |*a| a.* = try resolveDelayedSymbolUsingSymtab(arena, symtab, symtab_max_id, a.*);
+        for (anns) |*a| a.* = try resolveDelayedSymbolUsingSymtab(arena, symtab, symtab_max_id, absences, a.*);
         out.annotations = anns;
     }
-    out.value = try resolveDelayedInValue(arena, symtab, symtab_max_id, elem.value);
+    out.value = try resolveDelayedInValue(arena, symtab, symtab_max_id, absences, elem.value);
     return out;
 }
 
-fn resolveDelayedInValue(arena: *value.Arena, symtab: []const ?[]const u8, symtab_max_id: u32, v: value.Value) RunError!value.Value {
+fn resolveDelayedInValue(
+    arena: *value.Arena,
+    symtab: []const ?[]const u8,
+    symtab_max_id: u32,
+    absences: *const std.AutoHashMapUnmanaged(u32, Absence),
+    v: value.Value,
+) RunError!value.Value {
     return switch (v) {
-        .symbol => |s| .{ .symbol = try resolveDelayedSymbolUsingSymtab(arena, symtab, symtab_max_id, s) },
+        .symbol => |s| .{ .symbol = try resolveDelayedSymbolUsingSymtab(arena, symtab, symtab_max_id, absences, s) },
         .list => |l| blk: {
             const out = arena.allocator().alloc(value.Element, l.len) catch return RunError.OutOfMemory;
-            for (l, 0..) |e, i| out[i] = try resolveDelayedInElement(arena, symtab, symtab_max_id, e);
+            for (l, 0..) |e, i| out[i] = try resolveDelayedInElement(arena, symtab, symtab_max_id, absences, e);
             break :blk .{ .list = out };
         },
         .sexp => |sx| blk: {
             const out = arena.allocator().alloc(value.Element, sx.len) catch return RunError.OutOfMemory;
-            for (sx, 0..) |e, i| out[i] = try resolveDelayedInElement(arena, symtab, symtab_max_id, e);
+            for (sx, 0..) |e, i| out[i] = try resolveDelayedInElement(arena, symtab, symtab_max_id, absences, e);
             break :blk .{ .sexp = out };
         },
         .@"struct" => |st| blk: {
             const out_fields = arena.allocator().alloc(value.StructField, st.fields.len) catch return RunError.OutOfMemory;
             for (st.fields, 0..) |f, i| {
                 out_fields[i] = .{
-                    .name = try resolveDelayedSymbolUsingSymtab(arena, symtab, symtab_max_id, f.name),
-                    .value = try resolveDelayedInElement(arena, symtab, symtab_max_id, f.value),
+                    .name = try resolveDelayedSymbolUsingSymtab(arena, symtab, symtab_max_id, absences, f.name),
+                    .value = try resolveDelayedInElement(arena, symtab, symtab_max_id, absences, f.value),
                 };
             }
             break :blk .{ .@"struct" = .{ .fields = out_fields } };
@@ -262,38 +371,175 @@ fn resetSymtabForVersion(allocator: std.mem.Allocator, version: Version, out: *s
     out_max_id.* = sys_max;
 }
 
-fn applyIstStruct(version: Version, allocator: std.mem.Allocator, symtab: *std.ArrayListUnmanaged(?[]const u8), symtab_max_id: *u32, elem: value.Element) RunError!void {
+fn applyIstStruct(
+    version: Version,
+    allocator: std.mem.Allocator,
+    symtab: *std.ArrayListUnmanaged(?[]const u8),
+    symtab_max_id: *u32,
+    absences: *std.AutoHashMapUnmanaged(u32, Absence),
+    prev_symtab: []const ?[]const u8,
+    prev_symtab_max_id: u32,
+    elem: value.Element,
+) RunError!void {
     // Only struct-valued `$ion_symbol_table` annotations are symbol tables; other types pass through.
     if (!(elem.value == .@"struct" or (elem.value == .null and elem.value.null == .@"struct"))) return;
     // Successive local symtabs replace earlier ones (reset to system + imports/symbols).
     try resetSymtabForVersion(allocator, version, symtab, symtab_max_id);
+    absences.clearRetainingCapacity();
 
     if (elem.value == .null) return;
     const st = elem.value.@"struct";
-    // Extract `symbols:[...]` if present and well-formed.
-    var i: usize = 0;
-    while (i < st.fields.len) : (i += 1) {
-        const f = st.fields[i];
+
+    var imports_field: ?value.Element = null;
+    var symbols_field: ?value.Element = null;
+
+    for (st.fields) |f| {
         const name_text = effectiveSymbolText(symtab.items, symtab_max_id.*, f.name) orelse continue;
-        if (!std.mem.eql(u8, name_text, "symbols")) continue;
-        if (f.value.value != .list) return; // malformed, ignore whole field
-        const items = f.value.value.list;
-        // Append slots for each entry.
-        for (items) |it| {
-            if (it.value == .string) {
-                symtab.append(allocator, it.value.string) catch return RunError.OutOfMemory;
-                symtab_max_id.* += 1;
-            } else {
-                // malformed entry acts like $0 => unknown slot
-                symtab.append(allocator, null) catch return RunError.OutOfMemory;
-                symtab_max_id.* += 1;
-            }
+        if (std.mem.eql(u8, name_text, "imports")) {
+            if (imports_field != null) return RunError.InvalidConformanceDsl;
+            imports_field = f.value;
+            continue;
         }
-        // Expand max id and dense storage.
-        if (symtab.items.len > 0) symtab_max_id.* = @intCast(symtab.items.len - 1);
-        return;
+        if (std.mem.eql(u8, name_text, "symbols")) {
+            if (symbols_field != null) return RunError.InvalidConformanceDsl;
+            symbols_field = f.value;
+            continue;
+        }
     }
-    // Missing or malformed symbols field => ignore.
+
+    // Apply imports first if present.
+    if (imports_field) |imp| {
+        // Special-case: `imports:$ion_symbol_table` means import the current symbol table.
+        if (imp.value == .symbol) {
+            const imp_sym = imp.value.symbol;
+            const imp_name = effectiveSymbolText(symtab.items, symtab_max_id.*, imp_sym) orelse null;
+            if (imp_name != null and std.mem.eql(u8, imp_name.?, "$ion_symbol_table")) {
+                const sys_max = sysMaxId(version);
+                if (prev_symtab_max_id > sys_max) {
+                    const count: u32 = prev_symtab_max_id - sys_max;
+                    var off: u32 = 1;
+                    while (off <= count) : (off += 1) {
+                        const sid: u32 = sys_max + off;
+                        const t = symtabTextForSid(prev_symtab, prev_symtab_max_id, sid);
+                        symtab.append(allocator, t) catch return RunError.OutOfMemory;
+                    }
+                    symtab_max_id.* = prev_symtab_max_id;
+                }
+            }
+        } else if (imp.value == .list) {
+            const imports = imp.value.list;
+            for (imports) |imp_elem| {
+                if (imp_elem.value != .@"struct") continue;
+                const imp_st = imp_elem.value.@"struct";
+
+                var name_opt: ?[]const u8 = null;
+                var ver: u32 = 1;
+                var max_id_opt: ?u32 = null;
+                var saw_name = false;
+                var saw_ver = false;
+                var saw_max = false;
+
+                for (imp_st.fields) |ff| {
+                    const fn_text = effectiveSymbolText(symtab.items, symtab_max_id.*, ff.name) orelse continue;
+                    if (std.mem.eql(u8, fn_text, "name")) {
+                        if (saw_name) return RunError.InvalidConformanceDsl;
+                        saw_name = true;
+                        if (ff.value.value == .string) {
+                            const n = ff.value.value.string;
+                            if (n.len != 0) name_opt = n;
+                        }
+                        continue;
+                    }
+                    if (std.mem.eql(u8, fn_text, "version")) {
+                        if (saw_ver) return RunError.InvalidConformanceDsl;
+                        saw_ver = true;
+                        if (ff.value.value == .int) {
+                            switch (ff.value.value.int) {
+                                .small => |v| {
+                                    if (v > 0) ver = @intCast(v);
+                                },
+                                else => {},
+                            }
+                        }
+                        continue;
+                    }
+                    if (std.mem.eql(u8, fn_text, "max_id")) {
+                        if (saw_max) return RunError.InvalidConformanceDsl;
+                        saw_max = true;
+                        if (ff.value.value == .int) {
+                            switch (ff.value.value.int) {
+                                .small => |v| {
+                                    if (v >= 0) max_id_opt = @intCast(v);
+                                },
+                                else => {},
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                const name = name_opt orelse continue;
+
+                const exact = SharedSymtabCatalog.lookup(name, ver);
+                const requested_max_valid = max_id_opt;
+
+                if (exact == null and requested_max_valid == null) return RunError.InvalidConformanceDsl;
+                const chosen = exact orelse if (requested_max_valid != null) SharedSymtabCatalog.bestForName(name) else null;
+
+                if (chosen) |tab| {
+                    // If we have an exact match, malformed max_id is ignored and the table's full size is used.
+                    const use_max: u32 = if (exact != null)
+                        (requested_max_valid orelse @intCast(tab.symbols.len))
+                    else
+                        (requested_max_valid orelse return RunError.InvalidConformanceDsl);
+
+                    var off: u32 = 1;
+                    while (off <= use_max) : (off += 1) {
+                        const idx: usize = @intCast(off - 1);
+                        const sid: u32 = symtab_max_id.* + 1;
+                        if (idx < tab.symbols.len) {
+                            if (tab.symbols[idx]) |txt| {
+                                symtab.append(allocator, txt) catch return RunError.OutOfMemory;
+                            } else {
+                                symtab.append(allocator, null) catch return RunError.OutOfMemory;
+                                const owned = allocator.dupe(u8, name) catch return RunError.OutOfMemory;
+                                absences.put(allocator, sid, .{ .name = owned, .offset = off }) catch return RunError.OutOfMemory;
+                            }
+                        } else {
+                            symtab.append(allocator, null) catch return RunError.OutOfMemory;
+                            const owned = allocator.dupe(u8, name) catch return RunError.OutOfMemory;
+                            absences.put(allocator, sid, .{ .name = owned, .offset = off }) catch return RunError.OutOfMemory;
+                        }
+                        symtab_max_id.* += 1;
+                    }
+                } else {
+                    // No catalog entry; pad out to max_id with absent slots.
+                    const pad: u32 = requested_max_valid orelse return RunError.InvalidConformanceDsl;
+                    var off: u32 = 1;
+                    while (off <= pad) : (off += 1) {
+                        const sid: u32 = symtab_max_id.* + 1;
+                        symtab.append(allocator, null) catch return RunError.OutOfMemory;
+                        const owned = allocator.dupe(u8, name) catch return RunError.OutOfMemory;
+                        absences.put(allocator, sid, .{ .name = owned, .offset = off }) catch return RunError.OutOfMemory;
+                        symtab_max_id.* += 1;
+                    }
+                }
+            }
+        } else {
+            // Non-list imports are ignored (including sexp).
+        }
+    }
+
+    // Apply symbols (local symbols) if present and well-formed.
+    if (symbols_field) |sym| {
+        if (sym.value != .list) return; // malformed, ignore whole field
+        const items = sym.value.list;
+        for (items) |it| {
+            symtab.append(allocator, if (it.value == .string) it.value.string else null) catch return RunError.OutOfMemory;
+            symtab_max_id.* += 1;
+        }
+        if (symtab.items.len > 0) symtab_max_id.* = @intCast(symtab.items.len - 1);
+    }
 }
 
 fn normalizeExpectedElement(arena: *value.Arena, elem: value.Element) RunError!value.Element {
@@ -375,7 +621,7 @@ fn parseAbstractIvmSymbol(s: value.Symbol) ?ParsedIvm {
     return .{ .invalid = .{ .major = major, .minor = minor } };
 }
 
-fn evalAbstractDocument(arena: *value.Arena, state: *State) RunError![]value.Element {
+fn evalAbstractDocument(arena: *value.Arena, state: *State, absences: *std.AutoHashMapUnmanaged(u32, Absence)) RunError![]value.Element {
     const a = arena.allocator();
     var out = std.ArrayListUnmanaged(value.Element){};
     errdefer out.deinit(a);
@@ -385,12 +631,17 @@ fn evalAbstractDocument(arena: *value.Arena, state: *State) RunError![]value.Ele
     defer symtab.deinit(a);
     var symtab_max_id: u32 = 0;
     try resetSymtabForVersion(a, version_ctx, &symtab, &symtab_max_id);
+    absences.clearRetainingCapacity();
 
-    for (state.events.items) |ev| {
+    const events = try collectEvents(a, state);
+    defer if (events.len != 0) a.free(events);
+
+    for (events) |ev| {
         switch (ev) {
             .ivm => |v| {
                 version_ctx = v;
                 try resetSymtabForVersion(a, version_ctx, &symtab, &symtab_max_id);
+                absences.clearRetainingCapacity();
             },
             .ivm_invalid => |_| return RunError.InvalidConformanceDsl,
             .value => |e| {
@@ -400,6 +651,7 @@ fn evalAbstractDocument(arena: *value.Arena, state: *State) RunError![]value.Ele
                             .valid => |v| {
                                 version_ctx = v;
                                 try resetSymtabForVersion(a, version_ctx, &symtab, &symtab_max_id);
+                                absences.clearRetainingCapacity();
                                 continue;
                             },
                             .invalid => |_| return RunError.InvalidConformanceDsl,
@@ -407,10 +659,12 @@ fn evalAbstractDocument(arena: *value.Arena, state: *State) RunError![]value.Ele
                     }
                 }
                 if (isIstStructTopLevel(symtab.items, symtab_max_id, e)) {
-                    try applyIstStruct(version_ctx, a, &symtab, &symtab_max_id, e);
+                    const prev_items = a.dupe(?[]const u8, symtab.items) catch return RunError.OutOfMemory;
+                    const prev_max = symtab_max_id;
+                    try applyIstStruct(version_ctx, a, &symtab, &symtab_max_id, absences, prev_items, prev_max, e);
                     continue;
                 }
-                const expanded = try resolveDelayedInElement(arena, symtab.items, symtab_max_id, e);
+                const expanded = try resolveDelayedInElement(arena, symtab.items, symtab_max_id, absences, e);
                 out.append(a, expanded) catch return RunError.OutOfMemory;
             },
         }
@@ -432,9 +686,14 @@ fn runExpectation(
     var arena = value.Arena.init(allocator) catch return RunError.OutOfMemory;
     defer arena.deinit();
 
+    var absences = std.AutoHashMapUnmanaged(u32, Absence){};
+    defer absences.deinit(arena.allocator());
+
     var actual: []const value.Element = &.{};
-    if (state.text_fragments.items.len != 0) {
-        const doc_bytes = try buildTextDocument(allocator, state.version, state.text_fragments.items);
+    if (state.text_len != 0) {
+        const frags = try collectTextFragments(allocator, state);
+        defer if (frags.len != 0) allocator.free(frags);
+        const doc_bytes = try buildTextDocument(allocator, state.version, frags);
         defer allocator.free(doc_bytes);
         var doc = ion.parseDocument(allocator, doc_bytes) catch |e| {
             if (std.mem.eql(u8, head, "signals")) return true;
@@ -444,7 +703,7 @@ fn runExpectation(
         defer doc.deinit();
         actual = doc.elements;
     } else {
-        const abs = evalAbstractDocument(&arena, state) catch |err| {
+        const abs = evalAbstractDocument(&arena, state, &absences) catch |err| {
             if (std.mem.eql(u8, head, "signals")) return true;
             return err;
         };
@@ -472,6 +731,10 @@ fn runExpectation(
         defer den_arena.deinit();
         const denoted = den_arena.allocator().alloc(value.Element, actual.len) catch return RunError.OutOfMemory;
         for (actual, 0..) |e, i| denoted[i] = denote.denoteElement(&den_arena, e) catch return RunError.OutOfMemory;
+        // Patch up symbol denotations for absent imported slots.
+        if (absences.count() != 0) {
+            for (denoted) |*d| patchAbsentSymbols(&den_arena, &absences, d);
+        }
 
         // Normalize expected forms into the same representation.
         const expected = den_arena.allocator().alloc(value.Element, expected_raw.len) catch return RunError.OutOfMemory;
@@ -507,103 +770,181 @@ fn runExpectation(
     return RunError.Unsupported;
 }
 
-fn evalSeq(allocator: std.mem.Allocator, stats: *Stats, state: *State, items: []const value.Element) RunError!void {
-    var i: usize = 0;
-    while (i < items.len) : (i += 1) {
-        const it = items[i];
+fn patchAbsentSymbols(arena: *value.Arena, absences: *const std.AutoHashMapUnmanaged(u32, Absence), elem: *value.Element) void {
+    switch (elem.value) {
+        .list => |items| for (items) |*e| patchAbsentSymbols(arena, absences, e),
+        .sexp => |sx| {
+            if (sx.len == 2 and sx[0].value == .symbol and sx[0].value.symbol.text != null and std.mem.eql(u8, sx[0].value.symbol.text.?, "Symbol")) {
+                if (sx[1].value == .int) switch (sx[1].value.int) {
+                    .small => |sid_i| {
+                        if (sid_i >= 0) {
+                            const sid: u32 = @intCast(sid_i);
+                            if (absences.get(sid)) |a| {
+                                const head_sym = value.makeSymbol(arena, "absent") catch return;
+                                const head_elem: value.Element = .{ .annotations = &.{}, .value = .{ .symbol = head_sym } };
+                                const name_elem: value.Element = .{ .annotations = &.{}, .value = .{ .string = a.name } };
+                                const off_elem: value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = @intCast(a.offset) } } };
+                                const absent_sx = arena.allocator().dupe(value.Element, &.{ head_elem, name_elem, off_elem }) catch return;
+                                sx[1] = .{ .annotations = &.{}, .value = .{ .sexp = absent_sx } };
+                            }
+                        }
+                    },
+                    else => {},
+                };
+            }
+            for (sx) |*e| patchAbsentSymbols(arena, absences, e);
+        },
+        .@"struct" => |st| for (st.fields) |*f| patchAbsentSymbols(arena, absences, &f.value),
+        else => {},
+    }
+}
+
+fn isFragmentHead(head: []const u8) bool {
+    return std.mem.eql(u8, head, "text") or
+        std.mem.eql(u8, head, "toplevel") or
+        std.mem.eql(u8, head, "ivm") or
+        std.mem.eql(u8, head, "binary");
+}
+
+fn applyFragmentElement(state: *State, allocator: std.mem.Allocator, frag_elem: value.Element) RunError!void {
+    const sx = getSexpItems(frag_elem) orelse return RunError.InvalidConformanceDsl;
+    if (sx.len == 0) return RunError.InvalidConformanceDsl;
+    const head = symText(sx[0]) orelse return RunError.InvalidConformanceDsl;
+
+    if (std.mem.eql(u8, head, "text")) return applyTextFragment(state, allocator, sx);
+    if (std.mem.eql(u8, head, "toplevel")) return applyTopLevel2(state, allocator, sx);
+    if (std.mem.eql(u8, head, "binary")) return applyBinaryFragment(state, allocator, sx);
+    if (std.mem.eql(u8, head, "ivm")) {
+        if (sx.len != 3) return RunError.InvalidConformanceDsl;
+        if (sx[1].value != .int or sx[2].value != .int) return RunError.InvalidConformanceDsl;
+        const major: i128 = switch (sx[1].value.int) {
+            .small => |v| v,
+            else => return RunError.InvalidConformanceDsl,
+        };
+        const minor: i128 = switch (sx[2].value.int) {
+            .small => |v| v,
+            else => return RunError.InvalidConformanceDsl,
+        };
+        if (major < 0 or minor < 0) return RunError.InvalidConformanceDsl;
+        const maj_u: u32 = @intCast(major);
+        const min_u: u32 = @intCast(minor);
+        if (maj_u == 1 and min_u == 0) {
+            try state.pushEvent(allocator, .{ .ivm = .ion_1_0 });
+        } else if (maj_u == 1 and min_u == 1) {
+            try state.pushEvent(allocator, .{ .ivm = .ion_1_1 });
+        } else {
+            try state.pushEvent(allocator, .{ .ivm_invalid = .{ .major = maj_u, .minor = min_u } });
+        }
+        return;
+    }
+    // Unrecognized fragment type: treat as unsupported.
+    state.unsupported = true;
+}
+
+fn evalSeq(gpa: std.mem.Allocator, stats: *Stats, state: *State, items: []const value.Element) RunError!void {
+    var work_arena = std.heap.ArenaAllocator.init(gpa);
+    defer work_arena.deinit();
+    const work = work_arena.allocator();
+
+    const Frame = struct {
+        state: State,
+        items: []const value.Element,
+        idx: usize,
+    };
+
+    var stack = std.ArrayListUnmanaged(Frame){};
+    defer {
+        while (stack.items.len != 0) {
+            var tmp = stack.pop() orelse break;
+            tmp.state.deinit(work);
+        }
+        stack.deinit(work);
+    }
+
+    stack.append(work, .{ .state = try state.clone(work), .items = items, .idx = 0 }) catch return RunError.OutOfMemory;
+
+    while (stack.items.len != 0) {
+        // Avoid holding pointers into `stack.items` across `stack.append()` calls: appends may
+        // reallocate and invalidate pointers, which can corrupt `State` (notably `text_len`).
+        const frame_idx = stack.items.len - 1;
+        var frame = &stack.items[frame_idx];
+        if (frame.idx >= frame.items.len) {
+            var finished = stack.pop() orelse return RunError.InvalidConformanceDsl;
+            finished.state.deinit(work);
+            continue;
+        }
+
+        const it = frame.items[frame.idx];
+        frame.idx += 1;
+
         const sx = getSexpItems(it) orelse continue; // label/no-op
         if (sx.len == 0) return RunError.InvalidConformanceDsl;
         const head = symText(sx[0]) orelse return RunError.InvalidConformanceDsl;
 
         if (std.mem.eql(u8, head, "then")) {
-            // (then [label...] <clauses...>)
-            var child_state = try state.clone(allocator);
-            defer child_state.deinit(allocator);
-            try evalSeq(allocator, stats, &child_state, sx[1..]);
+            const base_state = frame.state;
+            const child = try base_state.clone(work);
+            stack.append(work, .{ .state = child, .items = sx[1..], .idx = 0 }) catch return RunError.OutOfMemory;
             continue;
         }
 
         if (std.mem.eql(u8, head, "each")) {
-            // (each (label? fragment)* continuation)
+            const base_state = frame.state;
             if (sx.len < 2) return RunError.InvalidConformanceDsl;
             var branch_frags = std.ArrayListUnmanaged(value.Element){};
-            defer branch_frags.deinit(allocator);
+            defer branch_frags.deinit(work);
 
-            var idx: usize = 1;
-            while (idx < sx.len) : (idx += 1) {
-                if (sx[idx].value != .sexp) continue; // allow non-string "labels" as in core bootstrapping tests
-                const frag_sx = sx[idx].value.sexp;
+            var split_idx: usize = 1;
+            while (split_idx < sx.len) : (split_idx += 1) {
+                if (sx[split_idx].value != .sexp) continue;
+                const frag_sx = sx[split_idx].value.sexp;
                 if (frag_sx.len == 0) return RunError.InvalidConformanceDsl;
                 const frag_head = symText(frag_sx[0]) orelse return RunError.InvalidConformanceDsl;
-                const is_fragment = std.mem.eql(u8, frag_head, "text") or std.mem.eql(u8, frag_head, "toplevel") or std.mem.eql(u8, frag_head, "ivm") or std.mem.eql(u8, frag_head, "binary");
-                if (!is_fragment) break; // start of continuation
-                branch_frags.append(allocator, sx[idx]) catch return RunError.OutOfMemory;
+                if (!isFragmentHead(frag_head)) break;
+                branch_frags.append(work, sx[split_idx]) catch return RunError.OutOfMemory;
             }
-            if (idx >= sx.len) return RunError.InvalidConformanceDsl;
-            const continuation = sx[idx..];
+            if (split_idx >= sx.len) return RunError.InvalidConformanceDsl;
+            const continuation = sx[split_idx..];
 
             if (branch_frags.items.len == 0) {
-                // `each` with no branches acts like a single empty `toplevel` branch.
-                var branch_state = try state.clone(allocator);
-                defer branch_state.deinit(allocator);
-                try evalSeq(allocator, stats, &branch_state, continuation);
+                const branch_state = try base_state.clone(work);
+                stack.append(work, .{ .state = branch_state, .items = continuation, .idx = 0 }) catch return RunError.OutOfMemory;
             } else {
-                for (branch_frags.items) |frag_elem| {
-                    var branch_state = try state.clone(allocator);
-                    defer branch_state.deinit(allocator);
-                    try evalSeq(allocator, stats, &branch_state, &.{frag_elem});
-                    try evalSeq(allocator, stats, &branch_state, continuation);
+                // Push in reverse order so the first fragment runs first.
+                var j: usize = branch_frags.items.len;
+                while (j != 0) {
+                    j -= 1;
+                    var branch_state = try base_state.clone(work);
+                    try applyFragmentElement(&branch_state, work, branch_frags.items[j]);
+                    stack.append(work, .{ .state = branch_state, .items = continuation, .idx = 0 }) catch return RunError.OutOfMemory;
                 }
             }
             continue;
         }
 
-        // Fragment clauses in the current state
-        if (std.mem.eql(u8, head, "text")) {
-            try applyTextFragment(state, allocator, sx);
-            continue;
-        }
-        if (std.mem.eql(u8, head, "toplevel")) {
-            try applyTopLevel2(state, allocator, sx);
-            continue;
-        }
-        if (std.mem.eql(u8, head, "binary")) {
-            try applyBinaryFragment(state, allocator, sx);
-            continue;
-        }
-        if (std.mem.eql(u8, head, "ivm")) {
-            if (sx.len != 3) return RunError.InvalidConformanceDsl;
-            if (sx[1].value != .int or sx[2].value != .int) return RunError.InvalidConformanceDsl;
-            const major: i128 = sx[1].value.int.small;
-            const minor: i128 = sx[2].value.int.small;
-            if (major < 0 or minor < 0) return RunError.InvalidConformanceDsl;
-            const maj_u: u32 = @intCast(major);
-            const min_u: u32 = @intCast(minor);
-            if (maj_u == 1 and min_u == 0) {
-                state.events.append(allocator, .{ .ivm = .ion_1_0 }) catch return RunError.OutOfMemory;
-            } else if (maj_u == 1 and min_u == 1) {
-                state.events.append(allocator, .{ .ivm = .ion_1_1 }) catch return RunError.OutOfMemory;
-            } else {
-                state.events.append(allocator, .{ .ivm_invalid = .{ .major = maj_u, .minor = min_u } }) catch return RunError.OutOfMemory;
-            }
+        if (isFragmentHead(head)) {
+            try applyFragmentElement(&frame.state, work, it);
             continue;
         }
 
         if (std.mem.eql(u8, head, "produces") or std.mem.eql(u8, head, "signals") or std.mem.eql(u8, head, "denotes")) {
             stats.branches += 1;
-            const ok = runExpectation(allocator, state, it) catch |e| switch (e) {
+            const ok = runExpectation(gpa, &frame.state, it) catch |e| switch (e) {
                 RunError.Unsupported => {
                     stats.skipped += 1;
-                    return;
+                    // End this branch.
+                    frame.idx = frame.items.len;
+                    continue;
                 },
                 else => return e,
             };
             if (ok) stats.passed += 1 else stats.skipped += 1;
-            return;
+            frame.idx = frame.items.len;
+            continue;
         }
 
         // Unimplemented clause type: mark this branch unsupported until an expectation is reached.
-        state.unsupported = true;
+        frame.state.unsupported = true;
     }
 }
 

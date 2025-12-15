@@ -246,3 +246,4 @@ bb.out.*
 
 .zig-cache
 zig-build
+.deps
