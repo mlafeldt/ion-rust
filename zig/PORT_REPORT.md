@@ -130,8 +130,10 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
 ### 3) Ion 1.1 conformance: `ion-tests/conformance/**/*.ion` (NOT RUN)
 
 1) Files in suite: 55 (`.ion`)
-2) Current result in Zig: not implemented / not run.
-3) What needs to be implemented to run this suite:
+2) Current result in Zig:
+   - Partially run: `ion-tests/conformance/core/*.ion` via `test "ion-tests conformance core (partial)"` in `zig/src/tests.zig`.
+   - Not run yet: everything else under `ion-tests/conformance/` (data_model, eexp, system_macros, tdl, and top-level conformance files like `system_symbols.ion`).
+3) What needs to be implemented to fully run this suite:
    - Conformance DSL runner (test collection parsing/execution, signals, and "produces" verification)
    - Ion 1.1 macro system beyond the limited corpus macros (`none`, `values`, `make_string`)
    - E-expressions (eexp) and their binary encodings

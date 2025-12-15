@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const ion = @import("ion.zig");
+const conformance = @import("conformance/runner.zig");
 
 fn isSkipped(path: []const u8, skip_list: []const []const u8) bool {
     for (skip_list) |skip| {
@@ -270,6 +271,32 @@ test "ion-tests 1_1 good roundtrip (text lines)" {
             }
         }.run,
     );
+}
+
+test "ion-tests conformance core (partial)" {
+    const allocator = std.testing.allocator;
+    var stats: conformance.Stats = .{};
+
+    const Runner = struct {
+        var stats_ptr: *conformance.Stats = undefined;
+        fn run(path: []const u8, data: []const u8) !void {
+            conformance.runConformanceFile(std.testing.allocator, data, stats_ptr) catch |e| {
+                std.debug.print("conformance core failed: {s}: {s}\n", .{ path, @errorName(e) });
+                return e;
+            };
+        }
+    };
+    Runner.stats_ptr = &stats;
+
+    try walkAndTest(
+        allocator,
+        "ion-tests/conformance/core",
+        &.{ ".ion" },
+        &.{},
+        Runner.run,
+    );
+
+    try std.testing.expect(stats.passed + stats.skipped == stats.branches);
 }
 
 fn roundtripEq(allocator: std.mem.Allocator, data: []const u8, format1: ion.Format, format2: ion.Format) !void {

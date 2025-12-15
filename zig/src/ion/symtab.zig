@@ -42,6 +42,83 @@ pub const SystemSymtab = struct {
     }
 };
 
+/// Ion 1.1 system symbol table.
+/// This is currently only used by the Ion 1.1 conformance suite runner.
+pub const SystemSymtab11 = struct {
+    pub const max_id: u32 = 62;
+
+    pub const symbols = [_][]const u8{
+        "$0",
+        "$ion",
+        "$ion_1_0",
+        "$ion_symbol_table",
+        "name",
+        "version",
+        "imports",
+        "symbols",
+        "max_id",
+        "$ion_shared_symbol_table",
+        "encoding",
+        "$ion_literal",
+        "$ion_shared_module",
+        "macro",
+        "macro_table",
+        "module",
+        "export",
+        "import",
+        "flex_symbol",
+        "flex_int",
+        "flex_uint",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "float16",
+        "float32",
+        "float64",
+        "",
+        "for",
+        "literal",
+        "if_none",
+        "if_some",
+        "if_single",
+        "if_multi",
+        "none",
+        "values",
+        "default",
+        "meta",
+        "repeat",
+        "flatten",
+        "delta",
+        "sum",
+        "annotate",
+        "make_string",
+        "make_symbol",
+        "make_decimal",
+        "make_timestamp",
+        "make_blob",
+        "make_list",
+        "make_sexp",
+        "make_field",
+        "make_struct",
+        "parse_ion",
+        "set_symbols",
+        "add_symbols",
+        "set_macros",
+        "add_macros",
+        "use",
+    };
+
+    pub fn textForSid(sid: u32) ?[]const u8 {
+        if (sid == 0 or sid > max_id) return null;
+        return symbols[sid];
+    }
+};
+
 /// Mutable symbol table used by the parsers to resolve SIDs to text.
 pub const SymbolTable = struct {
     arena: *value.Arena,

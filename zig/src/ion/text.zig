@@ -28,6 +28,14 @@ pub fn parseTopLevel(arena: *value.Arena, bytes: []const u8) IonError![]value.El
     return parser.parseTopLevel();
 }
 
+/// Parses an Ion text stream, but does NOT concatenate adjacent string literals.
+/// Intended for the Ion 1.1 conformance DSL, which uses sexps for clauses and may need
+/// to represent multiple string arguments without Ion's normal string literal concatenation.
+pub fn parseTopLevelNoStringConcat(arena: *value.Arena, bytes: []const u8) IonError![]value.Element {
+    var parser = try Parser.initWithOptions(arena, bytes, false);
+    return parser.parseTopLevel();
+}
+
 /// Debug helper: on error, writes the parser byte offset into `err_index`.
 /// Intended for ad-hoc repro tooling; normal callers should use `parseTopLevel`.
 ///
@@ -45,15 +53,21 @@ const Parser = struct {
     input: []const u8,
     i: usize = 0,
     version: enum { v1_0, v1_1 } = .v1_0,
+    concat_string_literals: bool = true,
     st: symtab.SymbolTable,
     shared: std.StringHashMapUnmanaged(SharedSymtab) = .{},
 
     fn init(arena: *value.Arena, input: []const u8) IonError!Parser {
+        return initWithOptions(arena, input, true);
+    }
+
+    fn initWithOptions(arena: *value.Arena, input: []const u8, concat_string_literals: bool) IonError!Parser {
         return .{
             .arena = arena,
             .input = input,
             .i = 0,
             .version = .v1_0,
+            .concat_string_literals = concat_string_literals,
             .st = try symtab.SymbolTable.init(arena),
             .shared = .{},
         };
@@ -345,8 +359,14 @@ const Parser = struct {
         if (self.startsWith("{")) return self.parseStruct();
 
         // Strings/symbols
-        if (self.startsWith("\"")) return value.Value{ .string = try self.parseStringConcat(false) };
-        if (self.startsWith("'''")) return value.Value{ .string = try self.parseLongStringConcat(false) };
+        if (self.startsWith("\"")) {
+            const text_bytes = if (self.concat_string_literals) try self.parseStringConcat(false) else try self.parseShortString(false);
+            return value.Value{ .string = text_bytes };
+        }
+        if (self.startsWith("'''")) {
+            const text_bytes = if (self.concat_string_literals) try self.parseLongStringConcat(false) else try self.parseLongString(false);
+            return value.Value{ .string = text_bytes };
+        }
         if (self.startsWith("'")) return value.Value{ .symbol = try self.parseQuotedSymbol() };
 
         // Keywords / identifiers / numbers / timestamps / nulls
@@ -530,12 +550,12 @@ const Parser = struct {
         // Long strings start with three quotes, which also matches the quoted symbol prefix.
         // Check for long strings first.
         if (self.startsWith("'''")) {
-            const text_bytes = try self.parseLongStringConcat(false);
+            const text_bytes = if (self.concat_string_literals) try self.parseLongStringConcat(false) else try self.parseLongString(false);
             return value.makeSymbolId(null, text_bytes);
         }
         if (self.startsWith("'")) return self.parseQuotedSymbol();
         if (self.startsWith("\"")) {
-            const text_bytes = try self.parseStringConcat(false);
+            const text_bytes = if (self.concat_string_literals) try self.parseStringConcat(false) else try self.parseShortString(false);
             return value.makeSymbolId(null, text_bytes);
         }
         if (self.peek() == null) return IonError.Incomplete;
