@@ -45,7 +45,7 @@ Key properties:
   - Ion 1.1: supports a growing subset of macro invocations used by `iontestdata_1_1` and conformance:
     - Expression groups: `(:: <expr>*)`
     - Macro IDs: unqualified/qualified names and numeric addresses (e.g. `(:values ...)`, `(:1 ...)`, `(:$ion::values ...)`, `(:$ion::1 ...)`)
-    - Implemented expansions: `none`, `values`, `make_string`, `make_symbol`, `make_decimal`, `make_list`, `make_sexp`
+    - Implemented expansions: `none`, `values`, `default`, `repeat`, `delta`, `sum`, `annotate`, `make_string`, `make_symbol`, `make_decimal`, `make_timestamp`, `make_field`, `make_struct`, `make_list`, `make_sexp`, `flatten`
     - This is still far from a complete Ion 1.1 macro system.
 
 ### Binary Ion 1.0 parsing
@@ -139,16 +139,18 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
    - Run: 55/55 conformance files (via a single walker test in `zig/src/tests.zig`)
    - Branch-level status (2025-12-15):
      - Total branches: 2647
-     - Passed: 1397
-     - Skipped (unsupported): 1250
+     - Passed: 1835
+     - Skipped (unsupported): 812
      - To reproduce totals: `cd zig && for f in ../ion-tests/conformance/**/*.ion; do /opt/homebrew/bin/zig run src/conformance_debug.zig -- "$f"; done`
    - Many branches are currently marked “unsupported” and counted as skipped:
      - Large parts of the Ion 1.1 macro system / TDL are not implemented (only a subset of system macros expand during parsing)
      - Binary Ion 1.1 is not implemented
-     - Many `binary` fragments are not executed (beyond minimal IVM recognition)
+     - `binary` fragments:
+       - Ion 1.0 binary fragments are executed (decoded via `ion.parseDocument`).
+       - Ion 1.1 binary fragments are currently skipped (no Ion 1.1 binary reader).
 3) What needs to be implemented to fully run this suite:
    - Conformance DSL runner (test collection parsing/execution, signals, and "produces" verification)
-   - Ion 1.1 macro system beyond the currently-expanded subset (`none`, `values`, `make_string`, `make_symbol`, `make_decimal`, `make_list`, `make_sexp`, plus `(::...)`)
+   - Ion 1.1 macro system beyond the currently-expanded subset (`none`, `values`, `default`, `repeat`, `delta`, `sum`, `annotate`, `make_string`, `make_symbol`, `make_decimal`, `make_timestamp`, `make_field`, `make_struct`, `make_list`, `make_sexp`, `flatten`, plus `(::...)`)
    - E-expressions (eexp) and their binary encodings
    - Ion 1.1 binary features used by conformance (various flex_* encodings, additional symbol/macro table mechanics)
    - System macros used by conformance (e.g. `annotate`, `make_field`, `make_decimal`, `make_timestamp`, `parse_ion`, `use`, etc.)
@@ -161,7 +163,7 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
 
 ### 2) Macro system breadth
 
-Only a small subset of Ion 1.1 macro expansions are implemented (`none`, `values`, `make_string`, `make_symbol`, `make_decimal`, `make_list`, `make_sexp`, `(::...)`). A complete Ion 1.1 macro system is out of scope for the current port.
+Only a small subset of Ion 1.1 macro expansions are implemented (`none`, `values`, `default`, `repeat`, `delta`, `sum`, `annotate`, `make_string`, `make_symbol`, `make_decimal`, `make_timestamp`, `make_field`, `make_struct`, `make_list`, `make_sexp`, `flatten`, `(::...)`). A complete Ion 1.1 macro system is out of scope for the current port.
 
 ### 3) Performance
 

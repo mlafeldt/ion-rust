@@ -187,10 +187,27 @@ fn denoteDecimal(arena: *value.Arena, d: value.Decimal) DenoteError!value.Elemen
 
 pub fn denoteElement(arena: *value.Arena, elem: value.Element) DenoteError!value.Element {
     if (elem.annotations.len != 0) {
-        // For now, ignore annotations in denotation output (conformance tests that need them are elsewhere).
-        // This mirrors the "application value" focus of the early conformance tiers.
-        _ = elem.annotations;
+        // Denote annotations explicitly as:
+        //   (annot <denoted-value> <ann1> <ann2> ...)
+        //
+        // where each annotation token is denoted as either:
+        // - (Int <sid>) when a SID is available, or
+        // - (String (text ...)) when textual.
+        const base = try denoteElement(arena, .{ .annotations = &.{}, .value = elem.value });
+        const items = arena.allocator().alloc(value.Element, elem.annotations.len + 2) catch return DenoteError.OutOfMemory;
+        items[0] = makeElem(arena, .{ .symbol = makeSymbol(arena, "annot") });
+        items[1] = base;
+        for (elem.annotations, 0..) |a, i| {
+            items[i + 2] = if (a.sid) |sid|
+                try makeCtor1(arena, "Int", makeElem(arena, .{ .int = .{ .small = @intCast(sid) } }))
+            else if (a.text) |t|
+                try denoteString(arena, t)
+            else
+                try denoteString(arena, "");
+        }
+        return makeElem(arena, .{ .sexp = items });
     }
+
     return switch (elem.value) {
         .null => |t| blk: {
             if (t == .null) break :blk try makeCtor0(arena, "Null");
