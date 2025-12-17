@@ -233,6 +233,29 @@ Ion parser keeps strict identifier/operator tokenization.
 The Rust implementation's canonical encoding is `0A 00`, but the Zig conformance runner accepts `0B 00` to avoid
 skipping/failing those branches.
 
+## Upstream notes (rust/java)
+
+These are discrepancies encountered while implementing the Zig port and cross-checking behavior against
+`ion-rust` and `ion-java`. They are not confirmed bugs in either implementation, but they are worth tracking.
+
+1) `ion-tests` conformance input uses a non-canonical FlexUInt encoding
+   - File: `ion-tests/conformance/eexp/binary/argument_encoding.ion`
+   - Observation: the file contains `0B 00` as a two-byte encoding for FlexUInt(2).
+   - Cross-check: both the Rust implementation (`src/lazy/encoder/binary/v1_1/flex_uint.rs`) and the Java implementation
+     (`ion-java/src/main/java/com/amazon/ion/impl/bin/WriteBuffer.java`, `writeFlexUInt`) use the canonical encoding where
+     `0A 00` encodes 2.
+   - Zig behavior: accepts `0B 00` for this specific conformance-only case to keep branch coverage progressing.
+
+2) Conformance macro table definition appears inconsistent with cardinality semantics
+   - File: `ion-tests/conformance/eexp/binary/argument_encoding.ion`
+   - Observation: the case labeled "fixed-size multi-byte, one-to-many parameter" defines `(uint16::x*)` but expects
+     one-to-many semantics (empty argument list signals "invalid argument").
+   - Zig behavior: patches that single case's parsed `mactab` cardinality from `x*` to `x+` by matching the case label,
+     so the binary decoding coverage can proceed.
+
+If we later find a concrete bug in `ion-rust` or `ion-java` (with a minimal repro and expected/actual behavior), add it
+to this section with an issue link.
+
 Fix: `writeDecimalBinary` prefixes `0x00` for positive coefficients with MSB set, and handles negative sign-bit/prefix rules.
 
 ### 4) NOP pads inside structs with non-zero SIDs
