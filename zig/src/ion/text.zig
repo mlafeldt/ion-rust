@@ -32,7 +32,17 @@ pub fn parseTopLevel(arena: *value.Arena, bytes: []const u8) IonError![]value.El
 /// Intended for the Ion 1.1 conformance DSL, which uses sexps for clauses and may need
 /// to represent multiple string arguments without Ion's normal string literal concatenation.
 pub fn parseTopLevelNoStringConcat(arena: *value.Arena, bytes: []const u8) IonError![]value.Element {
-    var parser = try Parser.initWithOptions(arena, bytes, false);
+    var parser = try Parser.initWithOptions(arena, bytes, false, false);
+    return parser.parseTopLevel();
+}
+
+/// Parses the Ion 1.1 conformance DSL (not strict Ion text), but does NOT concatenate adjacent
+/// string literals.
+///
+/// The conformance DSL is "Ion-shaped" but includes tokens that are not valid Ion identifiers,
+/// such as `x?` / `x*` / `x+`, plus TDL-ish forms like `.literal` and `%x`.
+pub fn parseTopLevelConformanceDslNoStringConcat(arena: *value.Arena, bytes: []const u8) IonError![]value.Element {
+    var parser = try Parser.initWithOptions(arena, bytes, false, true);
     return parser.parseTopLevel();
 }
 
@@ -54,20 +64,22 @@ const Parser = struct {
     i: usize = 0,
     version: enum { v1_0, v1_1 } = .v1_0,
     concat_string_literals: bool = true,
+    conformance_dsl_mode: bool = false,
     st: symtab.SymbolTable,
     shared: std.StringHashMapUnmanaged(SharedSymtab) = .{},
 
     fn init(arena: *value.Arena, input: []const u8) IonError!Parser {
-        return initWithOptions(arena, input, true);
+        return initWithOptions(arena, input, true, false);
     }
 
-    fn initWithOptions(arena: *value.Arena, input: []const u8, concat_string_literals: bool) IonError!Parser {
+    fn initWithOptions(arena: *value.Arena, input: []const u8, concat_string_literals: bool, conformance_dsl_mode: bool) IonError!Parser {
         return .{
             .arena = arena,
             .input = input,
             .i = 0,
             .version = .v1_0,
             .concat_string_literals = concat_string_literals,
+            .conformance_dsl_mode = conformance_dsl_mode,
             .st = try symtab.SymbolTable.init(arena),
             .shared = .{},
         };
@@ -1431,7 +1443,7 @@ const Parser = struct {
         if (self.eof()) return IonError.Incomplete;
         if (!isIdentStart(self.peek().?)) return IonError.InvalidIon;
         self.i += 1;
-        while (!self.eof() and isIdentCont(self.peek().?)) : (self.i += 1) {}
+        while (!self.eof() and (if (self.conformance_dsl_mode) isIdentContConformanceDsl(self.peek().?) else isIdentCont(self.peek().?))) : (self.i += 1) {}
         return self.input[start..self.i];
     }
 
@@ -1451,6 +1463,20 @@ const Parser = struct {
             // Peek next char to decide: $ followed by digit => id, else identifier.
             if (self.i + 1 < self.input.len and std.ascii.isDigit(self.input[self.i + 1])) {
                 return self.parseSymbolId();
+            }
+        }
+        if (self.conformance_dsl_mode and ctx == .sexp and (self.peek().? == '.' or self.peek().? == '%')) {
+            // In s-expressions, treat `.name` and `%name` as identifiers (TDL-ish) rather than as
+            // operator tokens. This is required for parsing conformance macro definitions like:
+            //   (macro foo () (.literal 1))
+            // and variable expansions like:
+            //   (macro foo (x) (%x))
+            if (self.i + 1 < self.input.len and isIdentStart(self.input[self.i + 1])) {
+                const start = self.i;
+                self.i += 2; // prefix + first ident char
+                while (!self.eof() and isIdentContConformanceDsl(self.peek().?)) : (self.i += 1) {}
+                const tok = self.input[start..self.i];
+                return try value.makeSymbol(self.arena, tok);
             }
         }
         if (isIdentStart(self.peek().?)) {
@@ -2022,6 +2048,12 @@ fn isIdentStart(c: u8) bool {
 
 fn isIdentCont(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
+}
+
+fn isIdentContConformanceDsl(c: u8) bool {
+    // Conformance DSL uses suffix operators in identifiers (e.g. `x?`, `x*`, `x+`).
+    // Keep this scoped to DSL parsing so we don't change Ion tokenization rules (e.g. `a-1`).
+    return isIdentCont(c) or c == '?' or c == '*' or c == '+';
 }
 
 fn isOperatorStart(c: u8) bool {
