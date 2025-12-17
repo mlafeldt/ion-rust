@@ -922,7 +922,10 @@ fn runExpectation(
     exp: value.Element,
 ) RunError!bool {
     // Returns true if executed, false if skipped due to unsupported features.
-    if (state.unsupported) return false;
+    if (state.unsupported) {
+        if (traceSkipsEnabled()) std.debug.print("skip: branch marked unsupported earlier\n", .{});
+        return false;
+    }
     const sx = getSexpItems(exp) orelse return RunError.InvalidConformanceDsl;
     if (sx.len == 0) return RunError.InvalidConformanceDsl;
     const head = symText(sx[0]) orelse return RunError.InvalidConformanceDsl;
@@ -942,17 +945,21 @@ fn runExpectation(
     if (state.binary_len != 0) {
         const doc_bytes = try buildBinaryDocument(allocator, state.version, state);
         doc_bytes_owned = doc_bytes;
-        // Ion 1.1 binary isn't implemented. Detect the 1.1 IVM and treat as unsupported even if
-        // the surrounding conformance clause didn't set `state.version` explicitly.
-        if (doc_bytes.len >= 4 and doc_bytes[0] == 0xE0 and doc_bytes[1] == 0x01 and doc_bytes[2] == 0x01 and doc_bytes[3] == 0xEA) {
-            if (std.mem.eql(u8, head, "signals")) return true;
-            return false;
-        }
         parsed_doc = ion.parseDocument(allocator, doc_bytes) catch |e| {
             if (std.mem.eql(u8, head, "signals")) return true;
-            // Ion 1.1 binary isn't implemented; treat as unsupported.
-            if (state.version == .ion_1_1) return false;
-            if (e == ion.IonError.Unsupported) return false;
+            if (e == ion.IonError.Unsupported) {
+                if (traceSkipsEnabled()) {
+                    const show: usize = @min(doc_bytes.len, 64);
+                    std.debug.print("skip: unsupported binary head={s} version={s} bytes_prefix=", .{ head, @tagName(state.version) });
+                    printHexBytes(doc_bytes[0..show]);
+                }
+                return false;
+            }
+            if (traceSkipsEnabled()) {
+                const show: usize = @min(doc_bytes.len, 64);
+                std.debug.print("skip: binary parse error={s} head={s} version={s} bytes_prefix=", .{ @errorName(e), head, @tagName(state.version) });
+                printHexBytes(doc_bytes[0..show]);
+            }
             std.debug.print("conformance binary parse failed unexpectedly: {s}\n", .{@errorName(e)});
             return RunError.InvalidConformanceDsl;
         };
@@ -1051,6 +1058,15 @@ fn runExpectation(
     }
 
     return RunError.Unsupported;
+}
+
+fn traceSkipsEnabled() bool {
+    return std.posix.getenv("ION_ZIG_CONFORMANCE_TRACE_SKIPS") != null;
+}
+
+fn printHexBytes(bytes: []const u8) void {
+    for (bytes) |b| std.debug.print("{X:0>2}", .{b});
+    std.debug.print("\n", .{});
 }
 
 fn patchAbsentSymbols(arena: *value.Arena, absences: *const std.AutoHashMapUnmanaged(u32, Absence), elem: *value.Element) void {

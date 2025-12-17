@@ -18,6 +18,7 @@ Key properties:
 - `zig/src/ion.zig`
   - `parseDocument(allocator, bytes)`:
     - Detects binary Ion 1.0 via IVM (`E0 01 00 EA`) and dispatches to the binary parser.
+    - Detects binary Ion 1.1 via IVM (`E0 01 01 EA`) and dispatches to a minimal Ion 1.1 binary parser.
     - Otherwise parses as text Ion.
   - `serializeDocument(allocator, format, elements)`:
     - Supports `Format.binary`, and text formats (compact/lines/pretty) via the text writer.
@@ -63,6 +64,19 @@ Key properties:
       - Supports unknown symbol IDs when the symbol table slot exists but has unknown text (null slot).
     - IVM appearing inside the stream (ignored if it’s `E0 01 00 EA`)
     - “Ordered struct” encoding variant (as used by ion-tests)
+
+### Binary Ion 1.1 parsing (minimal subset)
+
+- `zig/src/ion/binary11.zig`
+  - Parses streams starting with the Ion 1.1 IVM (`E0 01 01 EA`).
+  - Implemented opcodes (driven by `ion-tests/conformance/data_model/*`):
+    - nulls (`EA`, `EB <typecode>`)
+    - booleans (`6E` true, `6F` false)
+    - integers (`60..68`, `F6 <flexuint len> <payload>`) (little-endian two's complement)
+    - floats (`6A` f0, `6B` f16, `6C` f32, `6D` f64) (little-endian payload)
+    - decimals (`70..7F`, `F7 <flexuint len> <payload>`) with payload:
+      `[flexint exponent][remaining bytes = coefficient (LE two's complement)]`
+  - Out of scope (still `Unsupported`): Ion 1.1 binary e-expressions, containers/structs/strings/symbols, macro tables, etc.
 
 ### Writer (text + binary)
 
@@ -110,7 +124,7 @@ See `zig/src/tests.zig` for the exact items and reasons.
 
 ## ion-tests status (what runs vs what is missing)
 
-The `ion-tests/` repo contains multiple suites. The Zig harness currently covers the two corpus suites below and does not yet run the Ion 1.1 conformance suite.
+The `ion-tests/` repo contains multiple suites. The Zig harness currently covers the two corpus suites below and also runs the Ion 1.1 conformance suite (with explicit unsupported branches counted as skips).
 
 ### 1) Ion 1.0 corpus: `ion-tests/iontestdata/**`
 
@@ -137,17 +151,17 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
 1) Files in suite: 55 (`.ion`)
 2) Current result in Zig:
    - Run: 55/55 conformance files (via a single walker test in `zig/src/tests.zig`)
-   - Branch-level status (2025-12-15):
+   - Branch-level status (2025-12-17):
      - Total branches: 2647
-     - Passed: 1835
-     - Skipped (unsupported): 812
+     - Passed: 2067
+     - Skipped (unsupported): 580
      - To reproduce totals: `cd zig && for f in ../ion-tests/conformance/**/*.ion; do /opt/homebrew/bin/zig run src/conformance_debug.zig -- "$f"; done`
    - Many branches are currently marked “unsupported” and counted as skipped:
      - Large parts of the Ion 1.1 macro system / TDL are not implemented (only a subset of system macros expand during parsing)
-     - Binary Ion 1.1 is not implemented
+     - Binary Ion 1.1 is only partially implemented (data model numerics, nulls, bools)
      - `binary` fragments:
        - Ion 1.0 binary fragments are executed (decoded via `ion.parseDocument`).
-       - Ion 1.1 binary fragments are currently skipped (no Ion 1.1 binary reader).
+       - Ion 1.1 binary fragments are executed for the implemented subset; other Ion 1.1 binary features return `Unsupported` and are counted as skipped.
 3) What needs to be implemented to fully run this suite:
    - Conformance DSL runner (test collection parsing/execution, signals, and "produces" verification)
    - Ion 1.1 macro system beyond the currently-expanded subset (`none`, `values`, `default`, `repeat`, `delta`, `sum`, `annotate`, `make_string`, `make_symbol`, `make_decimal`, `make_timestamp`, `make_field`, `make_struct`, `make_list`, `make_sexp`, `flatten`, plus `(::...)`)
@@ -155,11 +169,25 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
    - Ion 1.1 binary features used by conformance (various flex_* encodings, additional symbol/macro table mechanics)
    - System macros used by conformance (e.g. `annotate`, `make_field`, `make_decimal`, `make_timestamp`, `parse_ion`, `use`, etc.)
 
+4) Largest remaining conformance skip buckets (by file)
+
+1) `ion-tests/conformance/eexp/binary/argument_encoding.ion`: skipped=188 (Ion 1.1 binary e-expressions)
+2) `ion-tests/conformance/system_macros/use.ion`: skipped=29 (macro-address/module catalog semantics)
+3) `ion-tests/conformance/tdl/literal.ion`: skipped=26 (TDL evaluation)
+4) `ion-tests/conformance/system_macros/add_macros.ion`: skipped=23 (macro table mutations)
+5) `ion-tests/conformance/system_macros/add_symbols.ion`: skipped=23 (symbol table mutations)
+6) `ion-tests/conformance/system_macros/set_symbols.ion`: skipped=23 (symbol table mutations)
+7) `ion-tests/conformance/system_macros/parse_ion.ion`: skipped=23 (parse-ion macro semantics)
+8) `ion-tests/conformance/system_macros/set_macros.ion`: skipped=20 (macro table mutations)
+9) `ion-tests/conformance/tdl/for.ion`: skipped=19 (TDL evaluation)
+10) `ion-tests/conformance/tdl/variable_expansion.ion`: skipped=19 (TDL evaluation)
+
 ## To-dos (to remove skips / broaden coverage)
 
 ### 1) Ion 1.1 binary
 
-`iontestdata_1_1` currently covers text only in the Zig harness. Binary Ion 1.1 is not implemented.
+`iontestdata_1_1` currently covers text only in the Zig harness. Binary Ion 1.1 is partially implemented for the
+conformance data model files, but does not yet support the conformance suite’s Ion 1.1 binary e-expression encodings.
 
 ### 2) Macro system breadth
 

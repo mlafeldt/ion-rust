@@ -1,0 +1,274 @@
+//! Ion 1.1 binary parser (minimal).
+//!
+//! This is intentionally small and only implements the Ion 1.1 binary opcodes currently exercised
+//! by `ion-tests/conformance/data_model/*`:
+//! - nulls (`EA`, `EB <typecode>`)
+//! - booleans (`6E` true, `6F` false)
+//! - integers (`60..68` fixed-length, `F6 <flexuint len> <payload>`) as little-endian two's complement
+//! - floats (`6A` f0, `6B` f16, `6C` f32, `6D` f64) with little-endian payloads
+//! - decimals (`70..78` fixed-length, `F7 <flexuint len> <payload>`) with payload:
+//!     `[flexint exponent][remaining bytes = coefficient (LE two's complement)]`
+//!   and a conformance-driven rule for negative zero:
+//!     If coefficient bytes are present and all zero, treat as a negative zero coefficient.
+//!
+//! Anything outside this subset returns `IonError.Unsupported` so the conformance runner can count
+//! the branch as skipped (until we implement more Ion 1.1 binary features like e-expressions).
+
+const std = @import("std");
+const ion = @import("../ion.zig");
+const value = @import("value.zig");
+
+const IonError = ion.IonError;
+
+/// Parses an Ion binary stream that begins with the Ion 1.1 IVM (`E0 01 01 EA`).
+///
+/// All returned slices are allocated in `arena` and valid until the arena is deinited.
+pub fn parseTopLevel(arena: *value.Arena, bytes: []const u8) IonError![]value.Element {
+    if (bytes.len < 4) return IonError.InvalidIon;
+    if (!(bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA)) return IonError.InvalidIon;
+    var d = Decoder{ .arena = arena, .input = bytes[4..], .i = 0 };
+    return d.parseTopLevel();
+}
+
+const Decoder = struct {
+    arena: *value.Arena,
+    input: []const u8,
+    i: usize,
+
+    fn parseTopLevel(self: *Decoder) IonError![]value.Element {
+        var out = std.ArrayListUnmanaged(value.Element){};
+        errdefer out.deinit(self.arena.allocator());
+
+        while (self.i < self.input.len) {
+            // Ion Version Marker can appear in-stream; accept and ignore only the Ion 1.1 IVM.
+            if (self.i + 4 <= self.input.len and std.mem.eql(u8, self.input[self.i .. self.i + 4], &.{ 0xE0, 0x01, 0x01, 0xEA })) {
+                self.i += 4;
+                continue;
+            }
+
+            const v = try self.readValue();
+            out.append(self.arena.allocator(), .{ .annotations = &.{}, .value = v }) catch return IonError.OutOfMemory;
+        }
+
+        return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+    }
+
+    fn readValue(self: *Decoder) IonError!value.Value {
+        if (self.i >= self.input.len) return IonError.Incomplete;
+        const op = self.input[self.i];
+        self.i += 1;
+
+        // null / typed null
+        if (op == 0xEA) return value.Value{ .null = .null };
+        if (op == 0xEB) {
+            if (self.i >= self.input.len) return IonError.Incomplete;
+            const tc = self.input[self.i];
+            self.i += 1;
+            return value.Value{ .null = typeCodeToIonType(tc) orelse return IonError.InvalidIon };
+        }
+
+        // booleans
+        if (op == 0x6E) return value.Value{ .bool = true };
+        if (op == 0x6F) return value.Value{ .bool = false };
+
+        // integers: 60..68 (len in opcode)
+        if (op >= 0x60 and op <= 0x68) {
+            const len: usize = op - 0x60;
+            const bytes = try self.readBytes(len);
+            return value.Value{ .int = try readTwosComplementIntLE(self.arena, bytes) };
+        }
+
+        // integers: F6 <flexuint len> <payload>
+        if (op == 0xF6) {
+            const len = try readFlexUInt(self.input, &self.i);
+            const bytes = try self.readBytes(len);
+            return value.Value{ .int = try readTwosComplementIntLE(self.arena, bytes) };
+        }
+
+        // floats
+        switch (op) {
+            0x6A => return value.Value{ .float = 0.0 },
+            0x6B => {
+                const b = try self.readBytes(2);
+                const bits = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(b.ptr)), .little);
+                const hf: f16 = @bitCast(bits);
+                return value.Value{ .float = @as(f64, @floatCast(hf)) };
+            },
+            0x6C => {
+                const b = try self.readBytes(4);
+                const bits = std.mem.readInt(u32, @as(*const [4]u8, @ptrCast(b.ptr)), .little);
+                const f32v: f32 = @bitCast(bits);
+                return value.Value{ .float = @as(f64, @floatCast(f32v)) };
+            },
+            0x6D => {
+                const b = try self.readBytes(8);
+                const bits = std.mem.readInt(u64, @as(*const [8]u8, @ptrCast(b.ptr)), .little);
+                const f64v: f64 = @bitCast(bits);
+                return value.Value{ .float = f64v };
+            },
+            else => {},
+        }
+
+        // decimals
+        if (op >= 0x70 and op <= 0x7F) {
+            const len: usize = op - 0x70;
+            const payload = try self.readBytes(len);
+            return value.Value{ .decimal = try decodeDecimal11(self.arena, payload) };
+        }
+        if (op == 0xF7) {
+            const len = try readFlexUInt(self.input, &self.i);
+            const payload = try self.readBytes(len);
+            return value.Value{ .decimal = try decodeDecimal11(self.arena, payload) };
+        }
+
+        return IonError.Unsupported;
+    }
+
+    fn readBytes(self: *Decoder, len: usize) IonError![]const u8 {
+        if (self.i + len > self.input.len) return IonError.Incomplete;
+        const out = self.input[self.i .. self.i + len];
+        self.i += len;
+        return out;
+    }
+};
+
+fn typeCodeToIonType(tc: u8) ?value.IonType {
+    return switch (tc) {
+        0x00 => .bool,
+        0x01 => .int,
+        0x02 => .float,
+        0x03 => .decimal,
+        0x04 => .timestamp,
+        0x05 => .string,
+        0x06 => .symbol,
+        0x07 => .blob,
+        0x08 => .clob,
+        0x09 => .list,
+        0x0A => .sexp,
+        0x0B => .@"struct",
+        else => null,
+    };
+}
+
+fn readFlexUInt(input: []const u8, cursor: *usize) IonError!usize {
+    const shift = detectFlexShift(input, cursor) orelse return IonError.Unsupported;
+    if (shift == 0) return IonError.InvalidIon;
+    if (cursor.* + shift > input.len) return IonError.Incomplete;
+    if (shift > 16) return IonError.Unsupported;
+    var raw: u128 = 0;
+    for (input[cursor.* .. cursor.* + shift], 0..) |b, idx| {
+        raw |= (@as(u128, b) << @intCast(idx * 8));
+    }
+    cursor.* += shift;
+    return @intCast(raw >> @intCast(shift));
+}
+
+fn readFlexInt(input: []const u8, cursor: *usize) IonError!i32 {
+    const shift = detectFlexShift(input, cursor) orelse return IonError.Unsupported;
+    if (shift == 0) return IonError.InvalidIon;
+    if (cursor.* + shift > input.len) return IonError.Incomplete;
+    if (shift > 16) return IonError.Unsupported;
+
+    var raw: u128 = 0;
+    for (input[cursor.* .. cursor.* + shift], 0..) |b, idx| {
+        raw |= (@as(u128, b) << @intCast(idx * 8));
+    }
+    cursor.* += shift;
+
+    // Sign-extend to i64 based on the top bit of the most significant byte.
+    const msb = input[cursor.* - 1];
+    if ((msb & 0x80) != 0) {
+        const used_bits_usize: usize = shift * 8;
+        if (used_bits_usize < 128) {
+            const used_bits: u7 = @intCast(used_bits_usize);
+            raw |= (~@as(u128, 0)) << used_bits;
+        }
+    }
+    const signed: i128 = @bitCast(raw);
+    const v128: i128 = signed >> @intCast(shift);
+    if (v128 < std.math.minInt(i32) or v128 > std.math.maxInt(i32)) return IonError.Unsupported;
+    return @intCast(v128);
+}
+
+fn readTwosComplementIntLE(arena: *value.Arena, bytes: []const u8) IonError!value.Int {
+    if (bytes.len == 0) return .{ .small = 0 };
+
+    if (bytes.len <= 16) {
+        const sign_extend: u8 = if ((bytes[bytes.len - 1] & 0x80) != 0) 0xFF else 0x00;
+        var buf: [16]u8 = undefined;
+        @memset(buf[0..], sign_extend);
+        std.mem.copyForwards(u8, buf[0..bytes.len], bytes);
+        const v = std.mem.readInt(i128, @as(*const [16]u8, @ptrCast(buf[0..16].ptr)), .little);
+        return .{ .small = v };
+    }
+
+    const bi = try arena.makeBigInt();
+    const bit_count: usize = bytes.len * 8;
+    const limb_bits: usize = @bitSizeOf(std.math.big.Limb);
+    const needed_limbs: usize = if (bit_count == 0) 1 else (bit_count + limb_bits - 1) / limb_bits;
+    bi.ensureCapacity(needed_limbs) catch return IonError.OutOfMemory;
+    var m = bi.toMutable();
+    m.readTwosComplement(bytes, bit_count, .little, .signed);
+    bi.setMetadata(m.positive, m.len);
+    return .{ .big = bi };
+}
+
+fn decodeDecimal11(arena: *value.Arena, payload: []const u8) IonError!value.Decimal {
+    if (payload.len == 0) {
+        return .{ .is_negative = false, .coefficient = .{ .small = 0 }, .exponent = 0 };
+    }
+
+    var cursor: usize = 0;
+    const exp_i32 = try readFlexInt(payload, &cursor);
+    if (cursor > payload.len) return IonError.Incomplete;
+    const coeff_bytes = payload[cursor..];
+
+    // No coefficient bytes: implied +0 coefficient (this is how the conformance suite encodes
+    // positive zeros, including high-precision zeros with large exponents).
+    if (coeff_bytes.len == 0) {
+        return .{ .is_negative = false, .coefficient = .{ .small = 0 }, .exponent = exp_i32 };
+    }
+
+    // Conformance-driven rule: Ion 1.1 binary decimals can represent negative zero by including an
+    // explicit all-zero coefficient byte sequence (there is no distinct two's complement encoding
+    // for -0). Treat any explicit all-zero coefficient as negative zero.
+    var all_zero = true;
+    for (coeff_bytes) |b| if (b != 0) {
+        all_zero = false;
+        break;
+    };
+    if (all_zero) {
+        return .{ .is_negative = true, .coefficient = .{ .small = 0 }, .exponent = exp_i32 };
+    }
+
+    const signed = try readTwosComplementIntLE(arena, coeff_bytes);
+    return switch (signed) {
+        .small => |v| if (v < 0)
+            .{ .is_negative = true, .coefficient = .{ .small = -v }, .exponent = exp_i32 }
+        else
+            .{ .is_negative = false, .coefficient = .{ .small = v }, .exponent = exp_i32 },
+        .big => |bi| blk: {
+            const negative = !bi.toConst().positive;
+            if (negative) bi.negate();
+            break :blk .{ .is_negative = negative, .coefficient = .{ .big = bi }, .exponent = exp_i32 };
+        },
+    };
+}
+
+fn detectFlexShift(input: []const u8, cursor: *usize) ?usize {
+    if (cursor.* >= input.len) return null;
+    // FlexInt/FlexUInt encoding uses a "tag bit" that is the least-significant set bit of the
+    // underlying little-endian integer. If the tag bit is at position (N-1), the encoding is N
+    // bytes long and the value is obtained by shifting right by N bits.
+    //
+    // This scan supports encodings where the tag bit is beyond the first byte (e.g. exponent=0
+    // encoded in 9 bytes has a tag bit at bit 8 and begins with 0x00 0x01 ...).
+    var idx: usize = 0;
+    while (cursor.* + idx < input.len and idx < 16) : (idx += 1) {
+        const b = input[cursor.* + idx];
+        if (b == 0) continue;
+        const tz: usize = @intCast(@ctz(b));
+        return idx * 8 + tz + 1;
+    }
+    return null;
+}

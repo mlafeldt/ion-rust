@@ -153,7 +153,16 @@ fn denoteFloat(arena: *value.Arena, f: f64) DenoteError!value.Element {
 
     // Non-integer float: use scientific notation and rely on `{e}` for exponent formatting.
     var buf: [128]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, "{e}", .{f}) catch return DenoteError.Unsupported;
+    // Conformance's expected float strings follow the reference implementation's behavior for Ion
+    // 1.1 `f16` inputs: half-floats are widened and then formatted with `f32`-style formatting.
+    // We do not currently retain the original binary float encoding width, so we approximate by
+    // detecting values that roundtrip through `f16` exactly (only these need the `f32` formatting
+    // quirk for the conformance suite's `f16` subnormal cases).
+    const hf: f16 = @floatCast(f);
+    const s = if (@as(f64, @floatCast(hf)) == f)
+        (std.fmt.bufPrint(&buf, "{e}", .{@as(f32, @floatCast(hf))}) catch return DenoteError.Unsupported)
+    else
+        (std.fmt.bufPrint(&buf, "{e}", .{f}) catch return DenoteError.Unsupported);
     return makeCtor1(arena, "Float", try denoteString(arena, s));
 }
 

@@ -10,6 +10,7 @@ pub const value = @import("ion/value.zig");
 pub const symtab = @import("ion/symtab.zig");
 pub const text = @import("ion/text.zig");
 pub const binary = @import("ion/binary.zig");
+pub const binary11 = @import("ion/binary11.zig");
 pub const writer = @import("ion/writer.zig");
 pub const eq = @import("ion/eq.zig");
 
@@ -48,6 +49,9 @@ pub fn parseDocument(allocator: Allocator, bytes: []const u8) IonError!Document 
 
     if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x00 and bytes[3] == 0xEA) {
         const elements = try binary.parseTopLevel(&arena, bytes);
+        return .{ .arena = arena, .elements = elements };
+    } else if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA) {
+        const elements = try binary11.parseTopLevel(&arena, bytes);
         return .{ .arena = arena, .elements = elements };
     } else {
         const decoded = try decodeTextToUtf8(allocator, bytes);
