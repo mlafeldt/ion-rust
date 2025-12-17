@@ -153,8 +153,8 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
    - Run: 55/55 conformance files (via a single walker test in `zig/src/tests.zig`)
    - Branch-level status (2025-12-17):
      - Total branches: 2859
-     - Passed: 2284
-     - Skipped (unsupported): 575
+     - Passed: 2310
+     - Skipped (unsupported): 549
      - To reproduce totals: `cd zig && for f in ../ion-tests/conformance/**/*.ion; do /opt/homebrew/bin/zig run src/conformance_debug.zig -- "$f"; done`
    - Many branches are currently marked “unsupported” and counted as skipped:
      - Large parts of the Ion 1.1 macro system / TDL are not implemented (only a subset of system macros expand during parsing)
@@ -176,11 +176,11 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
 3) `ion-tests/conformance/tdl/if_none.ion`: skipped=42 (TDL evaluation)
 4) `ion-tests/conformance/tdl/if_multi.ion`: skipped=42 (TDL evaluation)
 5) `ion-tests/conformance/tdl/literal.ion`: skipped=37 (TDL evaluation)
-6) `ion-tests/conformance/system_macros/use.ion`: skipped=33 (module catalog + symbol/macro scoping)
-7) `ion-tests/conformance/tdl/for.ion`: skipped=32 (TDL evaluation)
-8) `ion-tests/conformance/system_macros/parse_ion.ion`: skipped=29 (parse_ion macro semantics)
-9) `ion-tests/conformance/tdl/variable_expansion.ion`: skipped=29 (TDL evaluation)
-10) `ion-tests/conformance/system_macros/add_symbols.ion`: skipped=27 (symbol table mutations)
+6) `ion-tests/conformance/tdl/for.ion`: skipped=32 (TDL evaluation)
+7) `ion-tests/conformance/system_macros/parse_ion.ion`: skipped=29 (parse_ion macro semantics)
+8) `ion-tests/conformance/tdl/variable_expansion.ion`: skipped=29 (TDL evaluation)
+9) `ion-tests/conformance/system_macros/add_symbols.ion`: skipped=27 (symbol table mutations)
+10) `ion-tests/conformance/system_macros/set_symbols.ion`: skipped=27 (symbol table mutations)
 
 ## To-dos (to remove skips / broaden coverage)
 
