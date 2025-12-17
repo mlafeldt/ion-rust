@@ -1,4 +1,4 @@
-# Ion Zig Port Report (`zig/`)
+# Ion Zig Port
 
 ## Overview
 
