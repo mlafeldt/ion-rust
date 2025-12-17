@@ -74,7 +74,7 @@ const Decoder = struct {
         self.i += 1;
 
         const tab = self.mactab orelse return IonError.Unsupported;
-        const m = tab.macroForAddress(addr) orelse return IonError.InvalidIon;
+        const m = tab.macroForAddress(addr) orelse return IonError.Unsupported;
         if (m.params.len != 1) return IonError.Unsupported;
         const p = m.params[0];
 

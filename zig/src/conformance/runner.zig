@@ -64,6 +64,31 @@ const SharedSymtabCatalog = struct {
     }
 };
 
+const SharedModuleCatalog11 = struct {
+    const Entry = struct {
+        name: []const u8,
+        version: u32,
+        symbols: []const []const u8,
+    };
+
+    // Minimal Ion 1.1 shared module catalog required by the conformance suite (`system_macros/use.ion`).
+    //
+    // Note: this is distinct from the Ion 1.0 shared symbol table catalog above; the conformance
+    // suite models `use` as importing symbols into the default module address space.
+    const entries = [_]Entry{
+        .{ .name = "abcs", .version = 1, .symbols = &.{ "a" } },
+        .{ .name = "abcs", .version = 2, .symbols = &.{ "a", "b" } },
+        .{ .name = "mnop", .version = 1, .symbols = &.{ "m" } },
+    };
+
+    fn lookup(name: []const u8, version: u32) ?Entry {
+        for (entries) |e| {
+            if (e.version == version and std.mem.eql(u8, e.name, name)) return e;
+        }
+        return null;
+    }
+};
+
 const State = struct {
     version: Version,
     // Persistent stacks of fragment/event nodes to avoid O(n) copies on `each` branching.
@@ -187,8 +212,12 @@ fn sysMaxId(version: Version) u32 {
 
 fn parseDelayedSid(s: value.Symbol) ?u32 {
     const t = s.text orelse return null;
-    if (!(t.len >= 3 and t[0] == '#' and t[1] == '$')) return null;
-    return std.fmt.parseInt(u32, t[2..], 10) catch null;
+    if (t.len < 2 or t[0] != '#') return null;
+    const digits_start: usize = if (t[1] == '$') 2 else 1;
+    if (digits_start >= t.len) return null;
+    // Avoid confusing macro-address tokens like `#$:use` with delayed SIDs.
+    if (t[digits_start] == ':') return null;
+    return std.fmt.parseInt(u32, t[digits_start..], 10) catch null;
 }
 
 fn applyTextFragment(state: *State, allocator: std.mem.Allocator, sx: []const value.Element) RunError!void {
@@ -242,9 +271,8 @@ fn applyTopLevel2(state: *State, allocator: std.mem.Allocator, sx: []const value
         }
 
         // Abstract Ion 1.1 conformance uses macro invocations encoded as sexps beginning with a
-        // `#$:` address token (e.g. ("#$:set_macros" ...)). The Zig port doesn't evaluate macros
-        // yet, so treat any such branch as unsupported.
-        if (containsMacroAddressToken(e)) state.unsupported = true;
+        // `#$:` address token (e.g. ("#$:set_macros" ...)). These are handled (or skipped) by the
+        // abstract evaluator rather than here.
         try state.pushEvent(allocator, .{ .value = e });
     }
 }
@@ -288,11 +316,11 @@ fn containsMacroAddressToken(elem: value.Element) bool {
                 const head = sx[0];
                 switch (head.value) {
                     .string => |s| {
-                        if (std.mem.startsWith(u8, s, "#$:") and !std.mem.eql(u8, s, "#$:values")) break :blk true;
+                        if (std.mem.startsWith(u8, s, "#$:") and !std.mem.eql(u8, s, "#$:values") and !std.mem.eql(u8, s, "#$:use")) break :blk true;
                     },
                     .symbol => |sym| {
                         if (sym.text) |t| {
-                            if (std.mem.startsWith(u8, t, "#$:") and !std.mem.eql(u8, t, "#$:values")) break :blk true;
+                            if (std.mem.startsWith(u8, t, "#$:") and !std.mem.eql(u8, t, "#$:values") and !std.mem.eql(u8, t, "#$:use")) break :blk true;
                         }
                     },
                     else => {},
@@ -307,7 +335,7 @@ fn containsMacroAddressToken(elem: value.Element) bool {
         },
         .@"struct" => |st| blk: {
             for (st.fields) |f| {
-                if (f.name.text) |t| if (std.mem.startsWith(u8, t, "#$:") and !std.mem.eql(u8, t, "#$:values")) break :blk true;
+                if (f.name.text) |t| if (std.mem.startsWith(u8, t, "#$:") and !std.mem.eql(u8, t, "#$:values") and !std.mem.eql(u8, t, "#$:use")) break :blk true;
                 if (containsMacroAddressToken(f.value)) break :blk true;
             }
             break :blk false;
@@ -843,6 +871,23 @@ fn evalAbstractDocument(arena: *value.Arena, state: *State, absences: *std.AutoH
             },
             .ivm_invalid => |_| return RunError.InvalidConformanceDsl,
             .value => |e| {
+                // Handle a small subset of Ion 1.1 "system values" represented in the conformance
+                // suite as macro-address s-expressions (e.g. `('#$:use' "abcs" 1)`).
+                if (version_ctx == .ion_1_1) {
+                    // `use` must not appear nested inside containers or as arguments.
+                    if (!isAbstractSystemMacroInvocation(e, "#$:use") and containsAbstractSystemMacroInvocation(e, "#$:use")) {
+                        return RunError.InvalidConformanceDsl;
+                    }
+                    if (isAbstractSystemMacroInvocation(e, "#$:use")) {
+                        try applyAbstractUseSystemValue(a, &symtab, &symtab_max_id, e);
+                        continue;
+                    }
+                    // Any other macro-address tokens are not implemented yet.
+                    if (containsMacroAddressToken(e)) {
+                        return RunError.Unsupported;
+                    }
+                }
+
                 if (e.annotations.len == 0 and e.value == .symbol) {
                     if (parseAbstractIvmSymbol(e.value.symbol)) |ivm| {
                         switch (ivm) {
@@ -869,6 +914,118 @@ fn evalAbstractDocument(arena: *value.Arena, state: *State, absences: *std.AutoH
         }
     }
     return out.toOwnedSlice(a) catch return RunError.OutOfMemory;
+}
+
+fn isAbstractSystemMacroInvocation(elem: value.Element, name: []const u8) bool {
+    if (elem.value != .sexp) return false;
+    const sx = elem.value.sexp;
+    if (sx.len == 0) return false;
+    if (sx[0].value != .symbol) return false;
+    const t = sx[0].value.symbol.text orelse return false;
+    return std.mem.eql(u8, t, name);
+}
+
+fn containsAbstractSystemMacroInvocation(elem: value.Element, name: []const u8) bool {
+    if (isAbstractSystemMacroInvocation(elem, name)) return true;
+    return switch (elem.value) {
+        .list => |items| blk: {
+            for (items) |it| if (containsAbstractSystemMacroInvocation(it, name)) break :blk true;
+            break :blk false;
+        },
+        .sexp => |items| blk: {
+            for (items) |it| if (containsAbstractSystemMacroInvocation(it, name)) break :blk true;
+            break :blk false;
+        },
+        .@"struct" => |st| blk: {
+            for (st.fields) |f| {
+                // Field names are symbols, but `use` is represented as a value sexp.
+                if (containsAbstractSystemMacroInvocation(f.value, name)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+fn applyAbstractUseSystemValue(
+    allocator: std.mem.Allocator,
+    symtab: *std.ArrayListUnmanaged(?[]const u8),
+    symtab_max_id: *u32,
+    elem: value.Element,
+) RunError!void {
+    if (elem.value != .sexp) return RunError.InvalidConformanceDsl;
+    const sx = elem.value.sexp;
+    if (sx.len < 2 or sx.len > 3) return RunError.InvalidConformanceDsl;
+    if (sx[0].value != .symbol) return RunError.InvalidConformanceDsl;
+    const head = sx[0].value.symbol.text orelse return RunError.InvalidConformanceDsl;
+    if (!std.mem.eql(u8, head, "#$:use")) return RunError.InvalidConformanceDsl;
+
+    // Arg 1: module name string (unannotated).
+    if (sx[1].annotations.len != 0) return RunError.InvalidConformanceDsl;
+    if (sx[1].value != .string) return RunError.InvalidConformanceDsl;
+    const module_name = sx[1].value.string;
+
+    // Arg 2: optional version int, defaults to 1.
+    var version: u32 = 1;
+    if (sx.len == 3) {
+        const v = sx[2];
+        // Conformance uses `('#$::')` to represent an empty group; treat as "absent" here.
+        if (isSexpHead(v, "#$::")) {
+            const vsx = v.value.sexp;
+            if (vsx.len != 1) return RunError.InvalidConformanceDsl;
+            version = 1;
+        } else {
+            if (v.annotations.len != 0) return RunError.InvalidConformanceDsl;
+            if (v.value != .int) return RunError.InvalidConformanceDsl;
+            const vv: i128 = switch (v.value.int) {
+                .small => |x| x,
+                .big => return RunError.InvalidConformanceDsl,
+            };
+            if (vv <= 0 or vv > std.math.maxInt(u32)) return RunError.InvalidConformanceDsl;
+            version = @intCast(vv);
+        }
+    }
+
+    const entry = SharedModuleCatalog11.lookup(module_name, version) orelse return RunError.InvalidConformanceDsl;
+
+    // Conformance models `use` as importing symbols into the default module address space.
+    // The default module starts with the system module symbols and `use` inserts user-module
+    // symbols *before* the system module block (preserving earlier imports).
+    const sys_max: u32 = sysMaxId(.ion_1_1);
+    if (sys_max == 0) return RunError.InvalidConformanceDsl;
+    if (symtab_max_id.* < sys_max) return RunError.InvalidConformanceDsl;
+    const prefix_len: u32 = symtab_max_id.* - sys_max;
+
+    const old_items = symtab.items;
+    if (old_items.len != symtab_max_id.* + 1) return RunError.InvalidConformanceDsl;
+
+    const insert_count: u32 = @intCast(entry.symbols.len);
+    if (insert_count == 0) return;
+    if (symtab_max_id.* > std.math.maxInt(u32) - insert_count) return RunError.InvalidConformanceDsl;
+
+    const new_max: u32 = symtab_max_id.* + insert_count;
+    const new_len: usize = @intCast(new_max + 1);
+    var new = std.ArrayListUnmanaged(?[]const u8){};
+    errdefer new.deinit(allocator);
+    new.ensureTotalCapacity(allocator, new_len) catch return RunError.OutOfMemory;
+    new.items.len = 0;
+
+    // Slot 0
+    new.appendAssumeCapacity(null);
+    // Existing prefix (user imports, if any)
+    const prefix_src_start: usize = 1;
+    const prefix_src_end: usize = @intCast(prefix_len + 1);
+    for (old_items[prefix_src_start..prefix_src_end]) |v| new.appendAssumeCapacity(v);
+    // Newly imported symbols (as user symbols, appended to the prefix)
+    for (entry.symbols) |s| new.appendAssumeCapacity(s);
+    // Existing system module block
+    const sys_src_start: usize = @intCast(prefix_len + 1);
+    const sys_src_end: usize = @intCast(symtab_max_id.* + 1);
+    for (old_items[sys_src_start..sys_src_end]) |v| new.appendAssumeCapacity(v);
+
+    symtab.deinit(allocator);
+    symtab.* = new;
+    symtab_max_id.* = new_max;
 }
 
 fn isValuesMacroInvocation(elem: value.Element) bool {
@@ -1017,6 +1174,7 @@ fn runExpectation(
         actual = parsed_doc.?.elements;
     } else {
         const abs = evalAbstractDocument(&arena, state, &absences) catch |err| {
+            if (err == RunError.Unsupported) return false;
             if (std.mem.eql(u8, head, "signals")) return true;
             return err;
         };

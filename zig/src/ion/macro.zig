@@ -129,6 +129,12 @@ fn validateMacroDefForConformance(m: Macro) IonError!void {
                 else => return IonError.InvalidIon,
             }
         }
+
+        // Conformance: `use` is a system value and may only occur where system values can occur.
+        // Treat `.use` appearing inside a macro definition as invalid.
+        if (std.mem.eql(u8, head, ".use") or std.mem.eql(u8, head, "use")) {
+            return IonError.InvalidIon;
+        }
     }
 }
 
