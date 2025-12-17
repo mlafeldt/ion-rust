@@ -7,8 +7,8 @@ This repository contains a Zig 0.15.2 implementation of an Amazon Ion reader/wri
 Key properties:
 
 1) No original Rust code removed; the port lives under `zig/`.
-2) Zig toolchain: tested with `/opt/homebrew/bin/zig` (Zig 0.15.2).
-3) Tests run via Zig only: `cd zig && /opt/homebrew/bin/zig build test --summary all`.
+2) Zig toolchain: Zig 0.15.2.
+3) Tests run via Zig only: `cd zig && zig build test --summary all`.
 4) “All tests pass” means: all tests in the Zig harness pass, with an explicit skip list of currently-out-of-scope fixtures documented in `zig/src/tests.zig`.
 
 ## What’s implemented
@@ -76,7 +76,10 @@ Key properties:
     - floats (`6A` f0, `6B` f16, `6C` f32, `6D` f64) (little-endian payload)
     - decimals (`70..7F`, `F7 <flexuint len> <payload>`) with payload:
       `[flexint exponent][remaining bytes = coefficient (LE two's complement)]`
-  - Out of scope (still `Unsupported`): Ion 1.1 binary e-expressions, containers/structs/strings/symbols, macro tables, etc.
+  - Implemented (conformance-driven): a minimal subset of Ion 1.1 binary e-expressions (user macro invocations),
+    plus `mactab` support for the conformance runner and `%x` expansion for single-parameter macros.
+  - Out of scope (still `Unsupported`): most Ion 1.1 binary value space (containers/strings/symbols/symtabs), system macros,
+    and the full macro/TDL system.
 
 ### Writer (text + binary)
 
@@ -110,7 +113,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
-  - As of 2025-12-15, `cd zig && /opt/homebrew/bin/zig build test --summary all` runs 10 Zig tests; all pass.
+  - As of 2025-12-17, `cd zig && zig build test --summary all` runs 10 Zig tests; all pass.
 
 ### Skip list
 
@@ -155,7 +158,7 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
      - Total branches: 2859
      - Passed: 2310
      - Skipped (unsupported): 549
-     - To reproduce totals: `cd zig && for f in ../ion-tests/conformance/**/*.ion; do /opt/homebrew/bin/zig run src/conformance_debug.zig -- "$f"; done`
+     - To reproduce totals: `cd zig && for f in ../ion-tests/conformance/**/*.ion; do zig run src/conformance_debug.zig -- "$f"; done`
    - Many branches are currently marked “unsupported” and counted as skipped:
      - Large parts of the Ion 1.1 macro system / TDL are not implemented (only a subset of system macros expand during parsing)
      - Binary Ion 1.1 is only partially implemented (data model numerics, nulls, bools)
@@ -187,7 +190,8 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
 ### 1) Ion 1.1 binary
 
 `iontestdata_1_1` currently covers text only in the Zig harness. Binary Ion 1.1 is partially implemented for the
-conformance data model files, but does not yet support the conformance suite’s Ion 1.1 binary e-expression encodings.
+conformance data model files, and the conformance runner supports a small subset of Ion 1.1 binary e-expressions.
+Most Ion 1.1 binary features are still unimplemented.
 
 ### 2) Macro system breadth
 
@@ -256,57 +260,55 @@ These are discrepancies encountered while implementing the Zig port and cross-ch
 If we later find a concrete bug in `ion-rust` or `ion-java` (with a minimal repro and expected/actual behavior), add it
 to this section with an issue link.
 
-Fix: `writeDecimalBinary` prefixes `0x00` for positive coefficients with MSB set, and handles negative sign-bit/prefix rules.
-
-### 4) NOP pads inside structs with non-zero SIDs
+### 6) NOP pads inside structs with non-zero SIDs
 
 The corpus includes cases where a struct field name is followed by a NOP (padding) before the value, and the field name SID can be non-zero.
 
 Fix: in `decodeStruct`, treat `(sid, nop)` pairs as padding regardless of sid value, and continue scanning.
 
-### 5) “Ordered struct” binary encoding
+### 7) “Ordered struct” binary encoding
 
 Some `.10n` fixtures use Ion’s ordered struct encoding (where the length code encodes the size of the length field).
 
 Fix: implement ordered-struct detection/decoding for T13 with length codes < 14, and reject empty ordered structs per corpus.
 
-### 6) Line comments with CR (old Mac EOL)
+### 8) Line comments with CR (old Mac EOL)
 
 `//` comments must terminate at either `\\n` or `\\r`, not just `\\n`.
 
 Fix: `skipWsComments` ends line comments on `\\r` too.
 
-### 7) Special whitespace/control characters in strings/symbols
+### 9) Special whitespace/control characters in strings/symbols
 
 Some fixtures include literal HT/VT/FF inside quoted strings and quoted symbols.
 
 Fix: allow `\\t`, `0x0B`, `0x0C` where corpus expects it.
 
-### 8) Clob non-ASCII bytes
+### 10) Clob non-ASCII bytes
 
 Binary clobs can contain bytes ≥ `0x80`. When emitting text clobs, those must be escaped so the text parser can accept them as bytes.
 
 Fix: writer emits `\\xNN` for non-ASCII bytes in clobs; parser accepts `\\xNN` into clobs as raw bytes.
 
-### 9) Avoiding accidental string concatenation in emitted text
+### 11) Avoiding accidental string concatenation in emitted text
 
 Ion text concatenates adjacent string literals. A naive printer can accidentally merge consecutive string values.
 
 Fix: text writer alternates short/long string literal styles for adjacent string values.
 
-### 10) BigInt magnitude imports (binary) must avoid string paths
+### 12) BigInt magnitude imports (binary) must avoid string paths
 
 Some binary numeric encodings carry big integer magnitudes as bytes. Converting those bytes to hex/decimal strings and then calling BigInt `setString()` is very allocation-heavy and slows the suite down.
 
 Fix: use `std.math.big.int.Mutable.readTwosComplement(..., .unsigned)` to import magnitudes directly from bytes (see `zig/src/ion/binary.zig`).
 
-### 11) Conformance runner must not “help” invalid symbol addresses
+### 13) Conformance runner must not “help” invalid symbol addresses
 
 The conformance suite includes cases that expect invalid/out-of-range symbol addresses to `signals` an error. A roundtrip-focused text writer may emit synthetic `$ion_symbol_table` imports to make `$<sid>` tokens parseable, which would mask those errors.
 
 Fix: the text writer exposes `writeTextConformance(...)` which does not inject symbol table imports; the conformance runner also parses its DSL using a mode that disables adjacent string literal concatenation.
 
-### 10) Imports with very large `max_id`
+### 14) Imports with very large `max_id`
 
 Some fixtures (notably `ion-tests/iontestdata/good/subfieldVarUInt32bit.ion`) declare imports with very large `max_id`
 values (on the order of 2^31). Materializing symbol table slots up to `max_id` (e.g. appending billions of null slots)
