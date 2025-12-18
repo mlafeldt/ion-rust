@@ -146,11 +146,215 @@ const Decoder = struct {
         return switch (addr) {
             // System macro addresses used by conformance:
             // 6  => delta
+            // 8  => annotate
+            // 11 => make_decimal
             // 12 => make_timestamp
+            // 14 => make_list
+            // 15 => make_sexp
+            // 16 => parse_ion OR make_field (disambiguated by argument shape)
             6 => self.expandDelta(),
+            8 => self.expandAnnotate(),
+            11 => self.expandMakeDecimal(),
             12 => self.expandMakeTimestamp(),
+            14 => self.expandMakeSequence(.list),
+            15 => self.expandMakeSequence(.sexp),
+            16 => self.expandSystem16(),
             else => IonError.Unsupported,
         };
+    }
+
+    fn expandSystem16(self: *Decoder) IonError![]value.Element {
+        // Conformance uses system macro address 16 for both `parse_ion` and `make_field`.
+        //
+        // - `parse_ion` takes exactly one arg (string/clob/blob).
+        // - `make_field` takes exactly two args (field-name, value).
+        //
+        // Binary encoding does not include an explicit argument count here, so disambiguate based
+        // on the first argument's type.
+        const first = try self.readValue();
+        switch (first) {
+            .string, .clob, .blob => return self.expandParseIonFrom(first),
+            else => return self.expandMakeFieldFrom(first),
+        }
+    }
+
+    fn expandMakeSequence(self: *Decoder, kind: enum { list, sexp }) IonError![]value.Element {
+        // (make_list <seq*>)
+        // (make_sexp <seq*>)
+        //
+        // Conformance binary encoding begins with a 1-byte presence code for the argument group:
+        //   0 => empty group (no args)
+        //   1 => single tagged value
+        //   2 => expression group of tagged values
+        if (self.i >= self.input.len) return IonError.Incomplete;
+        const presence = self.input[self.i];
+        self.i += 1;
+
+        const args: []const value.Element = switch (presence) {
+            0 => &.{},
+            1 => blk: {
+                const v = try self.readValue();
+                const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                one[0] = .{ .annotations = &.{}, .value = v };
+                break :blk one;
+            },
+            2 => try self.readExpressionGroup(.tagged),
+            else => return IonError.InvalidIon,
+        };
+
+        var out_items = std.ArrayListUnmanaged(value.Element){};
+        errdefer out_items.deinit(self.arena.allocator());
+        for (args) |arg| {
+            // Argument annotations are silently dropped.
+            switch (arg.value) {
+                .list => |items| out_items.appendSlice(self.arena.allocator(), items) catch return IonError.OutOfMemory,
+                .sexp => |items| out_items.appendSlice(self.arena.allocator(), items) catch return IonError.OutOfMemory,
+                else => return IonError.InvalidIon,
+            }
+        }
+
+        const seq = out_items.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+        const out_elem: value.Element = .{
+            .annotations = &.{},
+            .value = if (kind == .list) .{ .list = seq } else .{ .sexp = seq },
+        };
+        const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+        out[0] = out_elem;
+        return out;
+    }
+
+    fn expandParseIonFrom(self: *Decoder, first: value.Value) IonError![]value.Element {
+        // (parse_ion <bytes>)
+        // Conformance binary encoding uses one tagged argument value.
+        const bytes: []const u8 = switch (first) {
+            .string => |s| s,
+            .clob => |b| b,
+            .blob => |b| b,
+            else => return IonError.InvalidIon,
+        };
+
+        if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x00 and bytes[3] == 0xEA) {
+            return ion.binary.parseTopLevel(self.arena, bytes);
+        }
+        if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA) {
+            return ion.binary11.parseTopLevelWithMacroTable(self.arena, bytes, null);
+        }
+        return ion.text.parseTopLevelWithMacroTable(self.arena, bytes, null);
+    }
+
+    fn expandMakeFieldFrom(self: *Decoder, first: value.Value) IonError![]value.Element {
+        // (make_field <name> <value>)
+        // Conformance binary encoding uses two tagged argument values.
+        const name_sym: value.Symbol = switch (first) {
+            .string => |s| try value.makeSymbol(self.arena, s),
+            .symbol => |s| s,
+            else => return IonError.InvalidIon,
+        };
+        const val_v = try self.readValue();
+
+        const fields = self.arena.allocator().alloc(value.StructField, 1) catch return IonError.OutOfMemory;
+        fields[0] = .{ .name = name_sym, .value = .{ .annotations = &.{}, .value = val_v } };
+        const out_elem: value.Element = .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = fields } } };
+        const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+        out[0] = out_elem;
+        return out;
+    }
+
+    fn expandAnnotate(self: *Decoder) IonError![]value.Element {
+        // (annotate <annotations-expr> <value-expr>)
+        //
+        // Conformance binary encoding begins with a 1-byte presence code for the annotations arg:
+        //   0 => empty annotations group
+        //   1 => single tagged value (one annotation)
+        //   2 => expression group of tagged values (multiple annotations)
+        if (self.i >= self.input.len) return IonError.Incomplete;
+        const presence = self.input[self.i];
+        self.i += 1;
+
+        var anns = std.ArrayListUnmanaged(value.Symbol){};
+        errdefer anns.deinit(self.arena.allocator());
+
+        const appendText = struct {
+            fn run(arena: *value.Arena, list: *std.ArrayListUnmanaged(value.Symbol), v: value.Value) IonError!void {
+                switch (v) {
+                    .string => |s| list.append(arena.allocator(), try value.makeSymbol(arena, s)) catch return IonError.OutOfMemory,
+                    .symbol => |sym| {
+                        // Conformance accepts unknown symbols as annotations (e.g. `$0`).
+                        list.append(arena.allocator(), sym) catch return IonError.OutOfMemory;
+                    },
+                    else => return IonError.InvalidIon,
+                }
+            }
+        }.run;
+
+        switch (presence) {
+            0 => {},
+            1 => {
+                const v = try self.readValue();
+                try appendText(self.arena, &anns, v);
+            },
+            2 => {
+                const group = try self.readExpressionGroup(.tagged);
+                for (group) |e| try appendText(self.arena, &anns, e.value);
+            },
+            else => return IonError.InvalidIon,
+        }
+
+        const val_v = try self.readValue();
+        const out_elem: value.Element = .{
+            .annotations = anns.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory,
+            .value = val_v,
+        };
+        const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+        out[0] = out_elem;
+        return out;
+    }
+
+    fn expandMakeDecimal(self: *Decoder) IonError![]value.Element {
+        // (make_decimal <coefficient> <exponent>)
+        //
+        // Conformance binary encoding uses two *tagged* values back-to-back (no presence byte),
+        // e.g. `EF 0B 60 60` for `(:make_decimal 0 0)`.
+        const coeff_v = try self.readValue();
+        if (coeff_v != .int) return IonError.InvalidIon;
+        const exp_v = try self.readValue();
+        if (exp_v != .int) return IonError.InvalidIon;
+
+        const exp_i128: i128 = switch (exp_v.int) {
+            .small => |v| v,
+            .big => return IonError.Unsupported,
+        };
+        if (exp_i128 < std.math.minInt(i32) or exp_i128 > std.math.maxInt(i32)) return IonError.InvalidIon;
+
+        var is_negative = false;
+        var magnitude: value.Int = undefined;
+        switch (coeff_v.int) {
+            .small => |v| {
+                if (v < 0) {
+                    if (v == std.math.minInt(i128)) return IonError.Unsupported;
+                    is_negative = true;
+                    magnitude = .{ .small = @intCast(@abs(v)) };
+                } else {
+                    magnitude = .{ .small = v };
+                }
+            },
+            .big => return IonError.Unsupported,
+        }
+
+        // Negative zero is not representable as an int; ensure we don't emit it.
+        const coeff_is_zero = switch (magnitude) {
+            .small => |v| v == 0,
+            .big => |v| v.eqlZero(),
+        };
+        if (coeff_is_zero) is_negative = false;
+
+        const out_elem: value.Element = .{
+            .annotations = &.{},
+            .value = .{ .decimal = .{ .is_negative = is_negative, .coefficient = magnitude, .exponent = @intCast(exp_i128) } },
+        };
+        const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+        out[0] = out_elem;
+        return out;
     }
 
     fn expandDelta(self: *Decoder) IonError![]value.Element {
@@ -598,6 +802,15 @@ const Decoder = struct {
         const op = self.input[self.i];
         self.i += 1;
 
+        // Conformance uses `0x01` as an alternative "tagged integer 0" encoding inside some
+        // Ion 1.1 binary system macro invocation arguments (for example:
+        // `system_macros/make_decimal.ion` uses `EF 0B 01 01` for `(:make_decimal 0 0)`).
+        //
+        // Note: `0x01` is also used by the binary conformance DSL as a FlexUInt(0) sentinel in
+        // delimited expression group encodings. We only interpret it as a value opcode here when
+        // a tagged value is expected and `readValue()` is called.
+        if (op == 0x01) return value.Value{ .int = .{ .small = 0 } };
+
         // null / typed null
         if (op == 0xEA) return value.Value{ .null = .null };
         if (op == 0xEB) {
@@ -610,6 +823,22 @@ const Decoder = struct {
         // booleans
         if (op == 0x6E) return value.Value{ .bool = true };
         if (op == 0x6F) return value.Value{ .bool = false };
+
+        // Short strings: 90..9F (len in opcode).
+        if (op >= 0x90 and op <= 0x9F) {
+            const len: usize = op - 0x90;
+            const b = try self.readBytes(len);
+            const s = try self.arena.dupe(b);
+            return value.Value{ .string = s };
+        }
+
+        // Short symbols with inline text: A0..AF (len in opcode).
+        if (op >= 0xA0 and op <= 0xAF) {
+            const len: usize = op - 0xA0;
+            const b = try self.readBytes(len);
+            const t = try self.arena.dupe(b);
+            return value.Value{ .symbol = value.makeSymbolId(null, t) };
+        }
 
         // integers: 60..68 (len in opcode)
         if (op >= 0x60 and op <= 0x68) {

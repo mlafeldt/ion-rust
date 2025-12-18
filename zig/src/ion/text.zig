@@ -84,6 +84,11 @@ const Parser = struct {
     version: enum { v1_0, v1_1 } = .v1_0,
     concat_string_literals: bool = true,
     conformance_dsl_mode: bool = false,
+    // If true, treat only the leading IVM in the stream as a system value; subsequent `$ion_1_0`
+    // / `$ion_1_1` tokens are treated as ordinary symbols. This is used by the `parse_ion`
+    // system macro, which must always produce user values for embedded streams.
+    parse_ion_mode: bool = false,
+    parse_ion_ivm_consumed: bool = false,
     /// If true, interpret Ion 1.1 symbol IDs using the conformance suite's "default module"
     /// model where user-defined symbols occupy addresses starting at 1 and the system module's
     /// symbols follow after them.
@@ -123,6 +128,8 @@ const Parser = struct {
             .version = .v1_0,
             .concat_string_literals = concat_string_literals,
             .conformance_dsl_mode = conformance_dsl_mode,
+            .parse_ion_mode = false,
+            .parse_ion_ivm_consumed = false,
             .ion11_module_mode = ion11_module_mode,
             .mactab_external = mactab,
             .mactab_local = null,
@@ -168,6 +175,18 @@ const Parser = struct {
             const before = self.i;
             const elem = try self.parseElement(.top);
             const is_literal = hasIonLiteralAnnotation(elem.annotations);
+            // `parse_ion` mode: treat IVM tokens as user values after the leading IVM has been
+            // consumed.
+            if (self.parse_ion_mode and self.parse_ion_ivm_consumed and !is_literal and elem.annotations.len == 0 and elem.value == .symbol) {
+                if (elem.value.symbol.text) |t| {
+                    if (std.mem.eql(u8, t, "$ion_1_0") or std.mem.eql(u8, t, "$ion_1_1")) {
+                        out.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
+                        // Prevent infinite loops on malformed inputs.
+                        if (self.i == before) return IonError.InvalidIon;
+                        continue;
+                    }
+                }
+            }
             if (elem.annotations.len == 0 and elem.value == .symbol) {
                 if (elem.value.symbol.text) |t| {
                     if (std.mem.startsWith(u8, t, "$ion_")) {
@@ -200,8 +219,10 @@ const Parser = struct {
                     if (std.mem.eql(u8, t, "$ion_1_1")) {
                         self.version = .v1_1;
                         if (self.ion11_module_mode) self.ion11_system_loaded = true;
+                        if (self.parse_ion_mode) self.parse_ion_ivm_consumed = true;
                     } else if (std.mem.eql(u8, t, "$ion_1_0")) {
                         self.version = .v1_0;
+                        if (self.parse_ion_mode) self.parse_ion_ivm_consumed = true;
                     }
                 }
             }
@@ -1189,7 +1210,9 @@ const Parser = struct {
         if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA) {
             return ion.binary11.parseTopLevelWithMacroTable(self.arena, bytes, null);
         }
-        return parseTopLevelWithMacroTable(self.arena, bytes, null);
+        var p = try Parser.init(self.arena, bytes, null);
+        p.parse_ion_mode = true;
+        return p.parseTopLevel();
     }
 
     fn eof(self: *const Parser) bool {

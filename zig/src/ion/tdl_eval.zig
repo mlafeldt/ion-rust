@@ -424,6 +424,35 @@ fn evalMacroInvocation(
         out[0] = out_elem;
         return out;
     }
+    if (std.mem.eql(u8, name, "annotate")) {
+        // (annotate <annotations-expr> <value-expr>)
+        if (args.len != 2) return IonError.InvalidIon;
+        const ann_vals = try evalExpr(arena, tab, env, args[0]);
+        const val_vals = try evalExpr(arena, tab, env, args[1]);
+        if (val_vals.len != 1) return IonError.InvalidIon;
+
+        var anns = std.ArrayListUnmanaged(value.Symbol){};
+        errdefer anns.deinit(arena.allocator());
+        for (ann_vals) |e| {
+            // Argument annotations are silently dropped.
+            switch (e.value) {
+                .string => |s| anns.append(arena.allocator(), try value.makeSymbol(arena, s)) catch return IonError.OutOfMemory,
+                .symbol => |s| anns.append(arena.allocator(), s) catch return IonError.OutOfMemory,
+                else => return IonError.InvalidIon,
+            }
+        }
+
+        const v = val_vals[0];
+        var all = std.ArrayListUnmanaged(value.Symbol){};
+        errdefer all.deinit(arena.allocator());
+        all.appendSlice(arena.allocator(), anns.items) catch return IonError.OutOfMemory;
+        all.appendSlice(arena.allocator(), v.annotations) catch return IonError.OutOfMemory;
+
+        const out_elem: value.Element = .{ .annotations = all.toOwnedSlice(arena.allocator()) catch return IonError.OutOfMemory, .value = v.value };
+        const out = arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+        out[0] = out_elem;
+        return out;
+    }
     if (std.mem.eql(u8, name, "make_struct")) {
         // Concatenate fields from each struct argument in order (duplicates preserved).
         var total_fields: usize = 0;
@@ -608,6 +637,19 @@ fn evalExpr(arena: *value.Arena, tab: ?*const ion.macro.MacroTable, env: *const 
         if (sx.len != 0 and sx[0].annotations.len == 0 and sx[0].value == .symbol) {
             const head_t = sx[0].value.symbol.text orelse return IonError.InvalidIon;
             if (head_t.len != 0 and head_t[0] == '.') {
+                // Ion text tokenization treats `.name` as operator `.` + identifier `name`.
+                // Conformance `mactab` parsing allows `.name` as a single token, but macro
+                // definitions embedded in ordinary Ion text (e.g. via `(:add_macros ...)`) may
+                // arrive here as `(. name ...)`. Support both representations.
+                if (std.mem.eql(u8, head_t, ".")) {
+                    if (sx.len < 2) return IonError.InvalidIon;
+                    if (sx[1].annotations.len != 0 or sx[1].value != .symbol) return IonError.InvalidIon;
+                    const name = sx[1].value.symbol.text orelse return IonError.InvalidIon;
+                    const combined = arena.allocator().alloc(u8, 1 + name.len) catch return IonError.OutOfMemory;
+                    combined[0] = '.';
+                    @memcpy(combined[1..], name);
+                    return evalMacroInvocation(arena, tab, env, combined, sx[2..]);
+                }
                 return evalMacroInvocation(arena, tab, env, head_t, sx[1..]);
             }
         }
