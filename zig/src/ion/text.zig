@@ -309,11 +309,11 @@ const Parser = struct {
             }
             macro_addr = v;
         } else {
-            if (!std.ascii.isAlphabetic(self.peek().?) and self.peek().? != '_') return IonError.InvalidIon;
+            if (!std.ascii.isAlphabetic(self.peek().?) and self.peek().? != '_' and self.peek().? != '$') return IonError.InvalidIon;
             self.consume(1);
             while (!self.eof()) {
                 const c = self.peek().?;
-                if (std.ascii.isAlphanumeric(c) or c == '_') {
+                if (std.ascii.isAlphanumeric(c) or c == '_' or c == '$') {
                     self.consume(1);
                     continue;
                 }
@@ -744,8 +744,65 @@ const Parser = struct {
                 return &.{};
             }
 
-            // Validate that each produced value is an unannotated `(macro ...)` sexp.
+            // Demo/conformance: allow macro-def producers to be written using the abstract macro-ref
+            // form `('#$:foo' ...)` inside Ion text, and expand them here so they can supply `(macro ...)`
+            // definitions to `set_macros`/`add_macros`.
+            //
+            // This is used by `ion-tests/conformance/demos/metaprogramming.ion` to call a user macro
+            // that returns a macro definition (metaprogramming).
+            var expanded_defs = std.ArrayListUnmanaged(value.Element){};
+            defer expanded_defs.deinit(self.arena.allocator());
+
+            const normalizeRefName = struct {
+                fn run(t: []const u8) ?[]const u8 {
+                    if (!std.mem.startsWith(u8, t, "#$:")) return null;
+                    var rest = t["#$:".len..];
+                    if (std.mem.startsWith(u8, rest, "$ion::")) rest = rest["$ion::".len..];
+                    return rest;
+                }
+            }.run;
+
+            const maybe_expand_ref = struct {
+                fn run(
+                    p: *Parser,
+                    out: *std.ArrayListUnmanaged(value.Element),
+                    d: value.Element,
+                ) IonError!bool {
+                    if (d.annotations.len != 0 or d.value != .sexp) return false;
+                    const dsx = d.value.sexp;
+                    if (dsx.len == 0) return false;
+                    const head_t: ?[]const u8 = switch (dsx[0].value) {
+                        .symbol => |s| s.text,
+                        .string => |s| s,
+                        else => null,
+                    };
+                    const ht = head_t orelse return false;
+                    const name = normalizeRefName(ht) orelse return false;
+
+                    const tab = p.currentMacroTable() orelse return false;
+                    const m = tab.macroForName(name) orelse return false;
+
+                    const args_raw = dsx[1..];
+                    const arg_exprs = p.arena.allocator().alloc([]const value.Element, args_raw.len) catch return IonError.OutOfMemory;
+                    for (args_raw, 0..) |arg, i| {
+                        const one = p.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                        one[0] = arg;
+                        arg_exprs[i] = one;
+                    }
+
+                    const vals = try tdl_eval.expandUserMacro(p.arena, tab, m, arg_exprs);
+                    out.appendSlice(p.arena.allocator(), vals) catch return IonError.OutOfMemory;
+                    return true;
+                }
+            }.run;
+
             for (defs_list.items) |d| {
+                if (try maybe_expand_ref(self, &expanded_defs, d)) continue;
+                expanded_defs.append(self.arena.allocator(), d) catch return IonError.OutOfMemory;
+            }
+
+            // Validate that each produced value is an unannotated `(macro ...)` sexp.
+            for (expanded_defs.items) |d| {
                 if (d.annotations.len != 0) return IonError.InvalidIon;
                 if (d.value != .sexp) return IonError.InvalidIon;
                 const dsx = d.value.sexp;
@@ -754,7 +811,7 @@ const Parser = struct {
                 if (!std.mem.eql(u8, head, "macro")) return IonError.InvalidIon;
             }
 
-            const parsed = ion.macro.parseMacroTable(self.arena.allocator(), defs_list.items) catch return IonError.InvalidIon;
+            const parsed = ion.macro.parseMacroTable(self.arena.allocator(), expanded_defs.items) catch return IonError.InvalidIon;
             if (kind.? == .set_macros) {
                 self.mactab_local = parsed;
             } else {

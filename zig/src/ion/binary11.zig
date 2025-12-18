@@ -1063,6 +1063,7 @@ const Decoder = struct {
     fn readArgValue(self: *Decoder, ty: ion.macro.ParamType) IonError!value.Value {
         return switch (ty) {
             .tagged => try self.readValue(),
+            .macro_shape => return IonError.Unsupported,
             .flex_uint => blk: {
                 const n = try readFlexUInt(self.input, &self.i);
                 break :blk .{ .int = .{ .small = @intCast(n) } };
@@ -1215,6 +1216,20 @@ const Decoder = struct {
         var out = std.ArrayListUnmanaged(value.Element){};
         errdefer out.deinit(self.arena.allocator());
 
+        // Conformance demo (`ion-tests/conformance/demos/metaprogramming.ion`): generated "tagless
+        // values" macros use a more complex template body shape:
+        //   ((.$ion::values %) vals)
+        //
+        // Semantically, this expands to the values in `vals`. We special-case it here so the
+        // binary demo can run without pulling in the full TDL evaluator (which would create an
+        // import cycle with `ion.zig`).
+        if (m.params.len == 1 and m.body.len == 1) {
+            if (isTaglessValuesBody(m.body[0], m.params[0].name)) {
+                out.appendSlice(self.arena.allocator(), args) catch return IonError.OutOfMemory;
+                return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+            }
+        }
+
         for (m.body) |expr| {
             // Variable expansion: conformance DSL encodes `%x` as an operator token `%` followed
             // by the variable identifier `x` inside an s-expression: `(% x)`.
@@ -1359,6 +1374,50 @@ const Decoder = struct {
     }
 };
 
+fn isTaglessValuesBody(expr: value.Element, param_name: []const u8) bool {
+    if (expr.annotations.len != 0 or expr.value != .sexp) return false;
+    const sx = expr.value.sexp;
+    if (sx.len != 2) return false;
+
+    // Second element must be the parameter name (e.g. `vals`).
+    if (sx[1].annotations.len != 0 or sx[1].value != .symbol) return false;
+    const name = sx[1].value.symbol.text orelse return false;
+    if (!std.mem.eql(u8, name, param_name)) return false;
+
+    // First element is an invocation of `.values` where the head may be tokenized as:
+    // - `(. $ion::values %)` (split dot) or
+    // - `(.values %)` / `(.$ion::values %)` (single token)
+    if (sx[0].annotations.len != 0 or sx[0].value != .sexp) return false;
+    const inner = sx[0].value.sexp;
+    if (inner.len < 2) return false;
+    if (inner[0].annotations.len != 0 or inner[0].value != .symbol) return false;
+    const head = inner[0].value.symbol.text orelse return false;
+
+    var values_name: ?[]const u8 = null;
+    var arg_start: usize = 1;
+    if (std.mem.eql(u8, head, ".")) {
+        if (inner.len < 3) return false;
+        if (inner[1].annotations.len != 0 or inner[1].value != .symbol) return false;
+        values_name = inner[1].value.symbol.text;
+        arg_start = 2;
+    } else if (head.len != 0 and head[0] == '.') {
+        values_name = head;
+        arg_start = 1;
+    } else {
+        return false;
+    }
+
+    const vn = values_name orelse return false;
+    const norm = if (std.mem.startsWith(u8, vn, ".$ion::")) vn[".$ion::".len..] else if (std.mem.startsWith(u8, vn, "$ion::")) vn["$ion::".len..] else if (std.mem.startsWith(u8, vn, ".")) vn[1..] else vn;
+    if (!std.mem.eql(u8, norm, "values")) return false;
+
+    // The first (and only) arg is a bare `%` symbol in the conformance demo.
+    if (inner.len != arg_start + 1) return false;
+    if (inner[arg_start].annotations.len != 0 or inner[arg_start].value != .symbol) return false;
+    const percent = inner[arg_start].value.symbol.text orelse return false;
+    return std.mem.eql(u8, percent, "%");
+}
+
 fn isLeapYear(year: i32) bool {
     if (@rem(year, 400) == 0) return true;
     if (@rem(year, 100) == 0) return false;
@@ -1379,6 +1438,7 @@ fn readTaglessFrom(payload: []const u8, cursor: *usize, ty: ion.macro.ParamType)
     defer cursor.* = i;
 
     return switch (ty) {
+        .macro_shape => return IonError.Unsupported,
         .flex_uint => blk: {
             // Conformance quirk: `ion-tests/conformance/eexp/binary/argument_encoding.ion` includes
             // a non-canonical two-byte encoding for FlexUInt(2) written as `0B 00` (in multiple

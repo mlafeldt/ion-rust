@@ -14,6 +14,14 @@ const IonError = ion.IonError;
 
 pub const ParamType = enum {
     tagged,
+    /// A macro shape (or qualified type name) used as a tagless encoding.
+    ///
+    /// Conformance/demo macros (e.g. `demos/metaprogramming.ion`) use annotations like:
+    /// - `tiny_decimal::vals` (macro shape)
+    /// - `$ion::make_decimal::vals` (qualified system macro shape)
+    ///
+    /// The payload (shape name/module) is stored in `Param.shape`.
+    macro_shape,
     flex_sym,
     flex_uint,
     flex_int,
@@ -35,6 +43,12 @@ pub const Cardinality = enum { one, zero_or_one, zero_or_many, one_or_many };
 pub const Param = struct {
     ty: ParamType,
     card: Cardinality,
+    name: []const u8,
+    shape: ?MacroShape = null,
+};
+
+pub const MacroShape = struct {
+    module: ?[]const u8,
     name: []const u8,
 };
 
@@ -99,6 +113,26 @@ fn parseMacroDef(allocator: std.mem.Allocator, it: value.Element) IonError!Macro
     var params = std.ArrayListUnmanaged(Param){};
     errdefer params.deinit(allocator);
     for (params_sx) |p| {
+        // Conformance/demo input sometimes expresses parameter cardinality as a separate token
+        // following the parameter name, e.g. `vals *` (instead of `vals*`).
+        if (p.annotations.len == 0 and p.value == .symbol) {
+            const t = p.value.symbol.text orelse return IonError.InvalidIon;
+            if (t.len == 1) {
+                const card: ?Cardinality = switch (t[0]) {
+                    '?' => .zero_or_one,
+                    '*' => .zero_or_many,
+                    '+' => .one_or_many,
+                    else => null,
+                };
+                if (card) |c| {
+                    if (params.items.len == 0) return IonError.InvalidIon;
+                    if (params.items[params.items.len - 1].card != .one) return IonError.InvalidIon;
+                    params.items[params.items.len - 1].card = c;
+                    continue;
+                }
+            }
+        }
+
         params.append(allocator, try parseParam(p)) catch return IonError.OutOfMemory;
     }
 
@@ -470,16 +504,27 @@ fn parseParam(p: value.Element) IonError!Param {
     const name = if (card == .one) t else t[0 .. t.len - 1];
     if (name.len == 0) return IonError.InvalidIon;
 
-    const ty: ParamType = if (p.annotations.len == 0) blk: {
-        break :blk .tagged;
-    } else if (p.annotations.len == 1) blk: {
-        const ann = p.annotations[0].text orelse return IonError.InvalidIon;
-        break :blk parseParamType(ann) orelse return IonError.InvalidIon;
-    } else {
-        return IonError.InvalidIon;
-    };
+    if (p.annotations.len == 0) {
+        return .{ .ty = .tagged, .card = card, .name = name, .shape = null };
+    }
 
-    return .{ .ty = ty, .card = card, .name = name };
+    if (p.annotations.len == 1) {
+        const ann = p.annotations[0].text orelse return IonError.InvalidIon;
+        if (parseParamType(ann)) |known| {
+            return .{ .ty = known, .card = card, .name = name, .shape = null };
+        }
+        // Unknown single annotation: treat as a macro-shape reference.
+        return .{ .ty = .macro_shape, .card = card, .name = name, .shape = .{ .module = null, .name = ann } };
+    }
+
+    if (p.annotations.len == 2) {
+        const m = p.annotations[0].text orelse return IonError.InvalidIon;
+        const ann = p.annotations[1].text orelse return IonError.InvalidIon;
+        // Qualified (module, name) macro shape.
+        return .{ .ty = .macro_shape, .card = card, .name = name, .shape = .{ .module = m, .name = ann } };
+    }
+
+    return IonError.InvalidIon;
 }
 
 fn parseParamType(t: []const u8) ?ParamType {

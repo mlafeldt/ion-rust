@@ -89,6 +89,7 @@ fn concatValueSlices(arena: *value.Arena, parts: []const []const value.Element) 
 
 fn bindParams(
     arena: *value.Arena,
+    tab: *const ion.macro.MacroTable,
     macro_def: ion.macro.Macro,
     arg_exprs: []const []const value.Element,
 ) IonError!Env {
@@ -135,10 +136,66 @@ fn bindParams(
             .zero_or_many => {},
         }
 
-        // Conformance doesn't depend on parameter encoding in the template evaluator yet.
-        _ = p.ty;
+        const bound_vals: []const value.Element = switch (p.ty) {
+            .macro_shape => blk: {
+                const shape = p.shape orelse return IonError.InvalidIon;
 
-        env.bindings.put(arena.allocator(), name, vals) catch return IonError.OutOfMemory;
+                var decoded = std.ArrayListUnmanaged(value.Element){};
+                errdefer decoded.deinit(arena.allocator());
+
+                // Decode each argument expression as a single macro-shape instance.
+                for (assigned) |expr_vals| {
+                    if (expr_vals.len == 0) continue;
+                    if (expr_vals.len != 1) return IonError.InvalidIon;
+                    const v = expr_vals[0];
+                    if (v.annotations.len != 0) return IonError.InvalidIon;
+
+                    const items: []const value.Element = switch (v.value) {
+                        .sexp => |sx| sx,
+                        .list => |lst| lst,
+                        else => return IonError.InvalidIon,
+                    };
+
+                    const shape_arg_exprs = arena.allocator().alloc([]const value.Element, items.len) catch return IonError.OutOfMemory;
+                    for (items, 0..) |it, i| {
+                        const one = arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                        one[0] = it;
+                        shape_arg_exprs[i] = one;
+                    }
+
+                    if (shape.module == null) {
+                        if (tab.macroForName(shape.name)) |shape_macro| {
+                            const produced = try expandUserMacro(arena, tab, shape_macro, shape_arg_exprs);
+                            decoded.appendSlice(arena.allocator(), produced) catch return IonError.OutOfMemory;
+                            continue;
+                        }
+                    }
+
+                    // Minimal system macro-shape support needed by conformance demos.
+                    if ((shape.module == null or std.mem.eql(u8, shape.module.?, "$ion")) and std.mem.eql(u8, shape.name, "make_decimal")) {
+                        var empty_env: Env = .{ .parent = null };
+                        defer empty_env.deinit(arena.allocator());
+                        const produced = try evalMacroInvocation(arena, tab, &empty_env, "make_decimal", items);
+                        decoded.appendSlice(arena.allocator(), produced) catch return IonError.OutOfMemory;
+                        continue;
+                    }
+
+                    return IonError.Unsupported;
+                }
+
+                break :blk decoded.toOwnedSlice(arena.allocator()) catch return IonError.OutOfMemory;
+            },
+            else => vals,
+        };
+
+        switch (p.card) {
+            .one => if (bound_vals.len != 1) return IonError.InvalidIon,
+            .zero_or_one => if (bound_vals.len > 1) return IonError.InvalidIon,
+            .one_or_many => if (bound_vals.len == 0) return IonError.InvalidIon,
+            .zero_or_many => {},
+        }
+
+        env.bindings.put(arena.allocator(), name, bound_vals) catch return IonError.OutOfMemory;
     }
 
     if (!last_is_variadic and arg_i != arg_exprs.len) return IonError.InvalidIon;
@@ -318,6 +375,88 @@ fn evalMacroInvocation(
             if (vals.len != 0) return vals;
         }
         return &.{};
+    }
+    if (std.mem.eql(u8, name, "make_string") or std.mem.eql(u8, name, "make_symbol")) {
+        // (make_string <text*>)
+        // (make_symbol <text*>)
+        var parts = std.ArrayListUnmanaged([]const u8){};
+        defer parts.deinit(arena.allocator());
+
+        for (args) |a| {
+            const vals = try evalExpr(arena, tab, env, a);
+            for (vals) |e| {
+                // Argument annotations are silently dropped.
+                const t: []const u8 = switch (e.value) {
+                    .string => |s| s,
+                    .symbol => |s| s.text orelse return IonError.InvalidIon,
+                    else => return IonError.InvalidIon,
+                };
+                parts.append(arena.allocator(), t) catch return IonError.OutOfMemory;
+            }
+        }
+
+        var total: usize = 0;
+        for (parts.items) |p| total += p.len;
+        const buf = arena.allocator().alloc(u8, total) catch return IonError.OutOfMemory;
+        var i: usize = 0;
+        for (parts.items) |p| {
+            if (p.len != 0) {
+                @memcpy(buf[i .. i + p.len], p);
+                i += p.len;
+            }
+        }
+
+        const out_elem: value.Element = if (std.mem.eql(u8, name, "make_string"))
+            .{ .annotations = &.{}, .value = .{ .string = buf } }
+        else
+            .{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, buf) } };
+        const out = arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+        out[0] = out_elem;
+        return out;
+    }
+    if (std.mem.eql(u8, name, "make_decimal")) {
+        // (make_decimal <coefficient> <exponent>)
+        if (args.len != 2) return IonError.InvalidIon;
+        const coeff_vals = try evalExpr(arena, tab, env, args[0]);
+        const exp_vals = try evalExpr(arena, tab, env, args[1]);
+        if (coeff_vals.len != 1 or exp_vals.len != 1) return IonError.InvalidIon;
+        if (coeff_vals[0].value != .int or exp_vals[0].value != .int) return IonError.InvalidIon;
+
+        const exp_i128: i128 = switch (exp_vals[0].value.int) {
+            .small => |v| v,
+            .big => return IonError.Unsupported,
+        };
+        if (exp_i128 < std.math.minInt(i32) or exp_i128 > std.math.maxInt(i32)) return IonError.InvalidIon;
+
+        var is_negative = false;
+        var magnitude: value.Int = undefined;
+        switch (coeff_vals[0].value.int) {
+            .small => |v| {
+                if (v < 0) {
+                    if (v == std.math.minInt(i128)) return IonError.Unsupported;
+                    is_negative = true;
+                    magnitude = .{ .small = @intCast(@abs(v)) };
+                } else {
+                    magnitude = .{ .small = v };
+                }
+            },
+            .big => return IonError.Unsupported,
+        }
+
+        // Negative zero is not representable as an int; ensure we don't emit it.
+        const coeff_is_zero = switch (magnitude) {
+            .small => |v| v == 0,
+            .big => |v| v.eqlZero(),
+        };
+        if (coeff_is_zero) is_negative = false;
+
+        const out_elem: value.Element = .{
+            .annotations = &.{},
+            .value = .{ .decimal = .{ .is_negative = is_negative, .coefficient = magnitude, .exponent = @intCast(exp_i128) } },
+        };
+        const out = arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+        out[0] = out_elem;
+        return out;
     }
     if (std.mem.eql(u8, name, "repeat")) {
         if (args.len != 2) return IonError.InvalidIon;
@@ -568,6 +707,16 @@ fn evalExpr(arena: *value.Arena, tab: ?*const ion.macro.MacroTable, env: *const 
         }
     }
 
+    // Implicit variable reference: a bare symbol that matches a bound name expands to the bound
+    // value expression(s).
+    //
+    // Conformance/demo macros use this style in a few places (e.g. `.make_decimal a b`).
+    if (expr.annotations.len == 0 and expr.value == .symbol) {
+        if (expr.value.symbol.text) |t| {
+            if (env.get(t)) |bound| return evalBoundExprs(arena, tab, env, bound);
+        }
+    }
+
     // Conformance abstract syntax can embed e-expressions as sexps whose head is a macro-ref token
     // like `#$:foo` (or `#$:$ion::values`). Treat these as macro invocations during evaluation.
     if (expr.value == .sexp and expr.annotations.len == 0) {
@@ -718,7 +867,7 @@ pub fn expandUserMacro(
     macro_def: ion.macro.Macro,
     arg_exprs: []const []const value.Element,
 ) IonError![]value.Element {
-    var env = try bindParams(arena, macro_def, arg_exprs);
+    var env = try bindParams(arena, tab, macro_def, arg_exprs);
     defer env.deinit(arena.allocator());
 
     var out = std.ArrayListUnmanaged(value.Element){};
