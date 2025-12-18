@@ -20,6 +20,8 @@ Key properties:
     - Detects binary Ion 1.0 via IVM (`E0 01 00 EA`) and dispatches to the binary parser.
     - Detects binary Ion 1.1 via IVM (`E0 01 01 EA`) and dispatches to a minimal Ion 1.1 binary parser.
     - Otherwise parses as text Ion.
+  - `parseDocumentWithMacroTableIon11Modules(allocator, bytes, mactab)`:
+    - Conformance-runner-only entrypoint for parsing Ion 1.1 *text* using the conformance suite's "default module" symbol model.
   - `serializeDocument(allocator, format, elements)`:
     - Supports `Format.binary`, and text formats (compact/lines/pretty) via the text writer.
   - `Document` owns an arena and a slice of parsed `Element`s; `deinit()` frees the arena.
@@ -47,6 +49,7 @@ Key properties:
     - Expression groups: `(:: <expr>*)`
     - Macro IDs: unqualified/qualified names and numeric addresses (e.g. `(:values ...)`, `(:1 ...)`, `(:$ion::values ...)`, `(:$ion::1 ...)`)
     - Implemented expansions: `none`, `values`, `default`, `repeat`, `delta`, `sum`, `annotate`, `make_string`, `make_symbol`, `make_decimal`, `make_timestamp`, `make_field`, `make_struct`, `make_list`, `make_sexp`, `flatten`
+    - Conformance-only: supports `set_symbols` / `add_symbols` and an Ion 1.1 "default module" symbol model where user symbols occupy `$1..$n` and system symbols follow.
     - This is still far from a complete Ion 1.1 macro system.
 
 ### Binary Ion 1.0 parsing
