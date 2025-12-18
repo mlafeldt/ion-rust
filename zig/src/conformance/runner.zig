@@ -300,7 +300,15 @@ fn applyTopLevel2(state: *State, allocator: std.mem.Allocator, sx: []const value
             continue;
         }
         if (state.text_len != 0) {
-            const rendered = ion.serializeDocument(allocator, .text_compact, (&.{e})) catch return RunError.OutOfMemory;
+            // Conformance uses quoted symbols like `'#${n}'` to denote "delayed symbol IDs" when
+            // describing inputs. When appending these values to a text document, convert them to
+            // `$<sid>` symbol-ID notation so the text parser resolves them using the current
+            // encoding context.
+            var tmp_arena = value.Arena.init(allocator) catch return RunError.OutOfMemory;
+            defer tmp_arena.deinit();
+            const rewritten = try cloneElementRewritingDelayedSids(&tmp_arena, e);
+
+            const rendered = ion.serializeDocument(allocator, .text_compact, (&.{rewritten})) catch return RunError.OutOfMemory;
             try state.pushText(allocator, rendered);
             continue;
         }
@@ -310,6 +318,50 @@ fn applyTopLevel2(state: *State, allocator: std.mem.Allocator, sx: []const value
         // abstract evaluator rather than here.
         try state.pushEvent(allocator, .{ .value = e });
     }
+}
+
+fn cloneSymbolRewritingDelayedSid(s: value.Symbol) RunError!value.Symbol {
+    if (s.sid != null) return s;
+    const t = s.text orelse return s;
+    const tmp_sym: value.Symbol = .{ .sid = null, .text = t };
+    if (parseDelayedSid(tmp_sym)) |sid| {
+        return .{ .sid = sid, .text = null };
+    }
+    return s;
+}
+
+fn cloneElementRewritingDelayedSids(arena: *value.Arena, e: value.Element) RunError!value.Element {
+    const a = arena.allocator();
+
+    const anns = a.alloc(value.Symbol, e.annotations.len) catch return RunError.OutOfMemory;
+    for (e.annotations, 0..) |ann, i| anns[i] = try cloneSymbolRewritingDelayedSid(ann);
+
+    const v: value.Value = switch (e.value) {
+        .list => |items| blk: {
+            const out_items = a.alloc(value.Element, items.len) catch return RunError.OutOfMemory;
+            for (items, 0..) |it, i| out_items[i] = try cloneElementRewritingDelayedSids(arena, it);
+            break :blk .{ .list = out_items };
+        },
+        .sexp => |items| blk: {
+            const out_items = a.alloc(value.Element, items.len) catch return RunError.OutOfMemory;
+            for (items, 0..) |it, i| out_items[i] = try cloneElementRewritingDelayedSids(arena, it);
+            break :blk .{ .sexp = out_items };
+        },
+        .@"struct" => |st| blk: {
+            const out_fields = a.alloc(value.StructField, st.fields.len) catch return RunError.OutOfMemory;
+            for (st.fields, 0..) |f, i| {
+                out_fields[i] = .{
+                    .name = try cloneSymbolRewritingDelayedSid(f.name),
+                    .value = try cloneElementRewritingDelayedSids(arena, f.value),
+                };
+            }
+            break :blk .{ .@"struct" = .{ .fields = out_fields } };
+        },
+        .symbol => |s| .{ .symbol = try cloneSymbolRewritingDelayedSid(s) },
+        else => e.value,
+    };
+
+    return .{ .annotations = anns, .value = v };
 }
 
 fn encodeIon10Value(allocator: std.mem.Allocator, e: value.Element) RunError![]const u8 {

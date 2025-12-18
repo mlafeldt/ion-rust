@@ -117,11 +117,11 @@ const Parser = struct {
             if (try self.hasMacroInvocationStart()) {
                 const expanded = try self.parseMacroInvocationElems();
                 for (expanded) |elem| {
-                    if (isSystemValue(elem)) {
-                        try self.maybeConsumeSymbolTable(elem);
-                    } else {
-                        out.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
-                    }
+                    // Ion 1.1 e-expressions expand to user values; do not treat expansion results
+                    // as system values, even if they look like `$ion_symbol_table::{...}`.
+                    const is_literal = hasIonLiteralAnnotation(elem.annotations);
+                    const stripped = if (is_literal) try stripIonLiteralAnnotation(self.arena, elem) else elem;
+                    out.append(self.arena.allocator(), stripped) catch return IonError.OutOfMemory;
                 }
                 continue;
             }
@@ -131,6 +131,7 @@ const Parser = struct {
             // it as IVM if it's the next token at top-level with no annotations.
             const before = self.i;
             const elem = try self.parseElement(.top);
+            const is_literal = hasIonLiteralAnnotation(elem.annotations);
             if (elem.annotations.len == 0 and elem.value == .symbol) {
                 if (elem.value.symbol.text) |t| {
                     if (std.mem.startsWith(u8, t, "$ion_")) {
@@ -156,7 +157,7 @@ const Parser = struct {
                     }
                 }
             }
-            if (isSystemValue(elem)) {
+            if (isSystemValue(elem) and !is_literal) {
                 // Apply symbol table if present, otherwise ignore.
                 if (elem.annotations.len == 0 and elem.value == .symbol) {
                     if (elem.value.symbol.text) |t| {
@@ -169,7 +170,8 @@ const Parser = struct {
                 }
                 try self.maybeConsumeSymbolTable(elem);
             } else {
-                out.append(self.arena.allocator(), elem) catch return IonError.OutOfMemory;
+                const stripped = if (is_literal) try stripIonLiteralAnnotation(self.arena, elem) else elem;
+                out.append(self.arena.allocator(), stripped) catch return IonError.OutOfMemory;
             }
 
             // Prevent infinite loops on malformed inputs.
@@ -267,6 +269,7 @@ const Parser = struct {
             none,
             values,
             default,
+            meta,
             annotate,
             repeat,
             delta,
@@ -280,6 +283,7 @@ const Parser = struct {
             flatten,
             make_field,
             make_struct,
+            parse_ion,
         };
 
         const kind: ?MacroKind = blk: {
@@ -307,6 +311,7 @@ const Parser = struct {
             if (std.mem.eql(u8, macro_id, "none") or std.mem.eql(u8, macro_id, "$ion::none")) break :blk .none;
             if (std.mem.eql(u8, macro_id, "values") or std.mem.eql(u8, macro_id, "$ion::values")) break :blk .values;
             if (std.mem.eql(u8, macro_id, "default") or std.mem.eql(u8, macro_id, "$ion::default")) break :blk .default;
+            if (std.mem.eql(u8, macro_id, "meta") or std.mem.eql(u8, macro_id, "$ion::meta")) break :blk .meta;
             if (std.mem.eql(u8, macro_id, "annotate") or std.mem.eql(u8, macro_id, "$ion::annotate")) break :blk .annotate;
             if (std.mem.eql(u8, macro_id, "repeat") or std.mem.eql(u8, macro_id, "$ion::repeat")) break :blk .repeat;
             if (std.mem.eql(u8, macro_id, "delta") or std.mem.eql(u8, macro_id, "$ion::delta")) break :blk .delta;
@@ -320,8 +325,33 @@ const Parser = struct {
             if (std.mem.eql(u8, macro_id, "flatten") or std.mem.eql(u8, macro_id, "$ion::flatten")) break :blk .flatten;
             if (std.mem.eql(u8, macro_id, "make_field") or std.mem.eql(u8, macro_id, "$ion::make_field")) break :blk .make_field;
             if (std.mem.eql(u8, macro_id, "make_struct") or std.mem.eql(u8, macro_id, "$ion::make_struct")) break :blk .make_struct;
+            if (std.mem.eql(u8, macro_id, "parse_ion") or std.mem.eql(u8, macro_id, "$ion::parse_ion")) break :blk .parse_ion;
             break :blk null;
         };
+
+        // `parse_ion` is a special form: it requires a single *literal* string/clob/blob argument
+        // and does not allow expression groups or nested e-expressions.
+        if (kind != null and kind.? == .parse_ion) {
+            const arg_v = try self.parseParseIonLiteralArg();
+            try self.skipWsComments();
+            if (self.eof() or self.peek().? != ')') return IonError.InvalidIon;
+            self.consume(1);
+            return self.expandParseIon(arg_v);
+        }
+
+        // Conformance uses `(:16 "true")` for `parse_ion` and `(:16 foo 0)` for `make_field`.
+        // Attempt to parse the `parse_ion` special form first and backtrack on failure.
+        if (macro_addr != null and macro_addr.? == 16 and kind != null and kind.? == .make_field) {
+            const save = self.i;
+            if (self.parseParseIonLiteralArg()) |arg_v| {
+                try self.skipWsComments();
+                if (!self.eof() and self.peek().? == ')') {
+                    self.consume(1);
+                    return self.expandParseIon(arg_v);
+                }
+            } else |_| {}
+            self.i = save;
+        }
 
         const parseOneExpr = struct {
             fn run(p: *Parser) IonError![]const value.Element {
@@ -571,6 +601,11 @@ const Parser = struct {
                 }
             }
             return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+        }
+
+        if (kind != null and kind.? == .meta) {
+            // `meta` produces no values regardless of its argument expressions.
+            return &.{};
         }
 
         if (kind != null and kind.? == .make_decimal) {
@@ -918,6 +953,44 @@ const Parser = struct {
         }
 
         return IonError.Unsupported;
+    }
+
+    fn parseParseIonLiteralArg(self: *Parser) IonError!value.Value {
+        // Disable macro invocations while parsing the argument so `(:: ...)` and `(:values ...)`
+        // are rejected structurally (rather than being expanded and potentially accepted).
+        const saved_ver = self.version;
+        self.version = .v1_0;
+        defer self.version = saved_ver;
+
+        try self.skipWsComments();
+        if (self.eof()) return IonError.Incomplete;
+        if (self.peek().? == ')') return IonError.InvalidIon;
+
+        const elem = try self.parseElement(.sexp);
+        if (elem.annotations.len != 0) return IonError.InvalidIon;
+        return switch (elem.value) {
+            .string, .clob, .blob => elem.value,
+            else => IonError.InvalidIon,
+        };
+    }
+
+    fn expandParseIon(self: *Parser, v: value.Value) IonError![]value.Element {
+        const bytes: []const u8 = switch (v) {
+            .string => |s| s,
+            .clob => |b| b,
+            .blob => |b| b,
+            else => return IonError.InvalidIon,
+        };
+
+        // Parse the embedded Ion stream in a fresh encoding context (no inherited symbols/macros).
+        // System values in the embedded stream still apply as normal unless `$ion_literal` is used.
+        if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x00 and bytes[3] == 0xEA) {
+            return ion.binary.parseTopLevel(self.arena, bytes);
+        }
+        if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA) {
+            return ion.binary11.parseTopLevelWithMacroTable(self.arena, bytes, null);
+        }
+        return parseTopLevelWithMacroTable(self.arena, bytes, null);
     }
 
     fn eof(self: *const Parser) bool {
@@ -1629,7 +1702,7 @@ const Parser = struct {
         self.i = start;
         while (!self.eof()) {
             const c = self.peek().?;
-            if (std.ascii.isAlphanumeric(c) or c == '.' or c == '-' or c == '+' or c == '_' ) {
+            if (std.ascii.isAlphanumeric(c) or c == '.' or c == '-' or c == '+' or c == '_') {
                 self.i += 1;
                 continue;
             }
@@ -2091,6 +2164,34 @@ fn isSystemValue(elem: value.Element) bool {
         return std.mem.eql(u8, t, "$ion_symbol_table") or std.mem.eql(u8, t, "$ion_shared_symbol_table");
     }
     return false;
+}
+
+fn hasIonLiteralAnnotation(annotations: []const value.Symbol) bool {
+    for (annotations) |a| {
+        const t = a.text orelse continue;
+        if (std.mem.eql(u8, t, "$ion_literal")) return true;
+    }
+    return false;
+}
+
+fn stripIonLiteralAnnotation(arena: *value.Arena, elem: value.Element) IonError!value.Element {
+    // Keep value/field storage; only rewrite annotations slice.
+    var count: usize = 0;
+    for (elem.annotations) |a| {
+        const t = a.text orelse "";
+        if (std.mem.eql(u8, t, "$ion_literal")) continue;
+        count += 1;
+    }
+    if (count == elem.annotations.len) return elem;
+    const out_anns = arena.allocator().alloc(value.Symbol, count) catch return IonError.OutOfMemory;
+    var i: usize = 0;
+    for (elem.annotations) |a| {
+        const t = a.text orelse "";
+        if (std.mem.eql(u8, t, "$ion_literal")) continue;
+        out_anns[i] = a;
+        i += 1;
+    }
+    return .{ .annotations = out_anns, .value = elem.value };
 }
 
 fn parseNullType(text: []const u8) ?value.IonType {
