@@ -368,6 +368,8 @@ const Parser = struct {
                     17 => .make_struct,
                     19 => .flatten,
                     20 => .add_symbols,
+                    21 => .meta,
+                    22 => .add_macros,
                     23 => .use,
                     else => null,
                 };
