@@ -368,6 +368,18 @@ fn evalMacroInvocation(
         }
         return out;
     }
+    if (std.mem.eql(u8, name, "parse_ion")) {
+        if (args.len != 1) return IonError.InvalidIon;
+        const arg = args[0];
+        if (arg.annotations.len != 0) return IonError.InvalidIon;
+        const bytes: []const u8 = switch (arg.value) {
+            .string => |s| s,
+            .clob => |b| b,
+            .blob => |b| b,
+            else => return IonError.InvalidIon,
+        };
+        return parseEmbeddedIon(arena, bytes);
+    }
     if (std.mem.eql(u8, name, "make_string") or std.mem.eql(u8, name, "make_symbol")) {
         var buf = std.ArrayListUnmanaged(u8){};
         errdefer buf.deinit(arena.allocator());
@@ -486,6 +498,16 @@ fn evalMacroInvocation(
     }
 
     return IonError.Unsupported;
+}
+
+fn parseEmbeddedIon(arena: *value.Arena, bytes: []const u8) IonError![]value.Element {
+    if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x00 and bytes[3] == 0xEA) {
+        return ion.binary.parseTopLevel(arena, bytes);
+    }
+    if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA) {
+        return ion.binary11.parseTopLevelWithMacroTable(arena, bytes, null);
+    }
+    return ion.text.parseTopLevelWithMacroTable(arena, bytes, null);
 }
 
 fn evalExpr(arena: *value.Arena, tab: ?*const ion.macro.MacroTable, env: *const Env, expr: value.Element) IonError![]value.Element {

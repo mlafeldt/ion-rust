@@ -310,6 +310,7 @@ const Parser = struct {
             add_macros,
             set_symbols,
             add_symbols,
+            use,
             annotate,
             repeat,
             delta,
@@ -346,6 +347,7 @@ const Parser = struct {
                     17 => .make_struct,
                     19 => .flatten,
                     20 => .add_symbols,
+                    23 => .use,
                     else => null,
                 };
             }
@@ -357,6 +359,7 @@ const Parser = struct {
             if (std.mem.eql(u8, macro_id, "add_macros") or std.mem.eql(u8, macro_id, "$ion::add_macros")) break :blk .add_macros;
             if (std.mem.eql(u8, macro_id, "set_symbols") or std.mem.eql(u8, macro_id, "$ion::set_symbols")) break :blk .set_symbols;
             if (std.mem.eql(u8, macro_id, "add_symbols") or std.mem.eql(u8, macro_id, "$ion::add_symbols")) break :blk .add_symbols;
+            if (std.mem.eql(u8, macro_id, "use") or std.mem.eql(u8, macro_id, "$ion::use")) break :blk .use;
             if (std.mem.eql(u8, macro_id, "annotate") or std.mem.eql(u8, macro_id, "$ion::annotate")) break :blk .annotate;
             if (std.mem.eql(u8, macro_id, "repeat") or std.mem.eql(u8, macro_id, "$ion::repeat")) break :blk .repeat;
             if (std.mem.eql(u8, macro_id, "delta") or std.mem.eql(u8, macro_id, "$ion::delta")) break :blk .delta;
@@ -409,7 +412,7 @@ const Parser = struct {
             self.i = save;
         }
 
-        if (kind != null and (kind.? == .set_macros or kind.? == .add_macros or kind.? == .set_symbols or kind.? == .add_symbols)) {
+        if (kind != null and (kind.? == .set_macros or kind.? == .add_macros or kind.? == .set_symbols or kind.? == .add_symbols or kind.? == .use)) {
             if (invoke_ctx != .top) return IonError.InvalidIon;
         }
 
@@ -770,6 +773,37 @@ const Parser = struct {
                     self.ion11_user_symbols = merged;
                 }
             }
+            return &.{};
+        }
+
+        if (kind != null and kind.? == .use) {
+            // Ion 1.1 `use` is a system macro whose effect is to import a shared module into the
+            // default module, appending its symbols and macros. The conformance runner models this
+            // behavior abstractly; the text parser only validates the syntax and produces no values.
+            if (exprs.items.len < 1 or exprs.items.len > 2) return IonError.InvalidIon;
+
+            const key_vals = exprs.items[0];
+            if (key_vals.len != 1) return IonError.InvalidIon;
+            const key = key_vals[0];
+            if (key.annotations.len != 0) return IonError.InvalidIon;
+            if (key.value != .string) return IonError.InvalidIon;
+            if (key.value.string.len == 0) return IonError.InvalidIon;
+
+            if (exprs.items.len == 2) {
+                const ver_vals = exprs.items[1];
+                if (ver_vals.len != 0) {
+                    if (ver_vals.len != 1) return IonError.InvalidIon;
+                    const ver = ver_vals[0];
+                    if (ver.annotations.len != 0) return IonError.InvalidIon;
+                    if (ver.value != .int) return IonError.InvalidIon;
+                    const v_i128: i128 = switch (ver.value.int) {
+                        .small => |v| v,
+                        .big => return IonError.InvalidIon,
+                    };
+                    if (v_i128 <= 0) return IonError.InvalidIon;
+                }
+            }
+
             return &.{};
         }
 
