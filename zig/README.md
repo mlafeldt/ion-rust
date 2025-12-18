@@ -159,9 +159,9 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
    - Run: 55/55 conformance files (via a single walker test in `zig/src/tests.zig`)
    - Branch-level status (2025-12-18):
      - Total branches: 2859
-     - Passed: 2761
-     - Skipped (unsupported): 98
-     - To reproduce totals: `cd zig && for f in ../ion-tests/conformance/**/*.ion; do zig run src/conformance_debug.zig -- "$f"; done`
+     - Passed: 2773
+     - Skipped (unsupported): 86
+     - To reproduce totals: `cd zig && zig run src/conformance_totals.zig -- --top 15`
    - Many branches are currently marked “unsupported” and counted as skipped:
      - Large parts of the Ion 1.1 macro system / TDL are not implemented (only a subset of system macros expand during parsing)
      - Binary Ion 1.1 is only partially implemented (data model numerics, nulls, bools)
@@ -171,6 +171,7 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
 3) Notes / remaining work:
    - Conformance text parsing for Ion 1.1 uses a conformance-only "default module" symbol model (see `ion.parseDocumentWithMacroTableIon11Modules`).
    - Ion 1.1 macro system beyond the currently-expanded subset (`none`, `values`, `default`, `repeat`, `delta`, `sum`, `annotate`, `make_string`, `make_symbol`, `make_decimal`, `make_timestamp`, `make_field`, `make_struct`, `make_list`, `make_sexp`, `flatten`, plus `(::...)`)
+   - `use` is parsed/validated in Ion 1.1 text, but shared module import semantics are modeled by the conformance runner's abstract evaluator (not the text reader itself).
    - E-expressions (eexp) and their binary encodings
    - Ion 1.1 binary features used by conformance (various flex_* encodings, additional symbol/macro table mechanics)
    - System macros used by conformance (e.g. `annotate`, `make_field`, `make_decimal`, `make_timestamp`, `parse_ion`, `use`, etc.)
@@ -178,15 +179,15 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
 4) Largest remaining conformance skip buckets (by file)
 
 1) `ion-tests/conformance/tdl/variable_expansion.ion`: skipped=12
-2) `ion-tests/conformance/system_macros/parse_ion.ion`: skipped=12
-3) `ion-tests/conformance/system_macros/make_decimal.ion`: skipped=7
-4) `ion-tests/conformance/system_macros/use.ion`: skipped=6
-5) `ion-tests/conformance/system_macros/annotate.ion`: skipped=6
-6) `ion-tests/conformance/system_macros/make_sexp.ion`: skipped=5
-7) `ion-tests/conformance/system_macros/make_list.ion`: skipped=5
-8) `ion-tests/conformance/system_macros/set_macros.ion`: skipped=4
-9) `ion-tests/conformance/system_macros/meta.ion`: skipped=4
-10) `ion-tests/conformance/system_macros/add_macros.ion`: skipped=4
+2) `ion-tests/conformance/system_macros/make_decimal.ion`: skipped=7
+3) `ion-tests/conformance/system_macros/annotate.ion`: skipped=6
+4) `ion-tests/conformance/system_macros/make_list.ion`: skipped=5
+5) `ion-tests/conformance/system_macros/make_sexp.ion`: skipped=5
+6) `ion-tests/conformance/demos/metaprogramming.ion`: skipped=4
+7) `ion-tests/conformance/system_macros/add_macros.ion`: skipped=4
+8) `ion-tests/conformance/system_macros/meta.ion`: skipped=4
+9) `ion-tests/conformance/system_macros/parse_ion.ion`: skipped=4
+10) `ion-tests/conformance/system_macros/set_macros.ion`: skipped=4
 
 ## To-dos (to remove skips / broaden coverage)
 
