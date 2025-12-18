@@ -10,6 +10,7 @@ const std = @import("std");
 const ion = @import("../ion.zig");
 const value = @import("value.zig");
 const symtab = @import("symtab.zig");
+const tdl_eval = @import("tdl_eval.zig");
 
 const IonError = ion.IonError;
 
@@ -24,7 +25,16 @@ const SharedSymtab = struct {
 ///
 /// All returned slices are allocated in `arena` and valid until the arena is deinited.
 pub fn parseTopLevel(arena: *value.Arena, bytes: []const u8) IonError![]value.Element {
-    var parser = try Parser.init(arena, bytes);
+    var parser = try Parser.init(arena, bytes, null);
+    return parser.parseTopLevel();
+}
+
+/// Parses an Ion text stream, optionally using a conformance-provided Ion 1.1 macro table.
+///
+/// This is currently used by the conformance runner to evaluate `(:foo ...)` calls where the macro
+/// definitions are supplied out-of-band via `(mactab ...)`.
+pub fn parseTopLevelWithMacroTable(arena: *value.Arena, bytes: []const u8, mactab: ?*const ion.macro.MacroTable) IonError![]value.Element {
+    var parser = try Parser.init(arena, bytes, mactab);
     return parser.parseTopLevel();
 }
 
@@ -32,7 +42,7 @@ pub fn parseTopLevel(arena: *value.Arena, bytes: []const u8) IonError![]value.El
 /// Intended for the Ion 1.1 conformance DSL, which uses sexps for clauses and may need
 /// to represent multiple string arguments without Ion's normal string literal concatenation.
 pub fn parseTopLevelNoStringConcat(arena: *value.Arena, bytes: []const u8) IonError![]value.Element {
-    var parser = try Parser.initWithOptions(arena, bytes, false, false);
+    var parser = try Parser.initWithOptions(arena, bytes, null, false, false);
     return parser.parseTopLevel();
 }
 
@@ -42,7 +52,7 @@ pub fn parseTopLevelNoStringConcat(arena: *value.Arena, bytes: []const u8) IonEr
 /// The conformance DSL is "Ion-shaped" but includes tokens that are not valid Ion identifiers,
 /// such as `x?` / `x*` / `x+`, plus TDL-ish forms like `.literal` and `%x`.
 pub fn parseTopLevelConformanceDslNoStringConcat(arena: *value.Arena, bytes: []const u8) IonError![]value.Element {
-    var parser = try Parser.initWithOptions(arena, bytes, false, true);
+    var parser = try Parser.initWithOptions(arena, bytes, null, false, true);
     return parser.parseTopLevel();
 }
 
@@ -51,7 +61,7 @@ pub fn parseTopLevelConformanceDslNoStringConcat(arena: *value.Arena, bytes: []c
 ///
 /// All returned slices are allocated in `arena` and valid until the arena is deinited.
 pub fn parseTopLevelWithErrorIndex(arena: *value.Arena, bytes: []const u8, err_index: *usize) IonError![]value.Element {
-    var parser = try Parser.init(arena, bytes);
+    var parser = try Parser.init(arena, bytes, null);
     return parser.parseTopLevel() catch |e| {
         err_index.* = parser.i;
         return e;
@@ -65,14 +75,21 @@ const Parser = struct {
     version: enum { v1_0, v1_1 } = .v1_0,
     concat_string_literals: bool = true,
     conformance_dsl_mode: bool = false,
+    mactab: ?*const ion.macro.MacroTable = null,
     st: symtab.SymbolTable,
     shared: std.StringHashMapUnmanaged(SharedSymtab) = .{},
 
-    fn init(arena: *value.Arena, input: []const u8) IonError!Parser {
-        return initWithOptions(arena, input, true, false);
+    fn init(arena: *value.Arena, input: []const u8, mactab: ?*const ion.macro.MacroTable) IonError!Parser {
+        return initWithOptions(arena, input, mactab, true, false);
     }
 
-    fn initWithOptions(arena: *value.Arena, input: []const u8, concat_string_literals: bool, conformance_dsl_mode: bool) IonError!Parser {
+    fn initWithOptions(
+        arena: *value.Arena,
+        input: []const u8,
+        mactab: ?*const ion.macro.MacroTable,
+        concat_string_literals: bool,
+        conformance_dsl_mode: bool,
+    ) IonError!Parser {
         return .{
             .arena = arena,
             .input = input,
@@ -80,6 +97,7 @@ const Parser = struct {
             .version = .v1_0,
             .concat_string_literals = concat_string_literals,
             .conformance_dsl_mode = conformance_dsl_mode,
+            .mactab = mactab,
             .st = try symtab.SymbolTable.init(arena),
             .shared = .{},
         };
@@ -264,7 +282,7 @@ const Parser = struct {
             make_struct,
         };
 
-        const kind: MacroKind = blk: {
+        const kind: ?MacroKind = blk: {
             if (macro_addr) |addr| {
                 break :blk switch (addr) {
                     0 => .none,
@@ -283,7 +301,7 @@ const Parser = struct {
                     16 => .make_field,
                     17 => .make_struct,
                     19 => .flatten,
-                    else => return IonError.Unsupported,
+                    else => null,
                 };
             }
             if (std.mem.eql(u8, macro_id, "none") or std.mem.eql(u8, macro_id, "$ion::none")) break :blk .none;
@@ -302,7 +320,7 @@ const Parser = struct {
             if (std.mem.eql(u8, macro_id, "flatten") or std.mem.eql(u8, macro_id, "$ion::flatten")) break :blk .flatten;
             if (std.mem.eql(u8, macro_id, "make_field") or std.mem.eql(u8, macro_id, "$ion::make_field")) break :blk .make_field;
             if (std.mem.eql(u8, macro_id, "make_struct") or std.mem.eql(u8, macro_id, "$ion::make_struct")) break :blk .make_struct;
-            return IonError.Unsupported;
+            break :blk null;
         };
 
         const parseOneExpr = struct {
@@ -321,7 +339,7 @@ const Parser = struct {
             }
         }.run;
 
-        if (kind == .default) {
+        if (kind != null and kind.? == .default) {
             // Lazy semantics: if the first argument produces any values, later argument expressions
             // are not expanded/evaluated.
             try self.skipWsComments();
@@ -387,20 +405,20 @@ const Parser = struct {
             exprs.append(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
         }
 
-        if (kind == .none) {
+        if (kind != null and kind.? == .none) {
             // `(:none)` takes no arguments, even if an argument expression would expand to nothing.
             if (exprs.items.len != 0) return IonError.InvalidIon;
             return &.{};
         }
 
-        if (kind == .values) {
+        if (kind != null and kind.? == .values) {
             var out = std.ArrayListUnmanaged(value.Element){};
             errdefer out.deinit(self.arena.allocator());
             for (exprs.items) |res| out.appendSlice(self.arena.allocator(), res) catch return IonError.OutOfMemory;
             return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
         }
 
-        if (kind == .repeat) {
+        if (kind != null and kind.? == .repeat) {
             if (exprs.items.len != 2) return IonError.InvalidIon;
             if (exprs.items[0].len != 1) return IonError.InvalidIon;
             const count_elem = exprs.items[0][0];
@@ -425,7 +443,7 @@ const Parser = struct {
             return out;
         }
 
-        if (kind == .sum) {
+        if (kind != null and kind.? == .sum) {
             if (exprs.items.len != 2) return IonError.InvalidIon;
             if (exprs.items[0].len != 1 or exprs.items[1].len != 1) return IonError.InvalidIon;
             const a = exprs.items[0][0];
@@ -446,7 +464,7 @@ const Parser = struct {
             return out;
         }
 
-        if (kind == .delta) {
+        if (kind != null and kind.? == .delta) {
             var deltas = std.ArrayListUnmanaged(i128){};
             errdefer deltas.deinit(self.arena.allocator());
             for (exprs.items) |res| {
@@ -470,7 +488,7 @@ const Parser = struct {
             return out;
         }
 
-        if (kind == .make_string) {
+        if (kind != null and kind.? == .make_string) {
             var buf = std.ArrayListUnmanaged(u8){};
             errdefer buf.deinit(self.arena.allocator());
             for (exprs.items) |res| {
@@ -493,7 +511,7 @@ const Parser = struct {
             return out;
         }
 
-        if (kind == .make_symbol) {
+        if (kind != null and kind.? == .make_symbol) {
             var buf = std.ArrayListUnmanaged(u8){};
             errdefer buf.deinit(self.arena.allocator());
             for (exprs.items) |res| {
@@ -516,7 +534,7 @@ const Parser = struct {
             return out;
         }
 
-        if (kind == .make_list or kind == .make_sexp) {
+        if (kind != null and (kind.? == .make_list or kind.? == .make_sexp)) {
             var out_items = std.ArrayListUnmanaged(value.Element){};
             errdefer out_items.deinit(self.arena.allocator());
             for (exprs.items) |res| {
@@ -532,14 +550,14 @@ const Parser = struct {
             const seq = out_items.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
             const out_elem = value.Element{
                 .annotations = &.{},
-                .value = if (kind == .make_list) .{ .list = seq } else .{ .sexp = seq },
+                .value = if (kind.? == .make_list) .{ .list = seq } else .{ .sexp = seq },
             };
             const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
             out[0] = out_elem;
             return out;
         }
 
-        if (kind == .flatten) {
+        if (kind != null and kind.? == .flatten) {
             var out = std.ArrayListUnmanaged(value.Element){};
             errdefer out.deinit(self.arena.allocator());
             for (exprs.items) |res| {
@@ -555,7 +573,7 @@ const Parser = struct {
             return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
         }
 
-        if (kind == .make_decimal) {
+        if (kind != null and kind.? == .make_decimal) {
             if (exprs.items.len != 2) return IonError.InvalidIon;
             if (exprs.items[0].len != 1) return IonError.InvalidIon;
             if (exprs.items[1].len != 1) return IonError.InvalidIon;
@@ -605,7 +623,7 @@ const Parser = struct {
             return out;
         }
 
-        if (kind == .make_field) {
+        if (kind != null and kind.? == .make_field) {
             if (exprs.items.len != 2) return IonError.InvalidIon;
             if (exprs.items[0].len != 1) return IonError.InvalidIon;
             if (exprs.items[1].len != 1) return IonError.InvalidIon;
@@ -626,7 +644,7 @@ const Parser = struct {
             return out;
         }
 
-        if (kind == .make_struct) {
+        if (kind != null and kind.? == .make_struct) {
             // Concatenate fields from each struct argument in order (duplicates preserved).
             var total_fields: usize = 0;
             for (exprs.items) |res| {
@@ -650,7 +668,7 @@ const Parser = struct {
             return out;
         }
 
-        if (kind == .annotate) {
+        if (kind != null and kind.? == .annotate) {
             // (annotate <annotations-expr> <value-expr>)
             if (exprs.items.len != 2) return IonError.InvalidIon;
             const ann_vals = exprs.items[0];
@@ -685,7 +703,7 @@ const Parser = struct {
             return out;
         }
 
-        if (kind == .make_timestamp) {
+        if (kind != null and kind.? == .make_timestamp) {
             // (make_timestamp <year> [<month> [<day> [<hour> <minute> [<seconds> [<offset>]]]]])
             //
             // Each argument is an expression; an elided expression group `(::)` is treated as absent.
@@ -879,6 +897,26 @@ const Parser = struct {
             return out;
         }
 
+        // User macros (conformance `(mactab ...)`) are only callable by name/address, not by `$ion::...`.
+        if (self.mactab) |tab| {
+            if (macro_addr) |addr| {
+                if (tab.macroForAddress(addr)) |m| return tdl_eval.expandUserMacro(self.arena, tab, m, exprs.items);
+            } else {
+                if (tab.macroForName(macro_id)) |m| return tdl_eval.expandUserMacro(self.arena, tab, m, exprs.items);
+            }
+        }
+
+        // `if_*`, `for`, and `literal` are special forms in templates and are not legal as e-expressions.
+        if (std.mem.eql(u8, macro_id, "if_none") or std.mem.eql(u8, macro_id, "$ion::if_none") or
+            std.mem.eql(u8, macro_id, "if_some") or std.mem.eql(u8, macro_id, "$ion::if_some") or
+            std.mem.eql(u8, macro_id, "if_single") or std.mem.eql(u8, macro_id, "$ion::if_single") or
+            std.mem.eql(u8, macro_id, "if_multi") or std.mem.eql(u8, macro_id, "$ion::if_multi") or
+            std.mem.eql(u8, macro_id, "for") or std.mem.eql(u8, macro_id, "$ion::for") or
+            std.mem.eql(u8, macro_id, "literal") or std.mem.eql(u8, macro_id, "$ion::literal"))
+        {
+            return IonError.InvalidIon;
+        }
+
         return IonError.Unsupported;
     }
 
@@ -980,6 +1018,24 @@ const Parser = struct {
     fn parseValue(self: *Parser, ctx: Context) IonError!value.Value {
         try self.skipWsComments();
         if (self.eof()) return IonError.Incomplete;
+
+        // Conformance DSL / TDL: allow `.name` and `%name` tokens as symbol identifiers inside
+        // s-expressions. These are not valid Ion tokens, so keep this scoped to DSL mode.
+        if (self.conformance_dsl_mode and ctx == .sexp and (self.peek().? == '.' or self.peek().? == '%')) {
+            if (self.i + 1 < self.input.len and isIdentStart(self.input[self.i + 1])) {
+                const start = self.i;
+                self.i += 2; // prefix + first ident char
+                // Allow `:` here so conformance DSL can represent qualified names like
+                // `.$ion::make_symbol` and `.$ion::if_some` as a single token.
+                while (!self.eof()) : (self.i += 1) {
+                    const c = self.peek().?;
+                    if (isIdentContConformanceDsl(c) or c == ':') continue;
+                    break;
+                }
+                const tok = self.input[start..self.i];
+                return value.Value{ .symbol = try value.makeSymbol(self.arena, tok) };
+            }
+        }
 
         // Special float keywords that begin with '+'/'-'
         if (self.startsWith("+inf") and isTokenBoundary(self.input, self.i + 4)) {

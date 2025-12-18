@@ -66,7 +66,7 @@ pub fn parseDocumentWithMacroTable(allocator: Allocator, bytes: []const u8, mact
         const decoded = try decodeTextToUtf8(allocator, bytes);
         defer if (decoded) |b| allocator.free(b);
         const input = if (decoded) |b| b else bytes;
-        const elements = try text.parseTopLevel(&arena, input);
+        const elements = try text.parseTopLevelWithMacroTable(&arena, input, mactab);
         return .{ .arena = arena, .elements = elements };
     }
 }
