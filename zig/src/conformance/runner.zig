@@ -1515,7 +1515,16 @@ fn runExpectation(
     if (state.pending_error) {
         // Clause execution failed before any input document was built (e.g. invalid macro table).
         // A `signals` expectation is satisfied by any error; other expectations are mismatches.
-        if (std.mem.eql(u8, head, "signals")) return true;
+        if (std.mem.eql(u8, head, "signals")) {
+            if (traceSkipsEnabled()) {
+                if (state.case_label) |lbl| {
+                    std.debug.print("signals satisfied by pending_error label={s}\n", .{lbl});
+                } else {
+                    std.debug.print("signals satisfied by pending_error\n", .{});
+                }
+            }
+            return true;
+        }
         return RunError.InvalidConformanceDsl;
     }
 
@@ -1617,7 +1626,16 @@ fn runExpectation(
         actual = parsed_doc.?.elements;
     } else {
         const abs = evalAbstractDocument(&arena, state, &absences) catch |err| {
-            if (err == RunError.Unsupported) return false;
+            if (err == RunError.Unsupported) {
+                if (traceSkipsEnabled()) {
+                    if (state.case_label) |lbl| {
+                        std.debug.print("skip: abstract evaluation unsupported label={s}\n", .{lbl});
+                    } else {
+                        std.debug.print("skip: abstract evaluation unsupported\n", .{});
+                    }
+                }
+                return false;
+            }
             if (std.mem.eql(u8, head, "signals")) return true;
             return err;
         };
@@ -1842,7 +1860,16 @@ fn applyFragmentElement(state: *State, allocator: std.mem.Allocator, frag_elem: 
                 }
             }
         }
-        state.mactab = tab;
+        // Conformance DSL: `mactab` fragments are additive within a branch; some tests define
+        // helper macros in separate `mactab` clauses (for example: `tdl/variable_expansion.ion`).
+        if (state.mactab) |old| {
+            const combined = allocator.alloc(ion.macro.Macro, old.macros.len + tab.macros.len) catch return RunError.OutOfMemory;
+            @memcpy(combined[0..old.macros.len], old.macros);
+            @memcpy(combined[old.macros.len..], tab.macros);
+            state.mactab = .{ .macros = combined };
+        } else {
+            state.mactab = tab;
+        }
         return;
     }
     if (std.mem.eql(u8, head, "ivm")) {
@@ -2063,7 +2090,16 @@ fn evalSeq(gpa: std.mem.Allocator, stats: *Stats, state: *State, items: []const 
                     }
                 }
             }
-            frame.state.mactab = tab;
+            // Conformance DSL: `mactab` clauses are additive within a branch; see comment in
+            // `applyFragmentElement`.
+            if (frame.state.mactab) |old| {
+                const combined = work.alloc(ion.macro.Macro, old.macros.len + tab.macros.len) catch return RunError.OutOfMemory;
+                @memcpy(combined[0..old.macros.len], old.macros);
+                @memcpy(combined[old.macros.len..], tab.macros);
+                frame.state.mactab = .{ .macros = combined };
+            } else {
+                frame.state.mactab = tab;
+            }
             continue;
         }
 
