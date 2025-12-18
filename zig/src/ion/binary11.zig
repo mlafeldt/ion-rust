@@ -53,10 +53,16 @@ const Decoder = struct {
             }
 
             const op = self.input[self.i];
+            // System macro invocations (`0xEF <addr> ...`).
+            if (op == 0xEF) {
+                const expanded = try self.readSystemMacroInvocationQualified();
+                out.appendSlice(self.arena.allocator(), expanded) catch return IonError.OutOfMemory;
+                continue;
+            }
             // Conformance-driven: treat low opcodes as user macro invocations (e-expressions).
             // All value opcodes currently implemented are >= 0x60 or in the EA/EB range.
             if (op < 0x60) {
-                const expanded = try self.readUserMacroInvocation();
+                const expanded = try self.readMacroInvocationUnqualified();
                 out.appendSlice(self.arena.allocator(), expanded) catch return IonError.OutOfMemory;
                 continue;
             }
@@ -66,6 +72,20 @@ const Decoder = struct {
         }
 
         return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+    }
+
+    fn readMacroInvocationUnqualified(self: *Decoder) IonError![]value.Element {
+        if (self.i >= self.input.len) return IonError.Incomplete;
+        const addr: usize = self.input[self.i];
+
+        // If a macro table is active, unqualified numeric addresses resolve to user macros first.
+        if (self.mactab) |tab| {
+            if (tab.macroForAddress(addr) != null) return self.readUserMacroInvocation();
+        }
+
+        // Otherwise, treat this as an invocation of a system macro loaded into the default module.
+        self.i += 1;
+        return self.readSystemMacroInvocationAt(addr);
     }
 
     fn readUserMacroInvocation(self: *Decoder) IonError![]value.Element {
@@ -110,6 +130,267 @@ const Decoder = struct {
 
         // Expand macro body. Conformance currently uses only `(%x)` bodies to inline arguments.
         return self.expandMacroBody(m, args.items);
+    }
+
+    fn readSystemMacroInvocationQualified(self: *Decoder) IonError![]value.Element {
+        if (self.i >= self.input.len) return IonError.Incomplete;
+        if (self.input[self.i] != 0xEF) return IonError.InvalidIon;
+        self.i += 1;
+        if (self.i >= self.input.len) return IonError.Incomplete;
+        const addr: usize = self.input[self.i];
+        self.i += 1;
+        return self.readSystemMacroInvocationAt(addr);
+    }
+
+    fn readSystemMacroInvocationAt(self: *Decoder, addr: usize) IonError![]value.Element {
+        return switch (addr) {
+            // System macro addresses used by conformance:
+            // 6  => delta
+            // 12 => make_timestamp
+            6 => self.expandDelta(),
+            12 => self.expandMakeTimestamp(),
+            else => IonError.Unsupported,
+        };
+    }
+
+    fn expandDelta(self: *Decoder) IonError![]value.Element {
+        // (delta <deltas*>)
+        if (self.i >= self.input.len) return IonError.Incomplete;
+        const presence = self.input[self.i];
+        self.i += 1;
+
+        var args = std.ArrayListUnmanaged(value.Element){};
+        defer args.deinit(self.arena.allocator());
+
+        switch (presence) {
+            0 => {},
+            1 => {
+                const v = try self.readValue();
+                args.append(self.arena.allocator(), .{ .annotations = &.{}, .value = v }) catch return IonError.OutOfMemory;
+            },
+            2 => {
+                const group = try self.readExpressionGroup(.tagged);
+                args.appendSlice(self.arena.allocator(), group) catch return IonError.OutOfMemory;
+            },
+            else => return IonError.InvalidIon,
+        }
+
+        if (args.items.len == 0) return &.{};
+
+        const out = self.arena.allocator().alloc(value.Element, args.items.len) catch return IonError.OutOfMemory;
+        var acc: i128 = 0;
+        for (args.items, 0..) |e, idx| {
+            if (e.value != .int) return IonError.InvalidIon;
+            const d: i128 = switch (e.value.int) {
+                .small => |v| v,
+                .big => return IonError.Unsupported,
+            };
+            if (idx == 0) acc = d else acc = std.math.add(i128, acc, d) catch return IonError.InvalidIon;
+            out[idx] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = acc } } };
+        }
+        return out;
+    }
+
+    fn expandMakeTimestamp(self: *Decoder) IonError![]value.Element {
+        // (make_timestamp <year> [<month> [<day> [<hour> <minute> [<seconds> [<offset>]]]]])
+        // Binary encoding uses a 2-byte (little-endian) 2-bit presence code per optional arg:
+        //   00 absent, 01 single tagged value, 10 expression group, 11 invalid.
+        const presence_bytes = try self.readBytes(2);
+        const presence_u16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(presence_bytes.ptr)), .little);
+
+        const code = struct {
+            fn get(p: u16, idx: u4) u2 {
+                return @intCast((p >> @intCast(@as(u5, idx) * 2)) & 0x3);
+            }
+        }.get;
+
+        const year_v = try self.readValue();
+        if (year_v != .int) return IonError.InvalidIon;
+        const year_i128: i128 = switch (year_v.int) {
+            .small => |v| v,
+            .big => return IonError.Unsupported,
+        };
+        if (year_i128 < 1 or year_i128 > 9999) return IonError.InvalidIon;
+        const year: i32 = @intCast(year_i128);
+
+        const ReadOpt = struct {
+            fn run(d: *Decoder, c: u2) IonError!?value.Value {
+                return switch (c) {
+                    0 => null,
+                    1 => try d.readValue(),
+                    2 => blk: {
+                        const group = try d.readExpressionGroup(.tagged);
+                        if (group.len == 0) break :blk null;
+                        if (group.len != 1) return IonError.InvalidIon;
+                        break :blk group[0].value;
+                    },
+                    else => IonError.InvalidIon,
+                };
+            }
+        }.run;
+
+        const month_v = try ReadOpt(self, code(presence_u16, 0));
+        const day_v = try ReadOpt(self, code(presence_u16, 1));
+        const hour_v = try ReadOpt(self, code(presence_u16, 2));
+        const minute_v = try ReadOpt(self, code(presence_u16, 3));
+        const seconds_v = try ReadOpt(self, code(presence_u16, 4));
+        const offset_v = try ReadOpt(self, code(presence_u16, 5));
+
+        if (day_v != null and month_v == null) return IonError.InvalidIon;
+        if (hour_v != null and (day_v == null or month_v == null)) return IonError.InvalidIon;
+        if (minute_v != null and hour_v == null) return IonError.InvalidIon;
+        if (seconds_v != null and minute_v == null) return IonError.InvalidIon;
+        if (offset_v != null and minute_v == null) return IonError.InvalidIon;
+
+        var ts: value.Timestamp = .{
+            .year = year,
+            .month = null,
+            .day = null,
+            .hour = null,
+            .minute = null,
+            .second = null,
+            .fractional = null,
+            .offset_minutes = null,
+            .precision = .year,
+        };
+
+        if (month_v) |mv| {
+            if (mv != .int) return IonError.InvalidIon;
+            const m_i128: i128 = switch (mv.int) {
+                .small => |v| v,
+                .big => return IonError.Unsupported,
+            };
+            if (m_i128 < 1 or m_i128 > 12) return IonError.InvalidIon;
+            ts.month = @intCast(m_i128);
+            ts.precision = .month;
+        }
+
+        if (day_v) |dv| {
+            if (dv != .int) return IonError.InvalidIon;
+            const d_i128: i128 = switch (dv.int) {
+                .small => |v| v,
+                .big => return IonError.Unsupported,
+            };
+            if (d_i128 < 1) return IonError.InvalidIon;
+            const max_day: i128 = @intCast(daysInMonth(year, ts.month orelse return IonError.InvalidIon));
+            if (d_i128 > max_day) return IonError.InvalidIon;
+            ts.day = @intCast(d_i128);
+            ts.precision = .day;
+        }
+
+        if (hour_v) |hv| {
+            if (minute_v == null) return IonError.InvalidIon;
+            if (hv != .int) return IonError.InvalidIon;
+            const h_i128: i128 = switch (hv.int) {
+                .small => |v| v,
+                .big => return IonError.Unsupported,
+            };
+            if (h_i128 < 0 or h_i128 >= 24) return IonError.InvalidIon;
+            ts.hour = @intCast(h_i128);
+
+            const mv = minute_v.?;
+            if (mv != .int) return IonError.InvalidIon;
+            const min_i128: i128 = switch (mv.int) {
+                .small => |v| v,
+                .big => return IonError.Unsupported,
+            };
+            if (min_i128 < 0 or min_i128 >= 60) return IonError.InvalidIon;
+            ts.minute = @intCast(min_i128);
+            ts.precision = .minute;
+
+            if (seconds_v) |sv| {
+                switch (sv) {
+                    .int => |ii| {
+                        const s_i128: i128 = switch (ii) {
+                            .small => |v| v,
+                            .big => return IonError.Unsupported,
+                        };
+                        if (s_i128 < 0 or s_i128 >= 60) return IonError.InvalidIon;
+                        ts.second = @intCast(s_i128);
+                        ts.precision = .second;
+                    },
+                    .decimal => |d| {
+                        const coeff_is_zero = switch (d.coefficient) {
+                            .small => |v| v == 0,
+                            .big => |v| v.eqlZero(),
+                        };
+                        if (d.is_negative and !coeff_is_zero) return IonError.InvalidIon;
+
+                        const exp: i32 = d.exponent;
+                        const coeff_u128: u128 = switch (d.coefficient) {
+                            .small => |v| if (v < 0) return IonError.InvalidIon else @intCast(v),
+                            .big => return IonError.Unsupported,
+                        };
+
+                        if (exp >= 0) {
+                            var scaled: u128 = coeff_u128;
+                            var k: u32 = @intCast(exp);
+                            while (k != 0) : (k -= 1) {
+                                scaled = std.math.mul(u128, scaled, 10) catch return IonError.InvalidIon;
+                            }
+                            if (scaled >= 60) return IonError.InvalidIon;
+                            ts.second = @intCast(scaled);
+                            ts.precision = .second;
+                        } else {
+                            const digits: u32 = @intCast(-exp);
+                            var pow10: u128 = 1;
+                            var k: u32 = digits;
+                            while (k != 0) : (k -= 1) {
+                                pow10 = std.math.mul(u128, pow10, 10) catch return IonError.InvalidIon;
+                            }
+                            const sec_u128: u128 = coeff_u128 / pow10;
+                            const frac_u128: u128 = coeff_u128 % pow10;
+                            if (sec_u128 >= 60) return IonError.InvalidIon;
+                            ts.second = @intCast(sec_u128);
+                            ts.precision = .second;
+                            if (frac_u128 != 0) {
+                                const frac_coeff: value.Int = .{ .small = @intCast(frac_u128) };
+                                ts.fractional = .{ .is_negative = false, .coefficient = frac_coeff, .exponent = exp };
+                                ts.precision = .fractional;
+                            } else if (exp < 0 and (coeff_u128 % pow10 == 0) and (coeff_u128 != 0)) {
+                                // Exact integer value but written with fractional digits (e.g. 6.0).
+                            }
+                        }
+                    },
+                    else => return IonError.InvalidIon,
+                }
+            }
+
+            if (offset_v) |ov| {
+                if (ov != .int) return IonError.InvalidIon;
+                const off_i128: i128 = switch (ov.int) {
+                    .small => |v| v,
+                    .big => return IonError.Unsupported,
+                };
+                if (off_i128 <= -1440 or off_i128 >= 1440) return IonError.InvalidIon;
+                const off_i16: i16 = @intCast(off_i128);
+                ts.offset_minutes = off_i16;
+
+                if (ts.month != null and ts.day != null) {
+                    const days_before = blk: {
+                        var doy: i32 = 0;
+                        var m: u8 = 1;
+                        while (m < ts.month.?) : (m += 1) {
+                            doy += @intCast(daysInMonth(year, m));
+                        }
+                        doy += (@as(i32, @intCast(ts.day.?)) - 1);
+                        break :blk doy;
+                    };
+                    const local_minutes: i32 = days_before * 1440 + @as(i32, @intCast(ts.hour.?)) * 60 + @as(i32, @intCast(ts.minute.?));
+                    const days_in_year: i32 = if (isLeapYear(year)) 366 else 365;
+                    const total_minutes_in_year: i32 = days_in_year * 1440;
+                    if (year == 1 and off_i16 > 0 and off_i16 > local_minutes) return IonError.InvalidIon;
+                    if (year == 9999 and off_i16 < 0 and local_minutes + @as(i32, @intCast(-off_i16)) >= total_minutes_in_year) return IonError.InvalidIon;
+                }
+            } else {
+                ts.offset_minutes = null;
+            }
+        }
+
+        const out_elem: value.Element = .{ .annotations = &.{}, .value = .{ .timestamp = ts } };
+        const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+        out[0] = out_elem;
+        return out;
     }
 
     fn readArgSingle(self: *Decoder, ty: ion.macro.ParamType) IonError!value.Element {
@@ -390,6 +671,21 @@ const Decoder = struct {
         return out;
     }
 };
+
+fn isLeapYear(year: i32) bool {
+    if (@rem(year, 400) == 0) return true;
+    if (@rem(year, 100) == 0) return false;
+    return (@rem(year, 4) == 0);
+}
+
+fn daysInMonth(year: i32, month: u8) u8 {
+    return switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeapYear(year)) 29 else 28,
+        else => 0,
+    };
+}
 
 fn readTaglessFrom(payload: []const u8, cursor: *usize, ty: ion.macro.ParamType) IonError!value.Value {
     var i = cursor.*;

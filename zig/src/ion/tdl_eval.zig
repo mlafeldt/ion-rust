@@ -319,6 +319,55 @@ fn evalMacroInvocation(
         }
         return &.{};
     }
+    if (std.mem.eql(u8, name, "repeat")) {
+        if (args.len != 2) return IonError.InvalidIon;
+        const count_vals = try evalExpr(arena, tab, env, args[0]);
+        if (count_vals.len != 1) return IonError.InvalidIon;
+        if (count_vals[0].value != .int) return IonError.InvalidIon;
+        const count_i128: i128 = switch (count_vals[0].value.int) {
+            .small => |v| v,
+            .big => return IonError.Unsupported,
+        };
+        if (count_i128 < 0) return IonError.InvalidIon;
+        const count: usize = @intCast(count_i128);
+
+        const vals = try evalExpr(arena, tab, env, args[1]);
+        if (count == 0 or vals.len == 0) return &.{};
+
+        const total: usize = std.math.mul(usize, count, vals.len) catch return IonError.OutOfMemory;
+        const out = arena.allocator().alloc(value.Element, total) catch return IonError.OutOfMemory;
+        var idx: usize = 0;
+        var k: usize = 0;
+        while (k < count) : (k += 1) {
+            @memcpy(out[idx .. idx + vals.len], vals);
+            idx += vals.len;
+        }
+        return out;
+    }
+    if (std.mem.eql(u8, name, "delta")) {
+        var deltas = std.ArrayListUnmanaged(i128){};
+        defer deltas.deinit(arena.allocator());
+        for (args) |a| {
+            const vals = try evalExpr(arena, tab, env, a);
+            for (vals) |e| {
+                if (e.value != .int) return IonError.InvalidIon;
+                const v: i128 = switch (e.value.int) {
+                    .small => |vv| vv,
+                    .big => return IonError.Unsupported,
+                };
+                deltas.append(arena.allocator(), v) catch return IonError.OutOfMemory;
+            }
+        }
+        if (deltas.items.len == 0) return &.{};
+
+        const out = arena.allocator().alloc(value.Element, deltas.items.len) catch return IonError.OutOfMemory;
+        var acc: i128 = 0;
+        for (deltas.items, 0..) |d, i| {
+            if (i == 0) acc = d else acc = std.math.add(i128, acc, d) catch return IonError.InvalidIon;
+            out[i] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = acc } } };
+        }
+        return out;
+    }
     if (std.mem.eql(u8, name, "make_string") or std.mem.eql(u8, name, "make_symbol")) {
         var buf = std.ArrayListUnmanaged(u8){};
         errdefer buf.deinit(arena.allocator());

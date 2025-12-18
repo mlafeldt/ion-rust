@@ -159,8 +159,8 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
    - Run: 55/55 conformance files (via a single walker test in `zig/src/tests.zig`)
    - Branch-level status (2025-12-18):
      - Total branches: 2859
-     - Passed: 2737
-     - Skipped (unsupported): 122
+     - Passed: 2761
+     - Skipped (unsupported): 98
      - To reproduce totals: `cd zig && for f in ../ion-tests/conformance/**/*.ion; do zig run src/conformance_debug.zig -- "$f"; done`
    - Many branches are currently marked “unsupported” and counted as skipped:
      - Large parts of the Ion 1.1 macro system / TDL are not implemented (only a subset of system macros expand during parsing)
@@ -177,16 +177,16 @@ The `ion-tests/` repo contains multiple suites. The Zig harness currently covers
 
 4) Largest remaining conformance skip buckets (by file)
 
-1) `ion-tests/conformance/system_macros/make_timestamp.ion`: skipped=13
-2) `ion-tests/conformance/tdl/variable_expansion.ion`: skipped=12
-3) `ion-tests/conformance/system_macros/parse_ion.ion`: skipped=12
-4) `ion-tests/conformance/system_macros/delta.ion`: skipped=11
-5) `ion-tests/conformance/system_macros/make_decimal.ion`: skipped=7
-6) `ion-tests/conformance/system_macros/use.ion`: skipped=6
-7) `ion-tests/conformance/system_macros/annotate.ion`: skipped=6
-8) `ion-tests/conformance/system_macros/make_sexp.ion`: skipped=5
-9) `ion-tests/conformance/system_macros/make_list.ion`: skipped=5
-10) `ion-tests/conformance/system_macros/set_macros.ion`: skipped=4
+1) `ion-tests/conformance/tdl/variable_expansion.ion`: skipped=12
+2) `ion-tests/conformance/system_macros/parse_ion.ion`: skipped=12
+3) `ion-tests/conformance/system_macros/make_decimal.ion`: skipped=7
+4) `ion-tests/conformance/system_macros/use.ion`: skipped=6
+5) `ion-tests/conformance/system_macros/annotate.ion`: skipped=6
+6) `ion-tests/conformance/system_macros/make_sexp.ion`: skipped=5
+7) `ion-tests/conformance/system_macros/make_list.ion`: skipped=5
+8) `ion-tests/conformance/system_macros/set_macros.ion`: skipped=4
+9) `ion-tests/conformance/system_macros/meta.ion`: skipped=4
+10) `ion-tests/conformance/system_macros/add_macros.ion`: skipped=4
 
 ## To-dos (to remove skips / broaden coverage)
 
