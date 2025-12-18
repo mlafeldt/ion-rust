@@ -41,7 +41,7 @@ const SharedSymtabCatalog = struct {
     // Entries here are referenced by `ion-tests/conformance/local_symtab_imports.ion`.
     const entries = [_]Entry{
         .{ .name = "empty", .version = 1, .symbols = &.{} },
-        .{ .name = "abcs", .version = 1, .symbols = &.{ "a" } },
+        .{ .name = "abcs", .version = 1, .symbols = &.{"a"} },
         .{ .name = "abcs", .version = 2, .symbols = &.{ "a", "b" } },
         .{ .name = "mnop", .version = 1, .symbols = &.{ "m", "n", "o", "p" } },
         // v4 has a gap in the first slot (as referenced by conformance comments).
@@ -77,9 +77,9 @@ const SharedModuleCatalog11 = struct {
     // Note: this is distinct from the Ion 1.0 shared symbol table catalog above; the conformance
     // suite models `use` as importing symbols into the default module address space.
     const entries = [_]Entry{
-        .{ .name = "abcs", .version = 1, .symbols = &.{ "a" } },
+        .{ .name = "abcs", .version = 1, .symbols = &.{"a"} },
         .{ .name = "abcs", .version = 2, .symbols = &.{ "a", "b" } },
-        .{ .name = "mnop", .version = 1, .symbols = &.{ "m" } },
+        .{ .name = "mnop", .version = 1, .symbols = &.{"m"} },
     };
 
     fn lookup(name: []const u8, version: u32) ?Entry {
@@ -1622,7 +1622,8 @@ fn isFragmentHead(head: []const u8) bool {
     return std.mem.eql(u8, head, "text") or
         std.mem.eql(u8, head, "toplevel") or
         std.mem.eql(u8, head, "ivm") or
-        std.mem.eql(u8, head, "binary");
+        std.mem.eql(u8, head, "binary") or
+        std.mem.eql(u8, head, "symtab");
 }
 
 fn applyFragmentElement(state: *State, allocator: std.mem.Allocator, frag_elem: value.Element) RunError!void {
