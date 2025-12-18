@@ -300,6 +300,12 @@ fn applyTopLevel2(state: *State, allocator: std.mem.Allocator, sx: []const value
             continue;
         }
         if (state.text_len != 0) {
+            if (try renderConformanceMacroRefToText(allocator, e)) |rendered_macro| {
+                defer allocator.free(rendered_macro);
+                try state.pushText(allocator, rendered_macro);
+                continue;
+            }
+
             // Conformance uses quoted symbols like `'#${n}'` to denote "delayed symbol IDs" when
             // describing inputs. When appending these values to a text document, convert them to
             // `$<sid>` symbol-ID notation so the text parser resolves them using the current
@@ -318,6 +324,57 @@ fn applyTopLevel2(state: *State, allocator: std.mem.Allocator, sx: []const value
         // abstract evaluator rather than here.
         try state.pushEvent(allocator, .{ .value = e });
     }
+}
+
+fn renderConformanceMacroRefToText(allocator: std.mem.Allocator, e: value.Element) RunError!?[]u8 {
+    // When appending values to a *text* document, convert conformance's abstract macro-ref syntax
+    // like `('#$:foo')` into a real Ion 1.1 e-expression `(:foo)` so it is evaluated by the
+    // parser. This is required for cases like `tdl/literal.ion` that combine a text macro-table
+    // mutation with a macro invocation written in abstract form.
+    if (e.annotations.len != 0 or e.value != .sexp) return null;
+    const sx = e.value.sexp;
+    if (sx.len == 0) return null;
+    if (sx[0].annotations.len != 0) return null;
+
+    const head_t: ?[]const u8 = switch (sx[0].value) {
+        .symbol => |s| s.text,
+        .string => |s| s,
+        else => null,
+    };
+    const ht = head_t orelse return null;
+
+    // Expression group: `('#$::' a b)` => `(:: a b)`
+    if (std.mem.eql(u8, ht, "#$::")) {
+        var buf = std.ArrayListUnmanaged(u8){};
+        errdefer buf.deinit(allocator);
+        buf.appendSlice(allocator, "(::") catch return RunError.OutOfMemory;
+        for (sx[1..]) |arg| {
+            buf.append(allocator, ' ') catch return RunError.OutOfMemory;
+            const arg_txt = ion.serializeDocument(allocator, .text_compact, (&.{arg})) catch return RunError.OutOfMemory;
+            defer allocator.free(arg_txt);
+            buf.appendSlice(allocator, arg_txt) catch return RunError.OutOfMemory;
+        }
+        buf.append(allocator, ')') catch return RunError.OutOfMemory;
+        return buf.toOwnedSlice(allocator) catch return RunError.OutOfMemory;
+    }
+
+    // Macro ref: `('#$:foo' ...)` => `(:foo ...)`
+    if (!std.mem.startsWith(u8, ht, "#$:")) return null;
+    var name = ht["#$:".len..];
+    if (std.mem.startsWith(u8, name, "$ion::")) name = name["$ion::".len..];
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    errdefer buf.deinit(allocator);
+    buf.appendSlice(allocator, "(:") catch return RunError.OutOfMemory;
+    buf.appendSlice(allocator, name) catch return RunError.OutOfMemory;
+    for (sx[1..]) |arg| {
+        buf.append(allocator, ' ') catch return RunError.OutOfMemory;
+        const arg_txt = ion.serializeDocument(allocator, .text_compact, (&.{arg})) catch return RunError.OutOfMemory;
+        defer allocator.free(arg_txt);
+        buf.appendSlice(allocator, arg_txt) catch return RunError.OutOfMemory;
+    }
+    buf.append(allocator, ')') catch return RunError.OutOfMemory;
+    return buf.toOwnedSlice(allocator) catch return RunError.OutOfMemory;
 }
 
 fn cloneSymbolRewritingDelayedSid(s: value.Symbol) RunError!value.Symbol {

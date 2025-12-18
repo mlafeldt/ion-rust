@@ -75,7 +75,8 @@ const Parser = struct {
     version: enum { v1_0, v1_1 } = .v1_0,
     concat_string_literals: bool = true,
     conformance_dsl_mode: bool = false,
-    mactab: ?*const ion.macro.MacroTable = null,
+    mactab_external: ?*const ion.macro.MacroTable = null,
+    mactab_local: ?ion.macro.MacroTable = null,
     st: symtab.SymbolTable,
     shared: std.StringHashMapUnmanaged(SharedSymtab) = .{},
 
@@ -97,10 +98,16 @@ const Parser = struct {
             .version = .v1_0,
             .concat_string_literals = concat_string_literals,
             .conformance_dsl_mode = conformance_dsl_mode,
-            .mactab = mactab,
+            .mactab_external = mactab,
+            .mactab_local = null,
             .st = try symtab.SymbolTable.init(arena),
             .shared = .{},
         };
+    }
+
+    fn currentMacroTable(self: *const Parser) ?*const ion.macro.MacroTable {
+        if (self.mactab_local) |*t| return t;
+        return self.mactab_external;
     }
 
     fn parseTopLevel(self: *Parser) IonError![]value.Element {
@@ -115,7 +122,7 @@ const Parser = struct {
             if (self.eof()) break;
 
             if (try self.hasMacroInvocationStart()) {
-                const expanded = try self.parseMacroInvocationElems();
+                const expanded = try self.parseMacroInvocationElems(.top);
                 for (expanded) |elem| {
                     // Ion 1.1 e-expressions expand to user values; do not treat expansion results
                     // as system values, even if they look like `$ion_symbol_table::{...}`.
@@ -198,7 +205,7 @@ const Parser = struct {
         return yes;
     }
 
-    fn parseMacroInvocationElems(self: *Parser) IonError![]value.Element {
+    fn parseMacroInvocationElems(self: *Parser, invoke_ctx: Context) IonError![]value.Element {
         if (!self.startsWith("(")) return IonError.InvalidIon;
         self.consume(1);
         try self.skipWsComments();
@@ -224,7 +231,7 @@ const Parser = struct {
                 if (c == ',') return IonError.InvalidIon;
 
                 if (try self.hasMacroInvocationStart()) {
-                    const expanded = try self.parseMacroInvocationElems();
+                    const expanded = try self.parseMacroInvocationElems(.sexp);
                     out.appendSlice(self.arena.allocator(), expanded) catch return IonError.OutOfMemory;
                     continue;
                 }
@@ -239,9 +246,8 @@ const Parser = struct {
         // `$ion::...` (as used by the conformance suite for system macro invocations).
         var macro_addr: ?u32 = null;
         const id_start = self.i;
-        if (self.startsWith("$ion::")) {
-            self.consume("$ion::".len);
-        }
+        const qualified = self.startsWith("$ion::");
+        if (qualified) self.consume("$ion::".len);
         if (self.eof()) return IonError.Incomplete;
         if (std.ascii.isDigit(self.peek().?)) {
             var v: u32 = 0;
@@ -270,6 +276,8 @@ const Parser = struct {
             values,
             default,
             meta,
+            set_macros,
+            add_macros,
             annotate,
             repeat,
             delta,
@@ -286,7 +294,7 @@ const Parser = struct {
             parse_ion,
         };
 
-        const kind: ?MacroKind = blk: {
+        var kind: ?MacroKind = blk: {
             if (macro_addr) |addr| {
                 break :blk switch (addr) {
                     0 => .none,
@@ -312,6 +320,8 @@ const Parser = struct {
             if (std.mem.eql(u8, macro_id, "values") or std.mem.eql(u8, macro_id, "$ion::values")) break :blk .values;
             if (std.mem.eql(u8, macro_id, "default") or std.mem.eql(u8, macro_id, "$ion::default")) break :blk .default;
             if (std.mem.eql(u8, macro_id, "meta") or std.mem.eql(u8, macro_id, "$ion::meta")) break :blk .meta;
+            if (std.mem.eql(u8, macro_id, "set_macros") or std.mem.eql(u8, macro_id, "$ion::set_macros")) break :blk .set_macros;
+            if (std.mem.eql(u8, macro_id, "add_macros") or std.mem.eql(u8, macro_id, "$ion::add_macros")) break :blk .add_macros;
             if (std.mem.eql(u8, macro_id, "annotate") or std.mem.eql(u8, macro_id, "$ion::annotate")) break :blk .annotate;
             if (std.mem.eql(u8, macro_id, "repeat") or std.mem.eql(u8, macro_id, "$ion::repeat")) break :blk .repeat;
             if (std.mem.eql(u8, macro_id, "delta") or std.mem.eql(u8, macro_id, "$ion::delta")) break :blk .delta;
@@ -328,6 +338,17 @@ const Parser = struct {
             if (std.mem.eql(u8, macro_id, "parse_ion") or std.mem.eql(u8, macro_id, "$ion::parse_ion")) break :blk .parse_ion;
             break :blk null;
         };
+
+        // If a macro table is active, unqualified numeric addresses resolve to user macros first.
+        // Conformance relies on this for `(set_macros ...)` where `(:0)` refers to the first user
+        // macro, not the system `none`.
+        if (macro_addr) |addr| {
+            if (!qualified) {
+                if (self.currentMacroTable()) |tab| {
+                    if (tab.macroForAddress(addr) != null) kind = null;
+                }
+            }
+        }
 
         // `parse_ion` is a special form: it requires a single *literal* string/clob/blob argument
         // and does not allow expression groups or nested e-expressions.
@@ -353,6 +374,10 @@ const Parser = struct {
             self.i = save;
         }
 
+        if (kind != null and (kind.? == .set_macros or kind.? == .add_macros)) {
+            if (invoke_ctx != .top) return IonError.InvalidIon;
+        }
+
         const parseOneExpr = struct {
             fn run(p: *Parser) IonError![]const value.Element {
                 try p.skipWsComments();
@@ -360,7 +385,7 @@ const Parser = struct {
                 const c = p.peek().?;
                 if (c == ')' or c == ',') return IonError.InvalidIon;
                 if (try p.hasMacroInvocationStart()) {
-                    return p.parseMacroInvocationElems();
+                    return p.parseMacroInvocationElems(.sexp);
                 }
                 const elem = try p.parseElement(.sexp);
                 const one = p.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
@@ -605,6 +630,45 @@ const Parser = struct {
 
         if (kind != null and kind.? == .meta) {
             // `meta` produces no values regardless of its argument expressions.
+            return &.{};
+        }
+
+        if (kind != null and (kind.? == .set_macros or kind.? == .add_macros)) {
+            // Conformance: `set_macros` replaces the macro table; `add_macros` appends to it.
+            var defs_list = std.ArrayListUnmanaged(value.Element){};
+            defer defs_list.deinit(self.arena.allocator());
+            for (exprs.items) |res| {
+                defs_list.appendSlice(self.arena.allocator(), res) catch return IonError.OutOfMemory;
+            }
+
+            // Empty argument list / empty expression groups: clear or no-op.
+            if (defs_list.items.len == 0) {
+                if (kind.? == .set_macros) self.mactab_local = .{ .macros = &.{} };
+                return &.{};
+            }
+
+            // Validate that each produced value is an unannotated `(macro ...)` sexp.
+            for (defs_list.items) |d| {
+                if (d.annotations.len != 0) return IonError.InvalidIon;
+                if (d.value != .sexp) return IonError.InvalidIon;
+                const dsx = d.value.sexp;
+                if (dsx.len == 0 or dsx[0].value != .symbol) return IonError.InvalidIon;
+                const head = dsx[0].value.symbol.text orelse return IonError.InvalidIon;
+                if (!std.mem.eql(u8, head, "macro")) return IonError.InvalidIon;
+            }
+
+            const parsed = ion.macro.parseMacroTable(self.arena.allocator(), defs_list.items) catch return IonError.InvalidIon;
+            if (kind.? == .set_macros) {
+                self.mactab_local = parsed;
+            } else {
+                const base = self.currentMacroTable();
+                const base_macros = if (base) |t| t.macros else &.{};
+                const total = base_macros.len + parsed.macros.len;
+                const merged = self.arena.allocator().alloc(ion.macro.Macro, total) catch return IonError.OutOfMemory;
+                if (base_macros.len != 0) @memcpy(merged[0..base_macros.len], base_macros);
+                if (parsed.macros.len != 0) @memcpy(merged[base_macros.len..], parsed.macros);
+                self.mactab_local = .{ .macros = merged };
+            }
             return &.{};
         }
 
@@ -933,7 +997,7 @@ const Parser = struct {
         }
 
         // User macros (conformance `(mactab ...)`) are only callable by name/address, not by `$ion::...`.
-        if (self.mactab) |tab| {
+        if (self.currentMacroTable()) |tab| {
             if (macro_addr) |addr| {
                 if (tab.macroForAddress(addr)) |m| return tdl_eval.expandUserMacro(self.arena, tab, m, exprs.items);
             } else {
@@ -1219,7 +1283,7 @@ const Parser = struct {
             if (!expect_value) return IonError.InvalidIon;
 
             if (try self.hasMacroInvocationStart()) {
-                const expanded = try self.parseMacroInvocationElems();
+                const expanded = try self.parseMacroInvocationElems(.list);
                 elems.appendSlice(self.arena.allocator(), expanded) catch return IonError.OutOfMemory;
             } else {
                 const elem = try self.parseElement(.list);
@@ -1246,7 +1310,7 @@ const Parser = struct {
             }
             if (c == ',') return IonError.InvalidIon;
             if (try self.hasMacroInvocationStart()) {
-                const expanded = try self.parseMacroInvocationElems();
+                const expanded = try self.parseMacroInvocationElems(.sexp);
                 elems.appendSlice(self.arena.allocator(), expanded) catch return IonError.OutOfMemory;
             } else {
                 const elem = try self.parseElement(.sexp);
@@ -1272,7 +1336,7 @@ const Parser = struct {
             }
 
             if (try self.hasMacroInvocationStart()) {
-                const expanded = try self.parseMacroInvocationElems();
+                const expanded = try self.parseMacroInvocationElems(.@"struct");
                 for (expanded) |e| {
                     if (e.annotations.len != 0) return IonError.InvalidIon;
                     switch (e.value) {
@@ -1289,7 +1353,7 @@ const Parser = struct {
                 self.consume(1);
                 try self.skipWsComments();
                 if (try self.hasMacroInvocationStart()) {
-                    const expanded = try self.parseMacroInvocationElems();
+                    const expanded = try self.parseMacroInvocationElems(.@"struct");
                     for (expanded) |e| {
                         fields.append(self.arena.allocator(), .{ .name = name, .value = e }) catch return IonError.OutOfMemory;
                     }

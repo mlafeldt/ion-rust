@@ -81,7 +81,9 @@ fn parseMacroDef(allocator: std.mem.Allocator, it: value.Element) IonError!Macro
     if (it.annotations.len != 0) return IonError.InvalidIon;
     if (it.value != .sexp) return IonError.InvalidIon;
     const sx = it.value.sexp;
-    if (sx.len < 3) return IonError.InvalidIon;
+    // Conformance: macro definitions must include a parameter list *and* at least one body
+    // expression.
+    if (sx.len < 4) return IonError.InvalidIon;
     if (sx[0].value != .symbol) return IonError.InvalidIon;
     const head = sx[0].value.symbol.text orelse return IonError.InvalidIon;
     if (!std.mem.eql(u8, head, "macro")) return IonError.InvalidIon;
