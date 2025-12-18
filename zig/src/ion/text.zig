@@ -38,11 +38,20 @@ pub fn parseTopLevelWithMacroTable(arena: *value.Arena, bytes: []const u8, macta
     return parser.parseTopLevel();
 }
 
+/// Parses an Ion text stream using the Ion 1.1 conformance suite's "default module" symbol model.
+///
+/// This is used by the conformance runner; it should not be used for `iontestdata_1_1`, which
+/// follows Ion 1.0-style local symbol tables in text.
+pub fn parseTopLevelWithMacroTableIon11Modules(arena: *value.Arena, bytes: []const u8, mactab: ?*const ion.macro.MacroTable) IonError![]value.Element {
+    var parser = try Parser.initWithOptions(arena, bytes, mactab, true, false, true);
+    return parser.parseTopLevel();
+}
+
 /// Parses an Ion text stream, but does NOT concatenate adjacent string literals.
 /// Intended for the Ion 1.1 conformance DSL, which uses sexps for clauses and may need
 /// to represent multiple string arguments without Ion's normal string literal concatenation.
 pub fn parseTopLevelNoStringConcat(arena: *value.Arena, bytes: []const u8) IonError![]value.Element {
-    var parser = try Parser.initWithOptions(arena, bytes, null, false, false);
+    var parser = try Parser.initWithOptions(arena, bytes, null, false, false, false);
     return parser.parseTopLevel();
 }
 
@@ -52,7 +61,7 @@ pub fn parseTopLevelNoStringConcat(arena: *value.Arena, bytes: []const u8) IonEr
 /// The conformance DSL is "Ion-shaped" but includes tokens that are not valid Ion identifiers,
 /// such as `x?` / `x*` / `x+`, plus TDL-ish forms like `.literal` and `%x`.
 pub fn parseTopLevelConformanceDslNoStringConcat(arena: *value.Arena, bytes: []const u8) IonError![]value.Element {
-    var parser = try Parser.initWithOptions(arena, bytes, null, false, true);
+    var parser = try Parser.initWithOptions(arena, bytes, null, false, true, false);
     return parser.parseTopLevel();
 }
 
@@ -75,13 +84,28 @@ const Parser = struct {
     version: enum { v1_0, v1_1 } = .v1_0,
     concat_string_literals: bool = true,
     conformance_dsl_mode: bool = false,
+    /// If true, interpret Ion 1.1 symbol IDs using the conformance suite's "default module"
+    /// model where user-defined symbols occupy addresses starting at 1 and the system module's
+    /// symbols follow after them.
+    ///
+    /// The `iontestdata_1_1` corpus uses Ion 1.0-style local symbol tables where user symbols
+    /// begin at SID 10; that remains the default when this flag is false.
+    ion11_module_mode: bool = false,
     mactab_external: ?*const ion.macro.MacroTable = null,
     mactab_local: ?ion.macro.MacroTable = null,
+    /// Ion 1.1 "default module" user symbols (addresses start at 1), modeled as a dense table.
+    /// Entries may be null to represent unknown symbol text at that address.
+    ///
+    /// Conformance uses unknown symbol IDs as macro arguments (e.g. `(:set_symbols $256)`), so
+    /// the parser must be able to represent symbol IDs whose text is unknown.
+    ion11_user_symbols: []const ?[]const u8 = &.{},
+    ion11_system_loaded: bool = false,
+    ion11_system_preserve_on_set_symbols: bool = false,
     st: symtab.SymbolTable,
     shared: std.StringHashMapUnmanaged(SharedSymtab) = .{},
 
     fn init(arena: *value.Arena, input: []const u8, mactab: ?*const ion.macro.MacroTable) IonError!Parser {
-        return initWithOptions(arena, input, mactab, true, false);
+        return initWithOptions(arena, input, mactab, true, false, false);
     }
 
     fn initWithOptions(
@@ -90,6 +114,7 @@ const Parser = struct {
         mactab: ?*const ion.macro.MacroTable,
         concat_string_literals: bool,
         conformance_dsl_mode: bool,
+        ion11_module_mode: bool,
     ) IonError!Parser {
         return .{
             .arena = arena,
@@ -98,8 +123,12 @@ const Parser = struct {
             .version = .v1_0,
             .concat_string_literals = concat_string_literals,
             .conformance_dsl_mode = conformance_dsl_mode,
+            .ion11_module_mode = ion11_module_mode,
             .mactab_external = mactab,
             .mactab_local = null,
+            .ion11_user_symbols = &.{},
+            .ion11_system_loaded = false,
+            .ion11_system_preserve_on_set_symbols = false,
             .st = try symtab.SymbolTable.init(arena),
             .shared = .{},
         };
@@ -167,14 +196,15 @@ const Parser = struct {
             if (isSystemValue(elem) and !is_literal) {
                 // Apply symbol table if present, otherwise ignore.
                 if (elem.annotations.len == 0 and elem.value == .symbol) {
-                    if (elem.value.symbol.text) |t| {
-                        if (std.mem.eql(u8, t, "$ion_1_1")) {
-                            self.version = .v1_1;
-                        } else if (std.mem.eql(u8, t, "$ion_1_0")) {
-                            self.version = .v1_0;
-                        }
+                if (elem.value.symbol.text) |t| {
+                    if (std.mem.eql(u8, t, "$ion_1_1")) {
+                        self.version = .v1_1;
+                        if (self.ion11_module_mode) self.ion11_system_loaded = true;
+                    } else if (std.mem.eql(u8, t, "$ion_1_0")) {
+                        self.version = .v1_0;
                     }
                 }
+            }
                 try self.maybeConsumeSymbolTable(elem);
             } else {
                 const stripped = if (is_literal) try stripIonLiteralAnnotation(self.arena, elem) else elem;
@@ -278,6 +308,8 @@ const Parser = struct {
             meta,
             set_macros,
             add_macros,
+            set_symbols,
+            add_symbols,
             annotate,
             repeat,
             delta,
@@ -313,6 +345,7 @@ const Parser = struct {
                     16 => .make_field,
                     17 => .make_struct,
                     19 => .flatten,
+                    20 => .add_symbols,
                     else => null,
                 };
             }
@@ -322,6 +355,8 @@ const Parser = struct {
             if (std.mem.eql(u8, macro_id, "meta") or std.mem.eql(u8, macro_id, "$ion::meta")) break :blk .meta;
             if (std.mem.eql(u8, macro_id, "set_macros") or std.mem.eql(u8, macro_id, "$ion::set_macros")) break :blk .set_macros;
             if (std.mem.eql(u8, macro_id, "add_macros") or std.mem.eql(u8, macro_id, "$ion::add_macros")) break :blk .add_macros;
+            if (std.mem.eql(u8, macro_id, "set_symbols") or std.mem.eql(u8, macro_id, "$ion::set_symbols")) break :blk .set_symbols;
+            if (std.mem.eql(u8, macro_id, "add_symbols") or std.mem.eql(u8, macro_id, "$ion::add_symbols")) break :blk .add_symbols;
             if (std.mem.eql(u8, macro_id, "annotate") or std.mem.eql(u8, macro_id, "$ion::annotate")) break :blk .annotate;
             if (std.mem.eql(u8, macro_id, "repeat") or std.mem.eql(u8, macro_id, "$ion::repeat")) break :blk .repeat;
             if (std.mem.eql(u8, macro_id, "delta") or std.mem.eql(u8, macro_id, "$ion::delta")) break :blk .delta;
@@ -374,7 +409,7 @@ const Parser = struct {
             self.i = save;
         }
 
-        if (kind != null and (kind.? == .set_macros or kind.? == .add_macros)) {
+        if (kind != null and (kind.? == .set_macros or kind.? == .add_macros or kind.? == .set_symbols or kind.? == .add_symbols)) {
             if (invoke_ctx != .top) return IonError.InvalidIon;
         }
 
@@ -612,6 +647,42 @@ const Parser = struct {
             return out;
         }
 
+        // Conformance uses address 19 for both `flatten` and `set_symbols`. Disambiguate by
+        // argument types: if all evaluated argument values are text (string/symbol), treat this
+        // invocation as `set_symbols` instead of `flatten`.
+        if (self.ion11_module_mode and macro_addr != null and macro_addr.? == 19 and kind != null and kind.? == .flatten and invoke_ctx == .top) {
+            var all_text = true;
+            for (exprs.items) |res| {
+                for (res) |arg| {
+                    if (arg.annotations.len != 0) all_text = false;
+                    switch (arg.value) {
+                        .string => {},
+                        .symbol => |s| {
+                            if (s.text == null) all_text = false;
+                        },
+                        else => all_text = false,
+                    }
+                }
+            }
+            if (all_text) {
+                var texts = std.ArrayListUnmanaged(?[]const u8){};
+                defer texts.deinit(self.arena.allocator());
+                for (exprs.items) |res| {
+                    for (res) |arg| {
+                        const t: []const u8 = switch (arg.value) {
+                            .string => |s| s,
+                            .symbol => |s| s.text.?,
+                            else => unreachable,
+                        };
+                        const owned = try self.arena.dupe(t);
+                        texts.append(self.arena.allocator(), owned) catch return IonError.OutOfMemory;
+                    }
+                }
+                self.ion11_user_symbols = texts.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+                return &.{};
+            }
+        }
+
         if (kind != null and kind.? == .flatten) {
             var out = std.ArrayListUnmanaged(value.Element){};
             errdefer out.deinit(self.arena.allocator());
@@ -668,6 +739,36 @@ const Parser = struct {
                 if (base_macros.len != 0) @memcpy(merged[0..base_macros.len], base_macros);
                 if (parsed.macros.len != 0) @memcpy(merged[base_macros.len..], parsed.macros);
                 self.mactab_local = .{ .macros = merged };
+            }
+            return &.{};
+        }
+
+        if (self.ion11_module_mode and kind != null and (kind.? == .set_symbols or kind.? == .add_symbols)) {
+            var texts = std.ArrayListUnmanaged(?[]const u8){};
+            defer texts.deinit(self.arena.allocator());
+            for (exprs.items) |res| {
+                for (res) |e| {
+                    if (e.annotations.len != 0) return IonError.InvalidIon;
+                    const t: []const u8 = switch (e.value) {
+                        .string => |s| s,
+                        .symbol => |s| s.text orelse return IonError.InvalidIon,
+                        else => return IonError.InvalidIon,
+                    };
+                    const owned = try self.arena.dupe(t);
+                    texts.append(self.arena.allocator(), owned) catch return IonError.OutOfMemory;
+                }
+            }
+
+            if (kind.? == .set_symbols) {
+                self.ion11_user_symbols = texts.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+                if (!self.ion11_system_preserve_on_set_symbols) self.ion11_system_loaded = false;
+            } else {
+                if (texts.items.len != 0) {
+                    const merged = self.arena.allocator().alloc(?[]const u8, self.ion11_user_symbols.len + texts.items.len) catch return IonError.OutOfMemory;
+                    if (self.ion11_user_symbols.len != 0) @memcpy(merged[0..self.ion11_user_symbols.len], self.ion11_user_symbols);
+                    @memcpy(merged[self.ion11_user_symbols.len..], texts.items);
+                    self.ion11_user_symbols = merged;
+                }
             }
             return &.{};
         }
@@ -1192,7 +1293,10 @@ const Parser = struct {
 
         // Strings/symbols
         if (self.startsWith("\"")) {
-            const text_bytes = if (self.concat_string_literals) try self.parseStringConcat(false) else try self.parseShortString(false);
+            // Ion supports multi-segment long strings (`'''...'''`) but short string literals are
+            // always a single value. In particular, the Ion 1.1 conformance suite expects
+            // `(:set_symbols "a" "b")` to receive two arguments, not one concatenated string.
+            const text_bytes = try self.parseShortString(false);
             return value.Value{ .string = text_bytes };
         }
         if (self.startsWith("'''")) {
@@ -1391,7 +1495,7 @@ const Parser = struct {
         }
         if (self.startsWith("'")) return self.parseQuotedSymbol();
         if (self.startsWith("\"")) {
-            const text_bytes = if (self.concat_string_literals) try self.parseStringConcat(false) else try self.parseShortString(false);
+            const text_bytes = try self.parseShortString(false);
             return value.makeSymbolId(null, text_bytes);
         }
         if (self.peek() == null) return IonError.Incomplete;
@@ -1626,6 +1730,24 @@ const Parser = struct {
         const digits = self.input[start..self.i];
         const sid = std.fmt.parseInt(u32, digits, 10) catch return IonError.InvalidIon;
         if (sid == 0) return value.unknownSymbol();
+
+        if (self.version == .v1_1 and self.ion11_module_mode) {
+            // Conformance-only Ion 1.1 mode: symbol IDs address the default module, which starts
+            // with user-defined symbols at SID 1, followed by the system module's symbols.
+            //
+            // Out-of-range SIDs must be rejected (conformance expects an error).
+            if (sid <= self.ion11_user_symbols.len) {
+                const t = self.ion11_user_symbols[@intCast(sid - 1)];
+                return value.makeSymbolId(sid, t);
+            }
+            if (!self.ion11_system_loaded) return IonError.InvalidIon;
+            const sys_sid: u32 = sid - @as(u32, @intCast(self.ion11_user_symbols.len));
+            if (sys_sid >= 1 and sys_sid <= symtab.SystemSymtab11.max_id) {
+                return value.makeSymbolId(sid, symtab.SystemSymtab11.textForSid(sys_sid).?);
+            }
+            return IonError.InvalidIon;
+        }
+
         const slot = self.st.slotForSid(sid) orelse return IonError.InvalidIon;
         if (slot) |txt| return value.makeSymbolId(sid, txt);
         return value.makeSymbolId(sid, null);
@@ -2163,6 +2285,28 @@ const Parser = struct {
                 if (f.value.value != .list) return IonError.InvalidIon;
                 symbols_list = f.value.value.list;
             }
+        }
+
+        // Conformance-only Ion 1.1 mode: treat `$ion_symbol_table::{symbols:[...]}` as defining
+        // the default module's user symbol addresses starting at 1, with the system module symbols
+        // appended after.
+        if (self.version == .v1_1 and self.ion11_module_mode) {
+            if (symbols_list) |syms| {
+                const out = self.arena.allocator().alloc(?[]const u8, syms.len) catch return IonError.OutOfMemory;
+                for (syms, 0..) |sym_elem, idx| {
+                    out[idx] = switch (sym_elem.value) {
+                        .string => |s| try self.arena.dupe(s),
+                        .null => null,
+                        else => null,
+                    };
+                }
+            self.ion11_user_symbols = out;
+        } else {
+            self.ion11_user_symbols = &.{};
+        }
+            self.ion11_system_loaded = true;
+            self.ion11_system_preserve_on_set_symbols = true;
+            return;
         }
 
         const imports = imports_value orelse value.Value{ .null = .null };

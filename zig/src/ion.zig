@@ -71,6 +71,30 @@ pub fn parseDocumentWithMacroTable(allocator: Allocator, bytes: []const u8, mact
     }
 }
 
+/// Parses a byte slice as Ion, but uses the Ion 1.1 conformance suite's "default module" symbol
+/// model when parsing *text* Ion 1.1.
+///
+/// This is intended for the conformance runner only. The `iontestdata_1_1` corpus uses Ion 1.0-style
+/// local symbol tables in text, so normal callers should continue to use `parseDocumentWithMacroTable`.
+pub fn parseDocumentWithMacroTableIon11Modules(allocator: Allocator, bytes: []const u8, mactab: ?*const macro.MacroTable) IonError!Document {
+    var arena = try value.Arena.init(allocator);
+    errdefer arena.deinit();
+
+    if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x00 and bytes[3] == 0xEA) {
+        const elements = try binary.parseTopLevel(&arena, bytes);
+        return .{ .arena = arena, .elements = elements };
+    } else if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA) {
+        const elements = try binary11.parseTopLevelWithMacroTable(&arena, bytes, mactab);
+        return .{ .arena = arena, .elements = elements };
+    } else {
+        const decoded = try decodeTextToUtf8(allocator, bytes);
+        defer if (decoded) |b| allocator.free(b);
+        const input = if (decoded) |b| b else bytes;
+        const elements = try text.parseTopLevelWithMacroTableIon11Modules(&arena, input, mactab);
+        return .{ .arena = arena, .elements = elements };
+    }
+}
+
 fn decodeTextToUtf8(allocator: Allocator, bytes: []const u8) IonError!?[]u8 {
     if (bytes.len == 0) return null;
 

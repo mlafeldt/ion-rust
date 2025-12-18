@@ -1556,9 +1556,52 @@ fn runExpectation(
     } else if (state.text_len != 0) {
         const frags = try collectTextFragments(allocator, state);
         defer if (frags.len != 0) allocator.free(frags);
-        const doc_bytes = try buildTextDocument(allocator, state.version, frags);
+
+        // Conformance allows mixing abstract `toplevel`/`symtab` fragments (modeled as events)
+        // with text fragments. When building a text document, render any event values as compact
+        // text and prepend them to the fragment list.
+        //
+        // This is required for cases like:
+        //   (symtab "a") (text "(:add_symbols)") ...
+        // where `symtab` occurs before any `text` fragments.
+        var rendered_event_frags = std.ArrayListUnmanaged([]u8){};
+        defer {
+            for (rendered_event_frags.items) |b| allocator.free(b);
+            rendered_event_frags.deinit(allocator);
+        }
+
+        const events = try collectEvents(allocator, state);
+        defer if (events.len != 0) allocator.free(events);
+        for (events) |ev| {
+            switch (ev) {
+                .value => |e| {
+                    if (try renderConformanceMacroRefToText(allocator, e)) |rendered_macro| {
+                        rendered_event_frags.append(allocator, rendered_macro) catch return RunError.OutOfMemory;
+                        continue;
+                    }
+
+                    var tmp_arena = value.Arena.init(allocator) catch return RunError.OutOfMemory;
+                    defer tmp_arena.deinit();
+                    const rewritten = try cloneElementRewritingDelayedSids(&tmp_arena, e);
+
+                    const rendered = ion.serializeDocument(allocator, .text_compact, (&.{rewritten})) catch return RunError.OutOfMemory;
+                    rendered_event_frags.append(allocator, rendered) catch return RunError.OutOfMemory;
+                },
+                else => {},
+            }
+        }
+
+        const all_frags = allocator.alloc([]const u8, rendered_event_frags.items.len + frags.len) catch return RunError.OutOfMemory;
+        defer allocator.free(all_frags);
+        for (rendered_event_frags.items, 0..) |b, i| all_frags[i] = b;
+        if (frags.len != 0) @memcpy(all_frags[rendered_event_frags.items.len..], frags);
+
+        const doc_bytes = try buildTextDocument(allocator, state.version, all_frags);
         doc_bytes_owned = doc_bytes;
-        parsed_doc = ion.parseDocumentWithMacroTable(allocator, doc_bytes, if (state.mactab) |*t| t else null) catch |e| {
+        parsed_doc = (if (state.version == .ion_1_1)
+            ion.parseDocumentWithMacroTableIon11Modules(allocator, doc_bytes, if (state.mactab) |*t| t else null)
+        else
+            ion.parseDocumentWithMacroTable(allocator, doc_bytes, if (state.mactab) |*t| t else null)) catch |e| {
             if (std.mem.eql(u8, head, "signals")) return true;
             // Conformance suite includes many Ion 1.1 macro system / e-expression inputs. We don't
             // implement those yet, but we still want to run the rest of the suite. Treat parser
