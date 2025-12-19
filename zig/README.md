@@ -73,8 +73,8 @@ Key properties:
     - Local symbol tables:
       - Supports `$ion_symbol_table` `imports:[...]` (falls back to unknown slots if imported table is not known).
       - Supports in-stream `$ion_shared_symbol_table` declarations as an import catalog.
-    - Supports unknown symbol IDs when the symbol table slot exists but has unknown text (null slot).
-    - IVM appearing inside the stream (ignored if it’s `E0 01 00 EA`)
+      - Supports unknown symbol IDs when the symbol table slot exists but has unknown text (null slot).
+    - IVM appearing inside the stream (ignored if it's `E0 01 00 EA`)
     - IVM appearing inside the stream (ignored if it's `E0 01 00 EA`)
     - "Ordered struct" encoding variant (as used by ion-tests)
 
@@ -82,28 +82,31 @@ Key properties:
 
 - `zig/src/ion/binary11.zig`
   - Parses streams starting with the Ion 1.1 IVM (`E0 01 01 EA`).
-  - Implemented opcodes (driven by `ion-tests/conformance/data_model/*`):
+  - Implemented value opcodes (driven by `ion-tests/conformance/data_model/*`):
     - nulls (`EA`, `EB <typecode>`)
     - booleans (`6E` true, `6F` false)
     - integers (`60..68`, `F6 <flexuint len> <payload>`) (little-endian two's complement)
     - floats (`6A` f0, `6B` f16, `6C` f32, `6D` f64) (little-endian payload)
     - decimals (`70..7F`, `F7 <flexuint len> <payload>`) with payload:
       `[flexint exponent][remaining bytes = coefficient (LE two's complement)]`
+    - short strings (`90..9F`) and short symbols with inline text (`A0..AF`)
   - Implemented (conformance-driven): a minimal subset of Ion 1.1 binary e-expressions (user macro invocations),
     plus `mactab` support for the conformance runner and `%x` expansion for single-parameter macros.
-  - Out of scope (still `Unsupported`): most Ion 1.1 binary value space (containers/strings/symbols/symtabs), system macros,
-    and the full macro/TDL system.
+  - Not implemented (still `Unsupported` for the value space): containers (list/sexp/struct), blobs/clobs, timestamps,
+    long strings/symbols and symbol IDs, annotation wrappers, and any full symtab/module mechanics.
 
 ### Writer (text + binary)
 
 - `zig/src/ion/writer.zig`
   - Binary writer:
     - Emits IVM.
+    - Ion 1.0 only (does not emit Ion 1.1 binary).
     - Emits a basic local symbol table for newly encountered symbol text.
     - Writes values with correct Ion binary encodings for supported types.
     - Handles signed-magnitude integer fields in decimals and timestamp fractionals (sign-bit padding rules).
   - Text writer:
     - Produces legal text Ion consumable by our parser and by ion-tests expectations.
+    - Does not emit Ion 1.1 e-expression syntax; it prints Ion values, not macros.
     - Emits a minimal `$ion_symbol_table` import when needed so `$<sid>` tokens (unknown symbol IDs) are parseable.
     - Handles timestamps with correct "trailing `T`" rules at year/month precision.
     - Uses `\\xNN` escapes for non-ASCII bytes in clobs.
@@ -184,6 +187,22 @@ The `ion-tests/` repo contains multiple suites. The Zig harness covers the two c
 4) `ion-tests/conformance/system_macros/add_macros.ion` has comments referencing system macro address 14, but the test inputs use address 22 (`(:22)` / `(:$ion::22)`).
 5) Some conformance cases mix abstract `toplevel` events (system values like `(#$:$ion::add_macros ...)`) with `binary` fragments. The runner applies these macro-table mutations as a prelude when parsing the binary bytes.
 
+## Gaps vs ion-rust (high-level)
+
+This port is "tests green" for `ion-tests/`, but it is not feature-complete vs the Rust implementation.
+
+Major gaps (not exhaustive):
+
+1) Ion 1.1 binary: only a small subset of the value space is implemented (see `zig/src/ion/binary11.zig`).
+2) Ion 1.1 writing: no Ion 1.1 binary writer, and the text writer does not emit Ion 1.1 e-expressions.
+3) TDL / macro system: enough to satisfy `ion-tests/conformance`, not a full TDL compiler/evaluator.
+4) Streaming/lazy reading: Zig implementation is DOM-only; it parses the whole document into memory.
+
+Minor gaps (not exhaustive):
+
+1) Ion hash / ordering helpers (present in Rust) are not implemented in Zig.
+2) Catalog API / builder-style APIs are not implemented.
+
 ## To-dos (spec completeness / performance)
 
 ### Performance
@@ -226,10 +245,10 @@ Ion parser keeps strict identifier/operator tokenization.
 The Rust implementation's canonical encoding is `0A 00`, but the Zig conformance runner accepts `0B 00` to avoid
 skipping/failing those branches.
 
-## Upstream notes (ion-tests / conformance quirks)
+## ion-tests notes (conformance quirks)
 
-These are quirks in `ion-tests` inputs (or ambiguities in the conformance DSL expectations) that we patched/relaxed
-to keep coverage progressing. None of these are confirmed bugs in any Ion client implementation.
+These are quirks in `ion-tests` inputs (or ambiguities in conformance DSL expectations) that we patched/relaxed
+to keep coverage progressing.
 
 1) Non-canonical FlexUInt encoding in conformance input
    - File: `ion-tests/conformance/eexp/binary/argument_encoding.ion`
