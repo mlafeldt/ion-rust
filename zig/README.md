@@ -75,7 +75,6 @@ Key properties:
       - Supports in-stream `$ion_shared_symbol_table` declarations as an import catalog.
       - Supports unknown symbol IDs when the symbol table slot exists but has unknown text (null slot).
     - IVM appearing inside the stream (ignored if it's `E0 01 00 EA`)
-    - IVM appearing inside the stream (ignored if it's `E0 01 00 EA`)
     - "Ordered struct" encoding variant (as used by ion-tests)
 
 ### Binary Ion 1.1 parsing (minimal subset)
@@ -90,10 +89,11 @@ Key properties:
     - decimals (`70..7F`, `F7 <flexuint len> <payload>`) with payload:
       `[flexint exponent][remaining bytes = coefficient (LE two's complement)]`
     - short strings (`90..9F`) and short symbols with inline text (`A0..AF`)
-  - Implemented (conformance-driven): a minimal subset of Ion 1.1 binary e-expressions (user macro invocations),
-    plus `mactab` support for the conformance runner and `%x` expansion for single-parameter macros.
-  - Not implemented (still `Unsupported` for the value space): containers (list/sexp/struct), blobs/clobs, timestamps,
-    long strings/symbols and symbol IDs, annotation wrappers, and any full symtab/module mechanics.
+  - Implemented (conformance-driven):
+    - A subset of Ion 1.1 binary e-expressions (system macro invocations via `0xEF <addr> ...` and user macro invocations).
+    - `mactab` support for the conformance runner and `%x` expansion for simple single-parameter user macros.
+  - Not implemented (still `Unsupported` for the value space): containers (list/sexp/struct), blobs/clobs, timestamp value opcodes,
+    long strings/symbols and symbol ID encoding, annotation wrappers, and any full symtab/module mechanics.
 
 ### Writer (text + binary)
 
@@ -193,10 +193,12 @@ This port is "tests green" for `ion-tests/`, but it is not feature-complete vs t
 
 Major gaps (not exhaustive):
 
-1) Ion 1.1 binary: only a small subset of the value space is implemented (see `zig/src/ion/binary11.zig`).
-2) Ion 1.1 writing: no Ion 1.1 binary writer, and the text writer does not emit Ion 1.1 e-expressions.
-3) TDL / macro system: enough to satisfy `ion-tests/conformance`, not a full TDL compiler/evaluator.
-4) Streaming/lazy reading: Zig implementation is DOM-only; it parses the whole document into memory.
+1) Ion 1.1 binary: only a small subset of the value space is implemented (see `zig/src/ion/binary11.zig`); most container/value encodings are still `Unsupported`.
+2) Ion 1.1 writing: no Ion 1.1 binary writer, and the text writer does not emit Ion 1.1 e-expressions/macros.
+3) System macros: 23/24 are implemented for text parsing + conformance needs; `make_blob` (address 13) is not implemented.
+4) TDL / macro system: enough to satisfy `ion-tests/conformance`, not a full TDL compiler/evaluator.
+5) Streaming/lazy reading: Zig implementation is DOM-only; it parses the whole document into memory.
+6) BigInt in Ion 1.1 paths: several Ion 1.1 evaluation/encoding helpers return `IonError.Unsupported` on big ints (Ion 1.0 corpus still passes, including big ints).
 
 Minor gaps (not exhaustive):
 
