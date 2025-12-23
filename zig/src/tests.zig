@@ -534,3 +534,34 @@ test "ion 1.1 binary e-expression 12-bit address (minimal)" {
     try std.testing.expect(elems[0].value == .int);
     try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
 }
+
+test "ion 1.1 binary e-expression length-prefixed (0xF5, minimal)" {
+    // Minimal coverage for the length-prefixed e-expression opcode (0xF5).
+    // This uses a synthetic user macro at address 64 that expands to its argument group.
+
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Build a macro table with a single variadic parameter macro at address 64.
+    const params = try arena.allocator().alloc(ion.macro.Param, 1);
+    params[0] = .{ .ty = .tagged, .card = .zero_or_many, .name = "vals", .shape = null };
+
+    const body = try arena.allocator().alloc(ion.value.Element, 1);
+    body[0] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%vals") } };
+
+    const macros = try arena.allocator().alloc(ion.macro.Macro, 65);
+    @memset(macros, ion.macro.Macro{ .name = null, .params = &.{}, .body = &.{} });
+    macros[64] = .{ .name = null, .params = params, .body = body };
+
+    const tab = ion.macro.MacroTable{ .macros = macros };
+
+    // Invoke macro address 64 using a length-prefixed e-expression:
+    //   F5 <flexuint addr=64> <flexuint args_len=3> <bitmap=01> <tagged int(1)>
+    //
+    // FlexUInt encoding: 1-byte values are written as `(value << 1) | 1`.
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xF5, 0x81, 0x07, 0x01, 0x61, 0x01 };
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+}

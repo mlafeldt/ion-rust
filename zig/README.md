@@ -100,11 +100,14 @@ Key properties:
       - list/sexp/struct delimited forms (`F1`/`F2`/`F3`)
     - annotations sequences (`E4..E9`) applied to the following value expression
   - Implemented (conformance-driven / incomplete):
-    - A subset of Ion 1.1 binary e-expressions (system macro invocations via `0xEF <addr> ...` and user macro invocations).
+    - A subset of Ion 1.1 binary e-expressions:
+      - system macro invocations via `0xEF <addr> ...`
+      - user macro invocations via 6-bit / 12-bit / 20-bit address forms (`0x00..0x5F`)
+      - length-prefixed invocations (`0xF5`) for the subset needed by conformance/demo macros (single-parameter user macros and system `values`)
     - `mactab` support for the conformance runner and `%x` expansion for simple single-parameter user macros.
   - Not implemented:
     - Full Ion 1.1 module/symbol resolution for symbol IDs (symbol IDs are preserved but typically not resolved to text).
-    - Full Ion 1.1 binary e-expression encoding/decoding (e.g. 12/20-bit addresses, `0xF5` length-prefixed e-expressions).
+    - Full Ion 1.1 binary e-expression encoding/decoding (for example: `0xF5` for arbitrary macro signatures and argument types, and the `0xF5` length-prefixed variant for macros other than system `values`).
     - Some FlexSym escape forms used outside the conformance suite.
 
 ### Writer (text + binary)
@@ -141,7 +144,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
-  - As of 2025-12-23, `cd zig && zig build test --summary all` runs 11 Zig tests; all pass.
+  - As of 2025-12-23, `cd zig && zig build test --summary all` runs 13 Zig tests; all pass.
 
 ### Skip list (currently empty)
 

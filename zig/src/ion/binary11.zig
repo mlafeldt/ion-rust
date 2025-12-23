@@ -111,8 +111,16 @@ const Decoder = struct {
             return self.readMacroInvocationAtAddress(addr);
         }
 
-        // E-expression with length prefix (opcode 0xF5) is not implemented yet.
-        if (op0 == 0xF5) return IonError.Unsupported;
+        // E-expression with length prefix (opcode 0xF5).
+        //
+        // Note: This is only partially implemented. We currently support the subset needed to
+        // expand conformance/demo macros:
+        // - user-defined macros loaded via `mactab` with a single parameter
+        // - the system `values` macro (address 1)
+        //
+        // Supporting the full Ion 1.1 macro system requires a richer macro signature model and
+        // (eventually) preserving macro invocations in the DOM instead of eagerly expanding them.
+        if (op0 == 0xF5) return self.readMacroInvocationLengthPrefixed();
 
         const v = try self.readValue();
         const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
@@ -215,6 +223,143 @@ const Decoder = struct {
         // Otherwise, treat this as an invocation of a system macro loaded into the default module.
         if (addr > std.math.maxInt(u8)) return IonError.Unsupported;
         return self.readSystemMacroInvocationAt(addr);
+    }
+
+    fn readMacroInvocationLengthPrefixed(self: *Decoder) IonError![]value.Element {
+        if (self.i >= self.input.len) return IonError.Incomplete;
+        if (self.input[self.i] != 0xF5) return IonError.InvalidIon;
+        self.i += 1;
+
+        const addr = try readFlexUInt(self.input, &self.i);
+        const args_len = try readFlexUInt(self.input, &self.i);
+        if (self.i + args_len > self.input.len) return IonError.Incomplete;
+        const args_bytes = self.input[self.i .. self.i + args_len];
+        self.i += args_len;
+
+        var sub = Decoder{ .arena = self.arena, .input = args_bytes, .i = 0, .mactab = self.mactab };
+
+        if (self.mactab) |tab| {
+            if (tab.macroForAddress(addr)) |m| {
+                if (m.params.len != 1) return IonError.Unsupported;
+                const decoded_args = try sub.readLengthPrefixedArgsSingleParam(m.params[0]);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                return self.expandMacroBody(m, decoded_args);
+            }
+        }
+
+        // System macro subset: support length-prefixed `(values <expr*>)`.
+        if (addr == 1) {
+            const decoded_args = try sub.readLengthPrefixedSystemValuesArgs();
+            if (sub.i != sub.input.len) return IonError.InvalidIon;
+            return decoded_args;
+        }
+
+        return IonError.Unsupported;
+    }
+
+    fn readEExpBitmap(self: *Decoder, bitmap_size_in_bytes: usize) IonError!u64 {
+        if (bitmap_size_in_bytes == 0) return 0;
+        if (bitmap_size_in_bytes > 8) return IonError.Unsupported;
+        if (self.i + bitmap_size_in_bytes > self.input.len) return IonError.Incomplete;
+        var buf: [8]u8 = .{0} ** 8;
+        std.mem.copyForwards(u8, buf[0..bitmap_size_in_bytes], self.input[self.i .. self.i + bitmap_size_in_bytes]);
+        self.i += bitmap_size_in_bytes;
+        return std.mem.readInt(u64, &buf, .little);
+    }
+
+    fn readLengthPrefixedSystemValuesArgs(self: *Decoder) IonError![]value.Element {
+        // Signature: (values <expr*>)
+        //
+        // For a single variadic parameter, the bitmap is 1 byte and only the low 2 bits are used.
+        const bits = try self.readEExpBitmap(1);
+        const grouping: u2 = @intCast(bits & 0b11);
+        return switch (grouping) {
+            0b00 => &.{},
+            0b01 => try self.readValueExpr(),
+            0b10 => try self.readTaggedArgGroupValueExprs(),
+            else => IonError.InvalidIon,
+        };
+    }
+
+    fn readLengthPrefixedArgsSingleParam(self: *Decoder, p: ion.macro.Param) IonError![]value.Element {
+        // For `.one` parameters, argument encoding is always a single value expression literal.
+        if (p.card == .one) {
+            return switch (p.ty) {
+                .tagged => blk: {
+                    const vals = try self.readValueExpr();
+                    if (vals.len != 1) return IonError.InvalidIon;
+                    break :blk vals;
+                },
+                else => blk: {
+                    const arg = try self.readArgSingle(p.ty);
+                    const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                    out[0] = arg;
+                    break :blk out;
+                },
+            };
+        }
+
+        // Variadic/optional parameters use the arg-grouping bitmap (2 bits per such parameter).
+        const bits = try self.readEExpBitmap(1);
+        const grouping: u2 = @intCast(bits & 0b11);
+
+        return switch (grouping) {
+            0b00 => blk: {
+                if (p.card == .one_or_many) return IonError.InvalidIon;
+                break :blk &.{};
+            },
+            0b01 => switch (p.ty) {
+                .tagged => try self.readValueExpr(),
+                else => blk: {
+                    const arg = try self.readArgSingle(p.ty);
+                    const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                    out[0] = arg;
+                    break :blk out;
+                },
+            },
+            0b10 => switch (p.ty) {
+                .tagged => try self.readTaggedArgGroupValueExprs(),
+                else => blk: {
+                    const group = try self.readExpressionGroup(p.ty);
+                    // Cardinality checks.
+                    if (p.card == .zero_or_one and group.len > 1) return IonError.InvalidIon;
+                    if (p.card == .one_or_many and group.len == 0) return IonError.InvalidIon;
+                    break :blk group;
+                },
+            },
+            else => IonError.InvalidIon,
+        };
+    }
+
+    fn readTaggedArgGroupValueExprs(self: *Decoder) IonError![]value.Element {
+        // An argument group for a tagged parameter is a sequence of tagged value expressions.
+        const total_len = try readFlexUInt(self.input, &self.i);
+        if (total_len != 0) {
+            const payload = try self.readBytes(total_len);
+            var sub = Decoder{ .arena = self.arena, .input = payload, .i = 0, .mactab = self.mactab };
+            var out = std.ArrayListUnmanaged(value.Element){};
+            errdefer out.deinit(self.arena.allocator());
+            while (sub.i < sub.input.len) {
+                const vals = try sub.readValueExpr();
+                out.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
+            }
+            if (sub.i != sub.input.len) return IonError.InvalidIon;
+            return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+        }
+
+        // L=0 => delimited group terminated by 0xF0.
+        var out = std.ArrayListUnmanaged(value.Element){};
+        errdefer out.deinit(self.arena.allocator());
+        while (true) {
+            if (self.i >= self.input.len) return IonError.Incomplete;
+            if (self.input[self.i] == 0xF0) {
+                self.i += 1;
+                break;
+            }
+            const vals = try self.readValueExpr();
+            out.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
+        }
+        return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
     }
 
     fn readUserMacroInvocationAt(self: *Decoder, addr: usize) IonError![]value.Element {
