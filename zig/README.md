@@ -216,6 +216,7 @@ Large integer/decimal fixtures can be dominated by BigInt string formatting/pars
 - `zig/src/ion/writer.zig` avoids temp allocations/copies when writing BigInt magnitudes for Ion 1.0 binary ints/decimals/timestamps by writing directly into the output buffers via `writeTwosComplement()`.
 - `zig/src/ion/writer.zig` emits BigInt *ints* as hex text literals (`0x...`) to avoid allocating base-10 strings during roundtrips (and uses a stack buffer for common sizes).
 - `zig/src/ion/text.zig` parses large hex/binary BigInt literals without calling `BigInt.setString()` (imports digits directly as magnitude bytes; uses a stack buffer for moderate literals).
+- `zig/src/ion/text.zig` blob parsing includes a fast path for base64 with no whitespace and correct padding (skips building a filtered buffer in that common case).
 - Note: BigInt *decimal* printing in the text writer still uses base-10 formatting (required by Ion text syntax), and is a remaining hotspot for huge decimal coefficients.
 
 ## Gotchas encountered (and fixes)
