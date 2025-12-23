@@ -503,3 +503,34 @@ test "ion 1.1 binary containers (basic)" {
         try std.testing.expectEqualStrings("hello", items[2].value.string);
     }
 }
+
+test "ion 1.1 binary e-expression 12-bit address (minimal)" {
+    // Minimal coverage for the EExpressionWith12BitAddress encoding (0x40..0x4F).
+    // This uses a synthetic user macro at address 64 that expands to its single argument.
+
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Build a macro table with a single-parameter macro at address 64.
+    const params = try arena.allocator().alloc(ion.macro.Param, 1);
+    params[0] = .{ .ty = .tagged, .card = .one, .name = "vals", .shape = null };
+
+    const body = try arena.allocator().alloc(ion.value.Element, 1);
+    body[0] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%vals") } };
+
+    const macros = try arena.allocator().alloc(ion.macro.Macro, 65);
+    @memset(macros, ion.macro.Macro{ .name = null, .params = &.{}, .body = &.{} });
+    macros[64] = .{ .name = null, .params = params, .body = body };
+
+    const tab = ion.macro.MacroTable{ .macros = macros };
+
+    // Invoke macro address 64 using the 12-bit address encoding:
+    // opcode 0x40 + next byte 0x00 => bias 64, address 64.
+    //
+    // Argument is a single tagged int(1): 0x61 0x01.
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0x40, 0x00, 0x61, 0x01 };
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+}
