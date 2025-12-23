@@ -1699,21 +1699,40 @@ const Parser = struct {
         self.consume(2);
 
         // Ion blob base64 may contain arbitrary whitespace; strip it and pad to a multiple of 4.
-        var filtered = std.ArrayListUnmanaged(u8){};
-        defer filtered.deinit(self.arena.allocator());
+        const decoder = std.base64.standard.Decoder;
+        var saw_ws: bool = false;
+        var non_ws_len: usize = 0;
         for (raw) |c| {
-            if (c == ' ' or c == '\t' or c == '\r' or c == '\n') continue;
-            filtered.append(self.arena.allocator(), c) catch return IonError.OutOfMemory;
+            if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
+                saw_ws = true;
+                continue;
+            }
+            non_ws_len += 1;
         }
-        const rem = filtered.items.len % 4;
+        const rem = non_ws_len % 4;
         if (rem == 1) return IonError.InvalidIon;
-        if (rem == 2) {
-            filtered.appendSlice(self.arena.allocator(), "==") catch return IonError.OutOfMemory;
-        } else if (rem == 3) {
-            filtered.append(self.arena.allocator(), '=') catch return IonError.OutOfMemory;
+
+        if (!saw_ws and rem == 0) {
+            // Fast path: no whitespace and already padded.
+            const out_len = decoder.calcSizeForSlice(raw) catch return IonError.InvalidIon;
+            const out = self.arena.allocator().alloc(u8, out_len) catch return IonError.OutOfMemory;
+            decoder.decode(out, raw) catch return IonError.InvalidIon;
+            return value.Value{ .blob = out };
         }
 
-        const decoder = std.base64.standard.Decoder;
+        var filtered = std.ArrayListUnmanaged(u8){};
+        defer filtered.deinit(self.arena.allocator());
+        filtered.ensureTotalCapacity(self.arena.allocator(), non_ws_len + if (rem == 0) 0 else (4 - rem)) catch return IonError.OutOfMemory;
+        for (raw) |c| {
+            if (c == ' ' or c == '\t' or c == '\r' or c == '\n') continue;
+            filtered.appendAssumeCapacity(c);
+        }
+        if (rem == 2) {
+            filtered.appendSliceAssumeCapacity("==");
+        } else if (rem == 3) {
+            filtered.appendAssumeCapacity('=');
+        }
+
         const out_len = decoder.calcSizeForSlice(filtered.items) catch return IonError.InvalidIon;
         const out = self.arena.allocator().alloc(u8, out_len) catch return IonError.OutOfMemory;
         decoder.decode(out, filtered.items) catch return IonError.InvalidIon;
