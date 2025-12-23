@@ -495,6 +495,189 @@ fn evalMacroInvocation(
         out[0] = out_elem;
         return out;
     }
+    if (std.mem.eql(u8, name, "make_timestamp")) {
+        // (make_timestamp <year> [<month> [<day> [<hour> <minute> [<seconds> [<offset>]]]]])
+        if (args.len < 1 or args.len > 7) return IonError.InvalidIon;
+
+        const getOptSingle = struct {
+            fn run(arena_: *value.Arena, tab_: ?*const ion.macro.MacroTable, env_: *const Env, expr: value.Element) IonError!?value.Element {
+                const vals = try evalExpr(arena_, tab_, env_, expr);
+                if (vals.len == 0) return null;
+                if (vals.len != 1) return IonError.InvalidIon;
+                return vals[0];
+            }
+        }.run;
+
+        const year_elem = (try getOptSingle(arena, tab, env, args[0])) orelse return IonError.InvalidIon;
+        if (year_elem.value != .int) return IonError.InvalidIon;
+        const year_i128: i128 = switch (year_elem.value.int) {
+            .small => |v| v,
+            .big => return IonError.Unsupported,
+        };
+        if (year_i128 < 1 or year_i128 > 9999) return IonError.InvalidIon;
+        const year: i32 = @intCast(year_i128);
+
+        const month_elem: ?value.Element = if (args.len >= 2) try getOptSingle(arena, tab, env, args[1]) else null;
+        const day_elem: ?value.Element = if (args.len >= 3) try getOptSingle(arena, tab, env, args[2]) else null;
+        const hour_elem: ?value.Element = if (args.len >= 4) try getOptSingle(arena, tab, env, args[3]) else null;
+        const minute_elem: ?value.Element = if (args.len >= 5) try getOptSingle(arena, tab, env, args[4]) else null;
+        const seconds_elem: ?value.Element = if (args.len >= 6) try getOptSingle(arena, tab, env, args[5]) else null;
+        const offset_elem: ?value.Element = if (args.len >= 7) try getOptSingle(arena, tab, env, args[6]) else null;
+
+        if (day_elem != null and month_elem == null) return IonError.InvalidIon;
+        if (hour_elem != null and (day_elem == null or month_elem == null)) return IonError.InvalidIon;
+        if (minute_elem != null and hour_elem == null) return IonError.InvalidIon;
+        if (seconds_elem != null and minute_elem == null) return IonError.InvalidIon;
+        if (offset_elem != null and minute_elem == null) return IonError.InvalidIon;
+
+        var ts: value.Timestamp = .{
+            .year = year,
+            .month = null,
+            .day = null,
+            .hour = null,
+            .minute = null,
+            .second = null,
+            .fractional = null,
+            .offset_minutes = null,
+            .precision = .year,
+        };
+
+        if (month_elem) |me| {
+            if (me.value != .int) return IonError.InvalidIon;
+            const m_i128: i128 = switch (me.value.int) {
+                .small => |v| v,
+                .big => return IonError.Unsupported,
+            };
+            if (m_i128 < 1 or m_i128 > 12) return IonError.InvalidIon;
+            ts.month = @intCast(m_i128);
+            ts.precision = .month;
+        }
+
+        if (day_elem) |de| {
+            if (de.value != .int) return IonError.InvalidIon;
+            const d_i128: i128 = switch (de.value.int) {
+                .small => |v| v,
+                .big => return IonError.Unsupported,
+            };
+            if (d_i128 < 1) return IonError.InvalidIon;
+            const max_day: i128 = @intCast(daysInMonth(year, ts.month orelse return IonError.InvalidIon));
+            if (d_i128 > max_day) return IonError.InvalidIon;
+            ts.day = @intCast(d_i128);
+            ts.precision = .day;
+        }
+
+        if (hour_elem) |he| {
+            if (minute_elem == null) return IonError.InvalidIon;
+            if (he.value != .int) return IonError.InvalidIon;
+            const h_i128: i128 = switch (he.value.int) {
+                .small => |v| v,
+                .big => return IonError.Unsupported,
+            };
+            if (h_i128 < 0 or h_i128 >= 24) return IonError.InvalidIon;
+            ts.hour = @intCast(h_i128);
+
+            const mn = minute_elem.?;
+            if (mn.value != .int) return IonError.InvalidIon;
+            const min_i128: i128 = switch (mn.value.int) {
+                .small => |v| v,
+                .big => return IonError.Unsupported,
+            };
+            if (min_i128 < 0 or min_i128 >= 60) return IonError.InvalidIon;
+            ts.minute = @intCast(min_i128);
+            ts.precision = .minute;
+
+            if (seconds_elem) |se| {
+                switch (se.value) {
+                    .int => |ii| {
+                        const s_i128: i128 = switch (ii) {
+                            .small => |v| v,
+                            .big => return IonError.Unsupported,
+                        };
+                        if (s_i128 < 0 or s_i128 >= 60) return IonError.InvalidIon;
+                        ts.second = @intCast(s_i128);
+                        ts.precision = .second;
+                    },
+                    .decimal => |d| {
+                        const coeff_is_zero = switch (d.coefficient) {
+                            .small => |v| v == 0,
+                            .big => |v| v.eqlZero(),
+                        };
+                        if (d.is_negative and !coeff_is_zero) return IonError.InvalidIon;
+
+                        const exp: i32 = d.exponent;
+                        const coeff_u128: u128 = switch (d.coefficient) {
+                            .small => |v| if (v < 0) return IonError.InvalidIon else @intCast(v),
+                            .big => return IonError.Unsupported,
+                        };
+
+                        if (exp >= 0) {
+                            var scaled: u128 = coeff_u128;
+                            var k: u32 = @intCast(exp);
+                            while (k != 0) : (k -= 1) {
+                                scaled = std.math.mul(u128, scaled, 10) catch return IonError.InvalidIon;
+                            }
+                            if (scaled >= 60) return IonError.InvalidIon;
+                            ts.second = @intCast(scaled);
+                            ts.precision = .second;
+                        } else {
+                            const digits: u32 = @intCast(-exp);
+                            var pow10: u128 = 1;
+                            var k: u32 = digits;
+                            while (k != 0) : (k -= 1) {
+                                pow10 = std.math.mul(u128, pow10, 10) catch return IonError.InvalidIon;
+                            }
+                            const sec_u128: u128 = coeff_u128 / pow10;
+                            const frac_u128: u128 = coeff_u128 % pow10;
+                            if (sec_u128 >= 60) return IonError.InvalidIon;
+                            ts.second = @intCast(sec_u128);
+                            ts.precision = .second;
+                            if (frac_u128 != 0) {
+                                const frac_coeff: value.Int = .{ .small = @intCast(frac_u128) };
+                                ts.fractional = .{ .is_negative = false, .coefficient = frac_coeff, .exponent = exp };
+                                ts.precision = .fractional;
+                            } else if (exp < 0 and (coeff_u128 % pow10 == 0) and (coeff_u128 != 0)) {
+                                // Exact integer value but written with fractional digits (e.g. 6.0).
+                            }
+                        }
+                    },
+                    else => return IonError.InvalidIon,
+                }
+            }
+
+            if (offset_elem) |oe| {
+                if (oe.value != .int) return IonError.InvalidIon;
+                const off_i128: i128 = switch (oe.value.int) {
+                    .small => |v| v,
+                    .big => return IonError.Unsupported,
+                };
+                if (off_i128 <= -1440 or off_i128 >= 1440) return IonError.InvalidIon;
+                const off_i16: i16 = @intCast(off_i128);
+                ts.offset_minutes = off_i16;
+
+                if (ts.month != null and ts.day != null) {
+                    const days_before = blk: {
+                        var doy: i32 = 0;
+                        var m: u8 = 1;
+                        while (m < ts.month.?) : (m += 1) {
+                            doy += @intCast(daysInMonth(year, m));
+                        }
+                        doy += (@as(i32, @intCast(ts.day.?)) - 1);
+                        break :blk doy;
+                    };
+                    const local_minutes: i32 = days_before * 1440 + @as(i32, @intCast(ts.hour.?)) * 60 + @as(i32, @intCast(ts.minute.?));
+                    const days_in_year: i32 = if (isLeapYear(year)) 366 else 365;
+                    const total_minutes_in_year: i32 = days_in_year * 1440;
+                    if (year == 1 and off_i16 > 0 and off_i16 > local_minutes) return IonError.InvalidIon;
+                    if (year == 9999 and off_i16 < 0 and local_minutes + @as(i32, @intCast(-off_i16)) >= total_minutes_in_year) return IonError.InvalidIon;
+                }
+            }
+        }
+
+        const out_elem: value.Element = .{ .annotations = &.{}, .value = .{ .timestamp = ts } };
+        const out = arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+        out[0] = out_elem;
+        return out;
+    }
     if (std.mem.eql(u8, name, "repeat")) {
         if (args.len != 2) return IonError.InvalidIon;
         const count_vals = try evalExpr(arena, tab, env, args[0]);
@@ -914,4 +1097,19 @@ pub fn expandUserMacro(
         out.appendSlice(arena.allocator(), vals) catch return IonError.OutOfMemory;
     }
     return out.toOwnedSlice(arena.allocator()) catch return IonError.OutOfMemory;
+}
+
+fn isLeapYear(year: i32) bool {
+    if (@rem(year, 400) == 0) return true;
+    if (@rem(year, 100) == 0) return false;
+    return (@rem(year, 4) == 0);
+}
+
+fn daysInMonth(year: i32, month: u8) u8 {
+    return switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeapYear(year)) 29 else 28,
+        else => 0,
+    };
 }
