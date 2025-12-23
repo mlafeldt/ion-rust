@@ -1062,6 +1062,44 @@ fn evalAbstractValueExpr(
                         one[0] = .{ .annotations = &.{}, .value = .{ .blob = buf } };
                         return one;
                     }
+                    if (std.mem.eql(u8, name, "make_string") or std.mem.eql(u8, name, "make_symbol")) {
+                        // (make_string <text*>)
+                        // (make_symbol <text*>)
+                        var parts = std.ArrayListUnmanaged([]const u8){};
+                        defer parts.deinit(a);
+
+                        for (sx[1..]) |arg| {
+                            const vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, arg);
+                            for (vals) |e| {
+                                switch (e.value) {
+                                    .string => |s| parts.append(a, s) catch return RunError.OutOfMemory,
+                                    .symbol => |s| parts.append(a, s.text orelse return RunError.InvalidConformanceDsl) catch return RunError.OutOfMemory,
+                                    else => return RunError.InvalidConformanceDsl,
+                                }
+                            }
+                        }
+
+                        var total: usize = 0;
+                        for (parts.items) |p| total += p.len;
+                        const buf = a.alloc(u8, total) catch return RunError.OutOfMemory;
+                        var i: usize = 0;
+                        for (parts.items) |p| {
+                            if (p.len != 0) {
+                                @memcpy(buf[i .. i + p.len], p);
+                                i += p.len;
+                            }
+                        }
+
+                        const one = a.alloc(value.Element, 1) catch return RunError.OutOfMemory;
+                        one[0] = .{
+                            .annotations = &.{},
+                            .value = if (std.mem.eql(u8, name, "make_string"))
+                                .{ .string = buf }
+                            else
+                                .{ .symbol = value.makeSymbolId(null, buf) },
+                        };
+                        return one;
+                    }
 
                     // User macro invocation: evaluate arguments to value lists and expand.
                     const tab = mactab orelse return RunError.Unsupported;
