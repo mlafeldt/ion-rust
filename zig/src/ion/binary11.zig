@@ -385,48 +385,14 @@ const Decoder = struct {
     fn readUserMacroInvocationAt(self: *Decoder, addr: usize) IonError![]value.Element {
         const tab = self.mactab orelse return IonError.Unsupported;
         const m = tab.macroForAddress(addr) orelse return IonError.Unsupported;
-        const bindings = try self.readUserMacroArgBindingsConformance(m.params);
+        // For non-length-prefixed e-expressions, Ion 1.1 uses the same signature-driven argument
+        // encoding as the length-prefixed `0xF5` form, except there is no outer length field.
+        //
+        // Conformance binary inputs historically used a 1-byte presence code (0/1/2) per variadic
+        // parameter. This is compatible with the low 2 bits of the spec bitmap for the single
+        // variadic-parameter macros used by the suite, so we can parse both with the same logic.
+        const bindings = try self.readLengthPrefixedArgBindings(m.params);
         return self.expandMacroBodyBindings(m, bindings);
-    }
-
-    fn readUserMacroArgBindingsConformance(self: *Decoder, params: []const ion.macro.Param) IonError![]const ArgBinding {
-        var out = std.ArrayListUnmanaged(ArgBinding){};
-        errdefer out.deinit(self.arena.allocator());
-
-        for (params) |p| {
-            const vals: []value.Element = if (p.card == .one) blk: {
-                const arg = try self.readArgSingle(p.ty);
-                const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
-                one[0] = arg;
-                break :blk one;
-            } else blk: {
-                if (self.i >= self.input.len) return IonError.Incomplete;
-                const presence = self.input[self.i];
-                self.i += 1;
-                switch (presence) {
-                    0 => {
-                        if (p.card == .one_or_many) return IonError.InvalidIon;
-                        break :blk emptyElems();
-                    },
-                    1 => {
-                        const arg = try self.readArgSingle(p.ty);
-                        const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
-                        one[0] = arg;
-                        break :blk one;
-                    },
-                    2 => {
-                        const group = try self.readExpressionGroup(p.ty);
-                        if (p.card == .zero_or_one and group.len > 1) return IonError.InvalidIon;
-                        if (p.card == .one_or_many and group.len == 0) return IonError.InvalidIon;
-                        break :blk group;
-                    },
-                    else => return IonError.InvalidIon,
-                }
-            };
-            out.append(self.arena.allocator(), .{ .name = p.name, .values = vals }) catch return IonError.OutOfMemory;
-        }
-
-        return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
     }
 
     fn readMacroInvocationUnqualified(self: *Decoder) IonError![]value.Element {
