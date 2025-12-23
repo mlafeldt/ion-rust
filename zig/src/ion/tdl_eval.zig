@@ -711,6 +711,28 @@ fn evalMacroInvocation(
         }
         return out;
     }
+    if (std.mem.eql(u8, name, "sum")) {
+        if (args.len != 2) return IonError.InvalidIon;
+        const a_vals = try evalExpr(arena, tab, env, args[0]);
+        const b_vals = try evalExpr(arena, tab, env, args[1]);
+        if (a_vals.len != 1 or b_vals.len != 1) return IonError.InvalidIon;
+        const a = a_vals[0];
+        const b = b_vals[0];
+        if (a.value != .int or b.value != .int) return IonError.InvalidIon;
+        const ai: i128 = switch (a.value.int) {
+            .small => |v| v,
+            .big => return IonError.Unsupported,
+        };
+        const bi: i128 = switch (b.value.int) {
+            .small => |v| v,
+            .big => return IonError.Unsupported,
+        };
+        const s = std.math.add(i128, ai, bi) catch return IonError.InvalidIon;
+        const out_elem = value.Element{ .annotations = &.{}, .value = .{ .int = .{ .small = s } } };
+        const out = arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+        out[0] = out_elem;
+        return out;
+    }
     if (std.mem.eql(u8, name, "delta")) {
         var deltas = std.ArrayListUnmanaged(i128){};
         defer deltas.deinit(arena.allocator());

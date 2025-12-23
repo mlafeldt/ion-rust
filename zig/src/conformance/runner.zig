@@ -1046,6 +1046,19 @@ fn evalAbstractValueExpr(
                         }
                         return out.toOwnedSlice(a) catch return RunError.OutOfMemory;
                     }
+                    if (std.mem.eql(u8, name, "none")) {
+                        // `(:none)` takes no arguments, even if an argument expression would expand to nothing.
+                        if (sx.len != 1) return RunError.InvalidConformanceDsl;
+                        return &.{};
+                    }
+                    if (std.mem.eql(u8, name, "default")) {
+                        // Lazy: return first argument expression that yields any values.
+                        for (sx[1..]) |arg| {
+                            const vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, arg);
+                            if (vals.len != 0) return vals;
+                        }
+                        return &.{};
+                    }
                     if (std.mem.eql(u8, name, "meta")) {
                         // (meta <expr*>)
                         //
@@ -1165,6 +1178,74 @@ fn evalAbstractValueExpr(
                             .value = .{ .decimal = .{ .is_negative = is_negative, .coefficient = magnitude, .exponent = @intCast(exp_i128) } },
                         };
                         return one;
+                    }
+                    if (std.mem.eql(u8, name, "repeat")) {
+                        if (sx.len != 3) return RunError.InvalidConformanceDsl;
+                        const count_vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, sx[1]);
+                        if (count_vals.len != 1) return RunError.InvalidConformanceDsl;
+                        if (count_vals[0].value != .int) return RunError.InvalidConformanceDsl;
+                        const count_i128: i128 = switch (count_vals[0].value.int) {
+                            .small => |v| v,
+                            .big => return RunError.Unsupported,
+                        };
+                        if (count_i128 < 0) return RunError.InvalidConformanceDsl;
+                        const count: usize = @intCast(count_i128);
+
+                        const vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, sx[2]);
+                        if (count == 0 or vals.len == 0) return &.{};
+
+                        const total: usize = std.math.mul(usize, count, vals.len) catch return RunError.OutOfMemory;
+                        const out = a.alloc(value.Element, total) catch return RunError.OutOfMemory;
+                        var idx: usize = 0;
+                        var k: usize = 0;
+                        while (k < count) : (k += 1) {
+                            @memcpy(out[idx .. idx + vals.len], vals);
+                            idx += vals.len;
+                        }
+                        return out;
+                    }
+                    if (std.mem.eql(u8, name, "sum")) {
+                        if (sx.len != 3) return RunError.InvalidConformanceDsl;
+                        const a_vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, sx[1]);
+                        const b_vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, sx[2]);
+                        if (a_vals.len != 1 or b_vals.len != 1) return RunError.InvalidConformanceDsl;
+                        if (a_vals[0].value != .int or b_vals[0].value != .int) return RunError.InvalidConformanceDsl;
+                        const ai: i128 = switch (a_vals[0].value.int) {
+                            .small => |v| v,
+                            .big => return RunError.Unsupported,
+                        };
+                        const bi: i128 = switch (b_vals[0].value.int) {
+                            .small => |v| v,
+                            .big => return RunError.Unsupported,
+                        };
+                        const s = std.math.add(i128, ai, bi) catch return RunError.InvalidConformanceDsl;
+                        const one = a.alloc(value.Element, 1) catch return RunError.OutOfMemory;
+                        one[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = s } } };
+                        return one;
+                    }
+                    if (std.mem.eql(u8, name, "delta")) {
+                        var deltas = std.ArrayListUnmanaged(i128){};
+                        defer deltas.deinit(a);
+                        for (sx[1..]) |arg| {
+                            const vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, arg);
+                            for (vals) |e| {
+                                if (e.value != .int) return RunError.InvalidConformanceDsl;
+                                const v: i128 = switch (e.value.int) {
+                                    .small => |vv| vv,
+                                    .big => return RunError.Unsupported,
+                                };
+                                deltas.append(a, v) catch return RunError.OutOfMemory;
+                            }
+                        }
+                        if (deltas.items.len == 0) return &.{};
+
+                        const out = a.alloc(value.Element, deltas.items.len) catch return RunError.OutOfMemory;
+                        var acc: i128 = 0;
+                        for (deltas.items, 0..) |d, i| {
+                            if (i == 0) acc = d else acc = std.math.add(i128, acc, d) catch return RunError.InvalidConformanceDsl;
+                            out[i] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = acc } } };
+                        }
+                        return out;
                     }
                     if (std.mem.eql(u8, name, "make_timestamp")) {
                         // (make_timestamp <year> [<month> [<day> [<hour> <minute> [<seconds> [<offset>]]]]])
