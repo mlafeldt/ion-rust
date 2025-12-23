@@ -1985,7 +1985,9 @@ const Parser = struct {
             }
 
             const bi = try self.arena.makeBigInt();
-            bi.setString(16, digits) catch return IonError.InvalidIon;
+            // Performance: avoid `BigInt.setString()` for large hex literals.
+            // Hex/binary literals appear frequently in the corpus; `setString()` is allocation-heavy.
+            try self.setBigIntFromUnsignedHexDigitsFast(bi, digits);
             if (neg) bi.negate();
             return value.Value{ .int = .{ .big = bi } };
         }
@@ -2021,7 +2023,8 @@ const Parser = struct {
             }
 
             const bi = try self.arena.makeBigInt();
-            bi.setString(2, digits) catch return IonError.InvalidIon;
+            // Performance: avoid `BigInt.setString()` for large binary literals.
+            try self.setBigIntFromUnsignedBinaryDigitsFast(bi, digits);
             if (neg) bi.negate();
             return value.Value{ .int = .{ .big = bi } };
         }
@@ -2162,6 +2165,101 @@ const Parser = struct {
         try value.setBigIntFromUnsignedDecimalDigitsFast(bi, digits2);
         if (neg2) bi.negate();
         return value.Value{ .int = .{ .big = bi } };
+    }
+
+    fn hexNibble(c: u8) ?u8 {
+        return switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'f' => 10 + (c - 'a'),
+            'A'...'F' => 10 + (c - 'A'),
+            else => null,
+        };
+    }
+
+    fn setBigIntFromMagnitudeBytes(bi: *std.math.big.int.Managed, magnitude_be: []const u8) IonError!void {
+        // Import big-endian unsigned magnitude bytes without string conversion.
+        var start: usize = 0;
+        while (start < magnitude_be.len and magnitude_be[start] == 0) : (start += 1) {}
+        if (start == magnitude_be.len) {
+            bi.set(0) catch return IonError.OutOfMemory;
+            return;
+        }
+        const trimmed = magnitude_be[start..];
+        const msb: u8 = trimmed[0];
+        const msb_bits: usize = 8 - @clz(msb);
+        const bit_count: usize = (trimmed.len - 1) * 8 + msb_bits;
+
+        const limb_bits: usize = @bitSizeOf(std.math.big.Limb);
+        const needed_limbs: usize = (bit_count + limb_bits - 1) / limb_bits;
+        bi.ensureCapacity(needed_limbs) catch return IonError.OutOfMemory;
+        var m = bi.toMutable();
+        m.readTwosComplement(trimmed, bit_count, .big, .unsigned);
+        bi.setMetadata(true, m.len);
+    }
+
+    fn setBigIntFromUnsignedHexDigitsFast(self: *Parser, bi: *std.math.big.int.Managed, digits: []const u8) IonError!void {
+        // digits: hex digits only, no underscores.
+        var start: usize = 0;
+        while (start < digits.len and digits[start] == '0') : (start += 1) {}
+        if (start == digits.len) {
+            bi.set(0) catch return IonError.OutOfMemory;
+            return;
+        }
+        const d = digits[start..];
+
+        const byte_len: usize = (d.len + 1) / 2;
+        const tmp = self.arena.gpa.alloc(u8, byte_len) catch return IonError.OutOfMemory;
+        defer self.arena.gpa.free(tmp);
+        @memset(tmp, 0);
+
+        var di: usize = 0;
+        var bi_idx: usize = 0;
+        if ((d.len & 1) == 1) {
+            const nib = hexNibble(d[0]) orelse return IonError.InvalidIon;
+            tmp[0] = nib;
+            di = 1;
+            bi_idx = 1;
+        }
+        while (di + 1 < d.len) : ({
+            di += 2;
+            bi_idx += 1;
+        }) {
+            const hi = hexNibble(d[di]) orelse return IonError.InvalidIon;
+            const lo = hexNibble(d[di + 1]) orelse return IonError.InvalidIon;
+            tmp[bi_idx] = (hi << 4) | lo;
+        }
+
+        try setBigIntFromMagnitudeBytes(bi, tmp);
+    }
+
+    fn setBigIntFromUnsignedBinaryDigitsFast(self: *Parser, bi: *std.math.big.int.Managed, digits: []const u8) IonError!void {
+        // digits: '0'/'1' only, no underscores.
+        var start: usize = 0;
+        while (start < digits.len and digits[start] == '0') : (start += 1) {}
+        if (start == digits.len) {
+            bi.set(0) catch return IonError.OutOfMemory;
+            return;
+        }
+        const d = digits[start..];
+        const bit_count: usize = d.len;
+        const byte_len: usize = (bit_count + 7) / 8;
+
+        const tmp = self.arena.gpa.alloc(u8, byte_len) catch return IonError.OutOfMemory;
+        defer self.arena.gpa.free(tmp);
+        @memset(tmp, 0);
+
+        // Right-align bits into big-endian bytes.
+        for (d, 0..) |c, i| {
+            if (c == '0') continue;
+            if (c != '1') return IonError.InvalidIon;
+            const pos_from_lsb: usize = bit_count - 1 - i;
+            const byte_from_end: usize = pos_from_lsb / 8;
+            const bit_in_byte: u3 = @intCast(pos_from_lsb % 8);
+            const out_idx: usize = (byte_len - 1) - byte_from_end;
+            tmp[out_idx] |= @as(u8, 1) << bit_in_byte;
+        }
+
+        try setBigIntFromMagnitudeBytes(bi, tmp);
     }
 
     fn parseTimestamp(self: *Parser) IonError!value.Timestamp {
