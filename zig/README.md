@@ -212,6 +212,7 @@ Minor gaps (not exhaustive):
 Large integer/decimal fixtures can be dominated by BigInt string formatting/parsing.
 
 - `zig/src/ion/binary.zig` uses `std.math.big.int.Mutable.readTwosComplement(..., .unsigned)` to build magnitudes directly from bytes (no hex string conversions).
+- `zig/src/ion/binary.zig` avoids `BigInt.toString()` when validating timestamp fractional seconds digit-width (compares coefficient magnitude against `10^scale` using BigInt arithmetic).
 - `zig/src/ion/writer.zig` writes BigInt magnitudes directly to big-endian bytes via `writeTwosComplement()` (no toString()/parse round-trips) for Ion binary encodings. (The text writer still uses `toString()` for printing big ints/decimals.)
 
 ## Gotchas encountered (and fixes)

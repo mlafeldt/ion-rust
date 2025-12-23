@@ -16,6 +16,29 @@ const symtab = @import("symtab.zig");
 
 const IonError = ion.IonError;
 
+fn bigIntAbsLtPow10(allocator: std.mem.Allocator, mag: std.math.big.int.Const, scale: usize) IonError!bool {
+    // Performance: avoid `BigInt.toString()` just to count decimal digits.
+    //
+    // For the timestamp fractional seconds field we need to validate that the coefficient is a proper
+    // fraction: coefficient < 10^(-exponent). Instead of formatting the coefficient in base-10 to
+    // count digits, compare against a BigInt threshold.
+    if (scale == 0) {
+        // 10^0 == 1; for digits checks, `mag < 1` means `mag == 0`.
+        return mag.eqlZero();
+    }
+    // `pow()` takes a u32 exponent. If the scale doesn't fit, the threshold is astronomically large;
+    // any finite `mag` will be < 10^scale, so the "too many digits" check cannot fail.
+    if (scale > std.math.maxInt(u32)) return true;
+
+    var ten = std.math.big.int.Managed.initSet(allocator, 10) catch return IonError.OutOfMemory;
+    defer ten.deinit();
+    var pow10 = std.math.big.int.Managed.init(allocator) catch return IonError.OutOfMemory;
+    defer pow10.deinit();
+    pow10.pow(&ten, @intCast(scale)) catch return IonError.OutOfMemory;
+
+    return std.math.big.int.Const.orderAbs(mag, pow10.toConst()) == .lt;
+}
+
 const SharedSymtab = struct {
     name: []const u8,
     version: u32,
@@ -331,22 +354,20 @@ const Decoder = struct {
         if (!mag_is_zero and exp_i32 >= 0) return IonError.InvalidIon;
         if (!mag_is_zero and exp_i32 < 0) {
             const scale: usize = @intCast(-exp_i32);
-            const digits: usize = switch (mag) {
+            const ok = switch (mag) {
                 .small => |v| blk: {
                     var digits_n: usize = 0;
                     var tmp: u128 = @intCast(v);
                     while (tmp != 0) : (tmp /= 10) digits_n += 1;
-                    break :blk digits_n;
+                    break :blk digits_n <= scale;
                 },
                 .big => |v| blk: {
                     var abs_mag = v.*;
                     abs_mag.abs();
-                    const s = abs_mag.toString(self.arena.gpa, 10, .lower) catch return IonError.OutOfMemory;
-                    defer self.arena.gpa.free(s);
-                    break :blk s.len;
+                    break :blk try bigIntAbsLtPow10(self.arena.gpa, abs_mag.toConst(), scale);
                 },
             };
-            if (digits > scale) return IonError.InvalidIon;
+            if (!ok) return IonError.InvalidIon;
         }
         // 0d0 is equivalent to having no fractional seconds field.
         if (mag_is_zero and exp_i32 == 0) {
