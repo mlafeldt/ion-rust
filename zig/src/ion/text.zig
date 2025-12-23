@@ -2288,16 +2288,25 @@ const Parser = struct {
         }
         @memset(tmp, 0);
 
-        // Right-align bits into big-endian bytes.
-        for (d, 0..) |c, i| {
-            if (c == '0') continue;
-            if (c != '1') return IonError.InvalidIon;
-            const pos_from_lsb: usize = bit_count - 1 - i;
-            const byte_from_end: usize = pos_from_lsb / 8;
-            const bit_in_byte: u3 = @intCast(pos_from_lsb % 8);
-            const out_idx: usize = (byte_len - 1) - byte_from_end;
-            tmp[out_idx] |= @as(u8, 1) << bit_in_byte;
+        // Pack bits into big-endian bytes without per-bit indexing.
+        const first_bits: u4 = @intCast(bit_count % 8);
+        const first_width: u4 = if (first_bits == 0) 8 else first_bits;
+        var out_i: usize = 0;
+        var cur: u8 = 0;
+        var filled: u4 = 0;
+        for (d) |c| {
+            if (c != '0' and c != '1') return IonError.InvalidIon;
+            cur = (cur << 1) | @as(u8, @intFromBool(c == '1'));
+            filled += 1;
+            const want: u4 = if (out_i == 0) first_width else 8;
+            if (filled == want) {
+                tmp[out_i] = cur;
+                out_i += 1;
+                cur = 0;
+                filled = 0;
+            }
         }
+        if (out_i != byte_len or filled != 0) return IonError.InvalidIon;
 
         try setBigIntFromMagnitudeBytes(bi, tmp);
     }
