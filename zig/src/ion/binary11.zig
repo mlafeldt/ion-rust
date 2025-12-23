@@ -1990,12 +1990,12 @@ const Decoder = struct {
             .tagged => try self.readValue(),
             .macro_shape => return IonError.Unsupported,
             .flex_uint => blk: {
-                const n = try readFlexUInt(self.input, &self.i);
-                break :blk .{ .int = .{ .small = @intCast(n) } };
+                const n = try readFlexUIntAsInt(self.arena, self.input, &self.i);
+                break :blk .{ .int = n };
             },
             .flex_int => blk: {
-                const n = try readFlexInt(self.input, &self.i);
-                break :blk .{ .int = .{ .small = @intCast(n) } };
+                const n = try readFlexIntAsInt(self.arena, self.input, &self.i);
+                break :blk .{ .int = n };
             },
             .flex_sym => blk: {
                 const sym = try readFlexSymSymbol(self.arena, self.input, &self.i);
@@ -2921,12 +2921,12 @@ fn readTaglessFrom(arena: *value.Arena, payload: []const u8, cursor: *usize, ty:
                 i += 2;
                 break :blk .{ .int = .{ .small = 2 } };
             }
-            const n = try readFlexUInt(payload, &i);
-            break :blk .{ .int = .{ .small = @intCast(n) } };
+            const n = try readFlexUIntAsInt(arena, payload, &i);
+            break :blk .{ .int = n };
         },
         .flex_int => blk: {
-            const n = try readFlexInt(payload, &i);
-            break :blk .{ .int = .{ .small = @intCast(n) } };
+            const n = try readFlexIntAsInt(arena, payload, &i);
+            break :blk .{ .int = n };
         },
         .flex_sym => blk: {
             const sym = try readFlexSymSymbol(arena, payload, &i);
@@ -3117,6 +3117,52 @@ fn readFlexInt(input: []const u8, cursor: *usize) IonError!i32 {
     const v64: i64 = @bitCast(low64);
     if (v64 < std.math.minInt(i32) or v64 > std.math.maxInt(i32)) return IonError.Unsupported;
     return @intCast(v64);
+}
+
+fn readFlexUIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!value.Int {
+    const shift = detectFlexShift(input, cursor) orelse return IonError.Unsupported;
+    if (shift == 0) return IonError.InvalidIon;
+    if (cursor.* + shift > input.len) return IonError.Incomplete;
+    const raw = input[cursor.* .. cursor.* + shift];
+    cursor.* += shift;
+
+    const src = try arena.makeBigInt();
+    const bit_count: usize = shift * 8;
+    const limb_bits: usize = @bitSizeOf(std.math.big.Limb);
+    const needed_limbs: usize = if (bit_count == 0) 1 else (bit_count + limb_bits - 1) / limb_bits;
+    src.ensureCapacity(needed_limbs) catch return IonError.OutOfMemory;
+    var m = src.toMutable();
+    m.readTwosComplement(raw, bit_count, .little, .unsigned);
+    src.setMetadata(true, m.len);
+
+    const shifted = try arena.makeBigInt();
+    shifted.shiftRight(src, shift) catch return IonError.OutOfMemory;
+
+    const as_i128 = shifted.toConst().toInt(i128) catch return .{ .big = shifted };
+    return .{ .small = as_i128 };
+}
+
+fn readFlexIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!value.Int {
+    const shift = detectFlexShift(input, cursor) orelse return IonError.Unsupported;
+    if (shift == 0) return IonError.InvalidIon;
+    if (cursor.* + shift > input.len) return IonError.Incomplete;
+    const raw = input[cursor.* .. cursor.* + shift];
+    cursor.* += shift;
+
+    const src = try arena.makeBigInt();
+    const bit_count: usize = shift * 8;
+    const limb_bits: usize = @bitSizeOf(std.math.big.Limb);
+    const needed_limbs: usize = if (bit_count == 0) 1 else (bit_count + limb_bits - 1) / limb_bits;
+    src.ensureCapacity(needed_limbs) catch return IonError.OutOfMemory;
+    var m = src.toMutable();
+    m.readTwosComplement(raw, bit_count, .little, .signed);
+    src.setMetadata(m.positive, m.len);
+
+    const shifted = try arena.makeBigInt();
+    shifted.shiftRight(src, shift) catch return IonError.OutOfMemory;
+
+    const as_i128 = shifted.toConst().toInt(i128) catch return .{ .big = shifted };
+    return .{ .small = as_i128 };
 }
 
 fn readTwosComplementIntLE(arena: *value.Arena, bytes: []const u8) IonError!value.Int {

@@ -689,6 +689,42 @@ test "ion 1.1 binary e-expression FlexSym inline symbols (tagless group)" {
     try std.testing.expectEqualStrings("yo", elems[1].value.symbol.text.?);
 }
 
+test "ion 1.1 binary e-expression FlexUInt big value" {
+    // Exercises FlexUInt values that exceed `usize` and `i128`, which can appear in macro arg
+    // positions for `.flex_uint` parameters.
+
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Macro at address 64: (flex_uint::n) => (%n)
+    const params = try arena.allocator().alloc(ion.macro.Param, 1);
+    params[0] = .{ .ty = .flex_uint, .card = .one, .name = "n", .shape = null };
+
+    const body = try arena.allocator().alloc(ion.value.Element, 1);
+    body[0] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%n") } };
+
+    const macros = try arena.allocator().alloc(ion.macro.Macro, 65);
+    @memset(macros, ion.macro.Macro{ .name = null, .params = &.{}, .body = &.{} });
+    macros[64] = .{ .name = null, .params = params, .body = body };
+
+    const tab = ion.macro.MacroTable{ .macros = macros };
+
+    // Encode a FlexUInt with shift=19 such that (raw >> 19) == 2^128.
+    // raw has bits at 18 (tag bit) and 147 (value bit).
+    const flex = &[_]u8{
+        0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08,
+    };
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0x40, 0x00 } ++ flex;
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expect(elems[0].value.int == .big);
+    const bi = elems[0].value.int.big;
+    try std.testing.expect(bi.toConst().positive);
+    try std.testing.expectEqual(@as(usize, 129), bi.toConst().bitCountAbs());
+}
+
 test "ion 1.1 binary e-expression length-prefixed (0xF5, minimal)" {
     // Minimal coverage for the length-prefixed e-expression opcode (0xF5).
     // This uses a synthetic user macro at address 64 that expands to its argument group.
