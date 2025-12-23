@@ -212,10 +212,11 @@ Minor gaps (not exhaustive):
 Large integer/decimal fixtures can be dominated by BigInt string formatting/parsing.
 
 - `zig/src/ion/binary.zig` uses `std.math.big.int.Mutable.readTwosComplement(..., .unsigned)` to build magnitudes directly from bytes (no hex string conversions).
-- `zig/src/ion/binary.zig` avoids `BigInt.toString()` when validating timestamp fractional seconds digit-width (compares coefficient magnitude against `10^scale` using BigInt arithmetic).
-- `zig/src/ion/writer.zig` writes BigInt magnitudes directly to big-endian bytes via `writeTwosComplement()` (no toString()/parse round-trips) for Ion binary encodings. (The text writer still uses `toString()` for printing big ints/decimals.)
-- `zig/src/ion/writer.zig` emits BigInt *ints* as hex text literals (`0x...`) to avoid allocating base-10 strings during roundtrips.
-- `zig/src/ion/text.zig` parses large hex/binary BigInt literals without calling `BigInt.setString()` (imports digits directly as magnitude bytes).
+- `zig/src/ion/binary.zig` avoids `BigInt.toString()` when validating timestamp fractional seconds digit-width; for small scales it compares against a `u128` `10^scale` threshold and falls back to BigInt arithmetic for larger scales.
+- `zig/src/ion/writer.zig` avoids temp allocations/copies when writing BigInt magnitudes for Ion 1.0 binary ints/decimals/timestamps by writing directly into the output buffers via `writeTwosComplement()`.
+- `zig/src/ion/writer.zig` emits BigInt *ints* as hex text literals (`0x...`) to avoid allocating base-10 strings during roundtrips (and uses a stack buffer for common sizes).
+- `zig/src/ion/text.zig` parses large hex/binary BigInt literals without calling `BigInt.setString()` (imports digits directly as magnitude bytes; uses a stack buffer for moderate literals).
+- Note: BigInt *decimal* printing in the text writer still uses base-10 formatting (required by Ion text syntax), and is a remaining hotspot for huge decimal coefficients.
 
 ## Gotchas encountered (and fixes)
 
