@@ -725,6 +725,36 @@ test "ion 1.1 binary e-expression FlexUInt big value" {
     try std.testing.expectEqual(@as(usize, 129), bi.toConst().bitCountAbs());
 }
 
+test "ion 1.1 binary e-expression bitmap with 2 variadic params" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Macro at address 64: (tagged::a* tagged::b*) => (%a %b)
+    const params = try arena.allocator().alloc(ion.macro.Param, 2);
+    params[0] = .{ .ty = .tagged, .card = .zero_or_many, .name = "a", .shape = null };
+    params[1] = .{ .ty = .tagged, .card = .zero_or_many, .name = "b", .shape = null };
+
+    const body = try arena.allocator().alloc(ion.value.Element, 2);
+    body[0] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%a") } };
+    body[1] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%b") } };
+
+    const macros = try arena.allocator().alloc(ion.macro.Macro, 65);
+    @memset(macros, ion.macro.Macro{ .name = null, .params = &.{}, .body = &.{} });
+    macros[64] = .{ .name = null, .params = params, .body = body };
+
+    const tab = ion.macro.MacroTable{ .macros = macros };
+
+    // F5 <addr=64> <args_len=8> <bitmap=0x09> <int(1)> <group len=4> <int(2)> <int(3)>
+    // FlexUInt(64)=0x81, FlexUInt(8)=0x11, group len FlexUInt(4)=0x09.
+    // bitmap groups: a=0b01 (single), b=0b10 (arg group) => 0b1001.
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xF5, 0x81, 0x11, 0x09, 0x61, 0x01, 0x09, 0x61, 0x02, 0x61, 0x03 };
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab);
+    try std.testing.expectEqual(@as(usize, 3), elems.len);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+    try std.testing.expectEqual(@as(i128, 2), elems[1].value.int.small);
+    try std.testing.expectEqual(@as(i128, 3), elems[2].value.int.small);
+}
+
 test "ion 1.1 binary e-expression length-prefixed (0xF5, minimal)" {
     // Minimal coverage for the length-prefixed e-expression opcode (0xF5).
     // This uses a synthetic user macro at address 64 that expands to its argument group.

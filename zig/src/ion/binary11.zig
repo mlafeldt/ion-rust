@@ -276,6 +276,14 @@ const Decoder = struct {
         return std.mem.readInt(u64, &buf, .little);
     }
 
+    fn readEExpBitmapBytes(self: *Decoder, bitmap_size_in_bytes: usize) IonError![]const u8 {
+        if (bitmap_size_in_bytes == 0) return &.{};
+        if (self.i + bitmap_size_in_bytes > self.input.len) return IonError.Incomplete;
+        const bytes = self.input[self.i .. self.i + bitmap_size_in_bytes];
+        self.i += bitmap_size_in_bytes;
+        return bytes;
+    }
+
     fn readLengthPrefixedSystemValuesArgs(self: *Decoder) IonError![]value.Element {
         // Signature: (values <expr*>)
         const p: ion.macro.Param = .{ .ty = .tagged, .card = .zero_or_many, .name = "vals", .shape = null };
@@ -749,16 +757,35 @@ const Decoder = struct {
         return ((variadic * bits_per_param) + 7) / bits_per_byte;
     }
 
-    fn nextBitmapGrouping(bits: *u64) IonError!u2 {
-        const g: u2 = @intCast(bits.* & 0b11);
-        bits.* >>= 2;
-        if (g == 0b11) return IonError.InvalidIon;
-        return g;
+    const BitmapCursor = struct {
+        bytes: []const u8,
+        bit: usize = 0,
+
+        fn next2(self: *BitmapCursor) IonError!u2 {
+            const byte_idx = self.bit / 8;
+            if (byte_idx >= self.bytes.len) return IonError.InvalidIon;
+            const bit_in_byte: u3 = @intCast(self.bit % 8);
+
+            // Bitmap is little-endian: param 0 lives in the low bits of byte 0.
+            const lo: u8 = self.bytes[byte_idx] >> bit_in_byte;
+            const hi: u8 = if (bit_in_byte <= 6 or byte_idx + 1 >= self.bytes.len) 0 else blk: {
+                // This branch only runs for `bit_in_byte == 7`, so the shift amount is always 1.
+                break :blk self.bytes[byte_idx + 1] << 1;
+            };
+            const g: u2 = @intCast((lo | hi) & 0b11);
+            self.bit += 2;
+            if (g == 0b11) return IonError.InvalidIon;
+            return g;
+        }
+    };
+
+    fn nextBitmapGrouping(bits: *BitmapCursor) IonError!u2 {
+        return bits.next2();
     }
 
     fn readLengthPrefixedArgBindings(self: *Decoder, params: []const ion.macro.Param) IonError![]const ArgBinding {
         const bitmap_len = bitmapSizeInBytesForParams(params);
-        var bitmap_bits = try self.readEExpBitmap(bitmap_len);
+        var bitmap_bits = BitmapCursor{ .bytes = try self.readEExpBitmapBytes(bitmap_len) };
 
         var out = std.ArrayListUnmanaged(ArgBinding){};
         errdefer out.deinit(self.arena.allocator());
