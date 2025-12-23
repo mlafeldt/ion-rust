@@ -562,6 +562,70 @@ test "ion 1.1 binary e-expression 12-bit address (minimal)" {
     try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
 }
 
+test "ion 1.1 binary e-expression FlexSym inline symbol (single)" {
+    // Exercise `.flex_sym` decoding for non-tagged macro parameters, including the inline-text
+    // (negative) FlexSym form.
+
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Macro at address 64: (flex_sym::sym) => (%sym)
+    const params = try arena.allocator().alloc(ion.macro.Param, 1);
+    params[0] = .{ .ty = .flex_sym, .card = .one, .name = "sym", .shape = null };
+
+    const body = try arena.allocator().alloc(ion.value.Element, 1);
+    body[0] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%sym") } };
+
+    const macros = try arena.allocator().alloc(ion.macro.Macro, 65);
+    @memset(macros, ion.macro.Macro{ .name = null, .params = &.{}, .body = &.{} });
+    macros[64] = .{ .name = null, .params = params, .body = body };
+
+    const tab = ion.macro.MacroTable{ .macros = macros };
+
+    // Invoke macro address 64 using the 12-bit address encoding (0x40..0x4F) with one FlexSym arg:
+    //   FlexInt(-2) => 0xFD, followed by 2 bytes of UTF-8 symbol text.
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0x40, 0x00, 0xFD, 'h', 'i' };
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .symbol);
+    try std.testing.expectEqualStrings("hi", elems[0].value.symbol.text.?);
+}
+
+test "ion 1.1 binary e-expression FlexSym inline symbols (tagless group)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Macro at address 64: (flex_sym::vals*) => (%vals)
+    const params = try arena.allocator().alloc(ion.macro.Param, 1);
+    params[0] = .{ .ty = .flex_sym, .card = .zero_or_many, .name = "vals", .shape = null };
+
+    const body = try arena.allocator().alloc(ion.value.Element, 1);
+    body[0] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%vals") } };
+
+    const macros = try arena.allocator().alloc(ion.macro.Macro, 65);
+    @memset(macros, ion.macro.Macro{ .name = null, .params = &.{}, .body = &.{} });
+    macros[64] = .{ .name = null, .params = params, .body = body };
+
+    const tab = ion.macro.MacroTable{ .macros = macros };
+
+    // Bitmap low 2 bits = 0b10 (ArgGroup) for the single variadic parameter.
+    // Expression group payload is 6 bytes: "hi" then "yo" as inline FlexSyms.
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA,
+        0x40, 0x00,
+        0x02, // bitmap
+        0x0D, // FlexUInt(6)
+        0xFD, 'h', 'i',
+        0xFD, 'y', 'o',
+    };
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab);
+    try std.testing.expectEqual(@as(usize, 2), elems.len);
+    try std.testing.expect(elems[0].value == .symbol);
+    try std.testing.expect(elems[1].value == .symbol);
+    try std.testing.expectEqualStrings("hi", elems[0].value.symbol.text.?);
+    try std.testing.expectEqualStrings("yo", elems[1].value.symbol.text.?);
+}
+
 test "ion 1.1 binary e-expression length-prefixed (0xF5, minimal)" {
     // Minimal coverage for the length-prefixed e-expression opcode (0xF5).
     // This uses a synthetic user macro at address 64 that expands to its argument group.

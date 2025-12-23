@@ -911,7 +911,7 @@ const Decoder = struct {
                 .macro_shape => return IonError.Unsupported,
                 else => blk: {
                     var cursor = self.i;
-                    const v = try readTaglessFrom(self.input, &cursor, p.ty);
+                    const v = try readTaglessFrom(self.arena, self.input, &cursor, p.ty);
                     self.i = cursor;
                     break :blk .{ .annotations = &.{}, .value = v };
                 },
@@ -1998,8 +1998,8 @@ const Decoder = struct {
                 break :blk .{ .int = .{ .small = @intCast(n) } };
             },
             .flex_sym => blk: {
-                const sid = try readFlexUInt(self.input, &self.i);
-                break :blk .{ .symbol = value.makeSymbolId(@intCast(sid), null) };
+                const sym = try readFlexSymSymbol(self.arena, self.input, &self.i);
+                break :blk .{ .symbol = sym };
             },
             .uint8 => blk: {
                 const b = try self.readBytes(1);
@@ -2085,7 +2085,7 @@ const Decoder = struct {
         }
 
         while (cursor < payload.len) {
-            const v = readTaglessFrom(payload, &cursor, ty) catch |e| switch (e) {
+            const v = readTaglessFrom(self.arena, payload, &cursor, ty) catch |e| switch (e) {
                 // The expression group length prefix promised that the full payload is present. Any
                 // attempt to read beyond the payload is a structural error, not an EOF of the
                 // enclosing stream.
@@ -2124,7 +2124,7 @@ const Decoder = struct {
             const chunk = try self.readBytes(chunk_len);
             var cursor: usize = 0;
             while (cursor < chunk.len) {
-                const v = readTaglessFrom(chunk, &cursor, ty) catch |e| switch (e) {
+                const v = readTaglessFrom(self.arena, chunk, &cursor, ty) catch |e| switch (e) {
                     // If a tagless value is split across chunk boundaries, the encoding is invalid.
                     IonError.Incomplete => return IonError.InvalidIon,
                     else => return e,
@@ -2907,7 +2907,7 @@ fn daysInMonth(year: i32, month: u8) u8 {
     };
 }
 
-fn readTaglessFrom(payload: []const u8, cursor: *usize, ty: ion.macro.ParamType) IonError!value.Value {
+fn readTaglessFrom(arena: *value.Arena, payload: []const u8, cursor: *usize, ty: ion.macro.ParamType) IonError!value.Value {
     var i = cursor.*;
     defer cursor.* = i;
 
@@ -2931,8 +2931,8 @@ fn readTaglessFrom(payload: []const u8, cursor: *usize, ty: ion.macro.ParamType)
             break :blk .{ .int = .{ .small = @intCast(n) } };
         },
         .flex_sym => blk: {
-            const sid = try readFlexUInt(payload, &i);
-            break :blk .{ .symbol = value.makeSymbolId(@intCast(sid), null) };
+            const sym = try readFlexSymSymbol(arena, payload, &i);
+            break :blk .{ .symbol = sym };
         },
         .uint8 => blk: {
             if (i + 1 > payload.len) return IonError.Incomplete;
