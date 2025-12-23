@@ -80,8 +80,39 @@ const Decoder = struct {
 
         // E-expressions.
         if (op0 == 0xEF) return self.readSystemMacroInvocationQualified();
-        if (op0 < 0x60) return self.readMacroInvocationUnqualified();
-        if (op0 == 0xF5) return IonError.Unsupported; // e-expression with length prefix (not yet implemented)
+
+        // E-expression with 6-bit address: opcode byte is the address.
+        if (op0 <= 0x3F) {
+            self.i += 1;
+            return self.readMacroInvocationAtAddress(@intCast(op0));
+        }
+
+        // E-expression with 12-bit address: bias by opcode low nibble.
+        if (op0 >= 0x40 and op0 <= 0x4F) {
+            if (self.i + 2 > self.input.len) return IonError.Incomplete;
+            const opcode = self.input[self.i];
+            const fixed = self.input[self.i + 1];
+            const bias: usize = (@as(usize, opcode & 0x0F) << 8) + 64;
+            const addr: usize = @as(usize, fixed) + bias;
+            self.i += 2;
+            return self.readMacroInvocationAtAddress(addr);
+        }
+
+        // E-expression with 20-bit address: bias by opcode low nibble.
+        if (op0 >= 0x50 and op0 <= 0x5F) {
+            if (self.i + 3 > self.input.len) return IonError.Incomplete;
+            const opcode = self.input[self.i];
+            const lo = self.input[self.i + 1];
+            const hi = self.input[self.i + 2];
+            const bias: usize = (@as(usize, opcode & 0x0F) << 16) + 4160;
+            const fixed_u16: usize = @as(usize, lo) | (@as(usize, hi) << 8);
+            const addr: usize = fixed_u16 + bias;
+            self.i += 3;
+            return self.readMacroInvocationAtAddress(addr);
+        }
+
+        // E-expression with length prefix (opcode 0xF5) is not implemented yet.
+        if (op0 == 0xF5) return IonError.Unsupported;
 
         const v = try self.readValue();
         const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
@@ -175,25 +206,18 @@ const Decoder = struct {
         return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
     }
 
-    fn readMacroInvocationUnqualified(self: *Decoder) IonError![]value.Element {
-        if (self.i >= self.input.len) return IonError.Incomplete;
-        const addr: usize = self.input[self.i];
-
+    fn readMacroInvocationAtAddress(self: *Decoder, addr: usize) IonError![]value.Element {
         // If a macro table is active, unqualified numeric addresses resolve to user macros first.
         if (self.mactab) |tab| {
-            if (tab.macroForAddress(addr) != null) return self.readUserMacroInvocation();
+            if (tab.macroForAddress(addr) != null) return self.readUserMacroInvocationAt(addr);
         }
 
         // Otherwise, treat this as an invocation of a system macro loaded into the default module.
-        self.i += 1;
+        if (addr > std.math.maxInt(u8)) return IonError.Unsupported;
         return self.readSystemMacroInvocationAt(addr);
     }
 
-    fn readUserMacroInvocation(self: *Decoder) IonError![]value.Element {
-        if (self.i >= self.input.len) return IonError.Incomplete;
-        const addr: usize = self.input[self.i];
-        self.i += 1;
-
+    fn readUserMacroInvocationAt(self: *Decoder, addr: usize) IonError![]value.Element {
         const tab = self.mactab orelse return IonError.Unsupported;
         const m = tab.macroForAddress(addr) orelse return IonError.Unsupported;
         if (m.params.len != 1) return IonError.Unsupported;
@@ -231,6 +255,15 @@ const Decoder = struct {
 
         // Expand macro body. Conformance currently uses only `(%x)` bodies to inline arguments.
         return self.expandMacroBody(m, args.items);
+    }
+
+    fn readMacroInvocationUnqualified(self: *Decoder) IonError![]value.Element {
+        // Legacy entrypoint used by older conformance-driven code paths. This parses a 1-byte
+        // address at the cursor and dispatches as an unqualified e-expression invocation.
+        if (self.i >= self.input.len) return IonError.Incomplete;
+        const addr: usize = self.input[self.i];
+        self.i += 1;
+        return self.readMacroInvocationAtAddress(addr);
     }
 
     fn readSystemMacroInvocationQualified(self: *Decoder) IonError![]value.Element {
