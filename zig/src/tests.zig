@@ -504,6 +504,69 @@ test "ion 1.1 binary containers (basic)" {
     }
 }
 
+test "ion 1.1 binary delimited list" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // F1 => delimited list, terminated by F0.
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xF1, 0x61, 0x01, 0x61, 0x02, 0xF0 };
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .list);
+    const items = elems[0].value.list;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqual(@as(i128, 1), items[0].value.int.small);
+    try std.testing.expectEqual(@as(i128, 2), items[1].value.int.small);
+}
+
+test "ion 1.1 binary annotations sequence (E4)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // E4 <FlexUInt(sid=1)> <int(1)>
+    // FlexUInt(1)=0x03.
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xE4, 0x03, 0x61, 0x01 };
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expectEqual(@as(usize, 1), elems[0].annotations.len);
+    try std.testing.expectEqual(@as(?u32, 1), elems[0].annotations[0].sid);
+    try std.testing.expect(elems[0].annotations[0].text == null);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+}
+
+test "ion 1.1 binary long string and long symbol" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // F9 <FlexUInt(5)> "hello", FA <FlexUInt(3)> "foo"
+    // FlexUInt(5)=0x0B, FlexUInt(3)=0x07.
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA,
+        0xF9, 0x0B, 'h', 'e', 'l', 'l', 'o',
+        0xFA, 0x07, 'f', 'o', 'o',
+    };
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes);
+    try std.testing.expectEqual(@as(usize, 2), elems.len);
+    try std.testing.expect(elems[0].value == .string);
+    try std.testing.expectEqualStrings("hello", elems[0].value.string);
+    try std.testing.expect(elems[1].value == .symbol);
+    try std.testing.expect(elems[1].value.symbol.text != null);
+    try std.testing.expectEqualStrings("foo", elems[1].value.symbol.text.?);
+}
+
+test "ion 1.1 binary NOP padding (EC/ED)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // EC => 1-byte NOP, ED <FlexUInt(n)> <n bytes>.
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xEC, 0xED, 0x05, 0xAA, 0xBB, 0x61, 0x01 };
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+}
+
 test "ion 1.1 binary decimals accept large FlexInt encodings" {
     // Conformance uses non-minimal FlexInt encodings (e.g. exponent=0 encoded in multiple bytes).
     // Keep a regression test that exercises `shift > 16` so we don't accidentally reintroduce
