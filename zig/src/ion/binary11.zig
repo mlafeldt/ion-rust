@@ -2355,9 +2355,8 @@ const Decoder = struct {
         if (op == 0xEE) {
             const b = try self.readBytes(1);
             const addr: u32 = b[0];
-            const t = symtab.SystemSymtab11.textForSid(addr) orelse return IonError.InvalidIon;
-            const owned = try self.arena.dupe(t);
-            return value.Value{ .symbol = value.makeSymbolId(null, owned) };
+            _ = symtab.SystemSymtab11.textForSid(addr) orelse return IonError.InvalidIon;
+            return value.Value{ .symbol = value.makeSymbolId(addr, null) };
         }
 
         // integers: 60..68 (len in opcode)
@@ -2576,9 +2575,8 @@ fn readFlexSym(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!
         0x60 => .{ .symbol = value.makeSymbolId(0, null) },
         0x61...0xE0 => blk: {
             const addr: u32 = @intCast(esc - 0x60);
-            const t = symtab.SystemSymtab11.textForSid(addr) orelse return IonError.InvalidIon;
-            const owned = try arena.dupe(t);
-            break :blk .{ .symbol = value.makeSymbolId(null, owned) };
+            _ = symtab.SystemSymtab11.textForSid(addr) orelse return IonError.InvalidIon;
+            break :blk .{ .symbol = value.makeSymbolId(addr, null) };
         },
         0xF0 => .end_delimited,
         else => IonError.Unsupported,
