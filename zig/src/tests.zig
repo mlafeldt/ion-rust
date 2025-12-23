@@ -446,3 +446,60 @@ fn compareGroupStruct(st: ion.value.Struct, embedded: bool, expect_equivs: bool)
         }
     }
 }
+
+test "ion 1.1 binary containers (basic)" {
+    // These are small Ion 1.1 binary encodings taken from ion-rust's Ion 1.1 binary reader tests.
+    // The corpus/conformance suites mostly exercise Ion 1.1 text, so keep at least a small amount
+    // of coverage here to prevent Ion 1.1 binary decoding from regressing.
+
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // { $10: '', $11: 0e0 }
+    {
+        const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xD4, 0x15, 0xA0, 0x17, 0x6A };
+        const elems = try ion.binary11.parseTopLevel(&arena, bytes);
+        try std.testing.expectEqual(@as(usize, 1), elems.len);
+        try std.testing.expect(elems[0].value == .@"struct");
+        const st = elems[0].value.@"struct";
+        try std.testing.expectEqual(@as(usize, 2), st.fields.len);
+        try std.testing.expectEqual(@as(?u32, 10), st.fields[0].name.sid);
+        try std.testing.expect(st.fields[0].name.text == null);
+        try std.testing.expect(st.fields[0].value.value == .symbol);
+        try std.testing.expectEqualStrings("", st.fields[0].value.value.symbol.text.?);
+        try std.testing.expectEqual(@as(?u32, 11), st.fields[1].name.sid);
+        try std.testing.expect(st.fields[1].value.value == .float);
+        try std.testing.expectEqual(@as(f64, 0.0), st.fields[1].value.value.float);
+    }
+
+    // {"foo": 1, $11: 2} (FlexSym mode inside a short struct)
+    {
+        const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xDA, 0x01, 0xFB, 0x66, 0x6F, 0x6F, 0x61, 0x01, 0x17, 0x61, 0x02 };
+        const elems = try ion.binary11.parseTopLevel(&arena, bytes);
+        try std.testing.expectEqual(@as(usize, 1), elems.len);
+        const st = elems[0].value.@"struct";
+        try std.testing.expectEqual(@as(usize, 2), st.fields.len);
+        try std.testing.expect(st.fields[0].name.text != null);
+        try std.testing.expectEqualStrings("foo", st.fields[0].name.text.?);
+        try std.testing.expect(st.fields[0].value.value == .int);
+        try std.testing.expectEqual(@as(i128, 1), st.fields[0].value.value.int.small);
+        try std.testing.expectEqual(@as(?u32, 11), st.fields[1].name.sid);
+        try std.testing.expect(st.fields[1].value.value == .int);
+        try std.testing.expectEqual(@as(i128, 2), st.fields[1].value.value.int.small);
+    }
+
+    // [null.null, '', "hello"]
+    {
+        const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xB8, 0xEA, 0xA0, 0x95, 0x68, 0x65, 0x6C, 0x6C, 0x6F };
+        const elems = try ion.binary11.parseTopLevel(&arena, bytes);
+        try std.testing.expectEqual(@as(usize, 1), elems.len);
+        try std.testing.expect(elems[0].value == .list);
+        const items = elems[0].value.list;
+        try std.testing.expectEqual(@as(usize, 3), items.len);
+        try std.testing.expect(items[0].value == .null);
+        try std.testing.expect(items[1].value == .symbol);
+        try std.testing.expectEqualStrings("", items[1].value.symbol.text.?);
+        try std.testing.expect(items[2].value == .string);
+        try std.testing.expectEqualStrings("hello", items[2].value.string);
+    }
+}
