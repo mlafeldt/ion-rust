@@ -210,9 +210,9 @@ This port is "tests green" for `ion-tests/`, but it is not feature-complete vs t
 
 Major gaps (not exhaustive):
 
-1) Ion 1.1 binary: only a small subset of the value space is implemented (see `zig/src/ion/binary11.zig`); most container/value encodings are still `Unsupported`.
+1) Ion 1.1 binary: many core value opcodes are implemented (containers, strings/symbols, blobs/clobs, annotations, timestamps, and `0xF5`-style macro invocations needed by conformance), but it is still not a full Ion 1.1 binary implementation. The largest missing piece is stream/module state: `set_symbols`/`add_symbols`/`set_macros`/`add_macros`/`use`/`meta` side-effects are not modeled in the binary parser, so parsing arbitrary Ion 1.1 binary streams that rely on in-stream module mutation is not supported.
 2) Ion 1.1 writing: no Ion 1.1 binary writer, and the text writer does not emit Ion 1.1 e-expressions/macros.
-3) System macros: `make_blob` is now implemented in Ion 1.1 text parsing and TDL evaluation, but the Ion 1.1 binary value space is still incomplete (see above).
+3) System macros: the subset exercised by `ion-tests/conformance` is implemented for Ion 1.1 text + binary expansion, but the full system macro/module surface (including mutation semantics) is not.
 4) TDL / macro system: enough to satisfy `ion-tests/conformance`, not a full TDL compiler/evaluator.
 5) Streaming/lazy reading: Zig implementation is DOM-only; it parses the whole document into memory.
 6) BigInt in Ion 1.1 paths: several Ion 1.1 evaluation/encoding helpers return `IonError.Unsupported` on big ints (Ion 1.0 corpus still passes, including big ints).
