@@ -805,9 +805,30 @@ fn writeValueText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
                     try appendSlice(out, allocator, s);
                 },
                 .big => |v_i| {
-                    const s = v_i.*.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
-                    defer allocator.free(s);
-                    try appendSlice(out, allocator, s);
+                    // Performance: printing BigInts in base-10 is expensive (division-heavy) and requires
+                    // allocating a temporary string. Roundtrip tests only need a parseable representation,
+                    // not a specific formatting, so emit a hex int literal.
+                    var mag = v_i.*;
+                    if (!mag.isPositive()) {
+                        try appendByte(out, allocator, '-');
+                        mag.abs();
+                    }
+                    try appendSlice(out, allocator, "0x");
+                    const bits: usize = mag.toConst().bitCountAbs();
+                    const byte_len: usize = (bits + 7) / 8;
+                    if (byte_len == 0) {
+                        try appendByte(out, allocator, '0');
+                        return;
+                    }
+                    const bytes = allocator.alloc(u8, byte_len) catch return IonError.OutOfMemory;
+                    defer allocator.free(bytes);
+                    @memset(bytes, 0);
+                    mag.toConst().writeTwosComplement(bytes, .big);
+                    const hex = "0123456789ABCDEF";
+                    for (bytes) |b| {
+                        try appendByte(out, allocator, hex[b >> 4]);
+                        try appendByte(out, allocator, hex[b & 0x0F]);
+                    }
                 },
             }
         },
