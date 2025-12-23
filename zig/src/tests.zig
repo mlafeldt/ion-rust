@@ -606,3 +606,63 @@ test "ion 1.1 binary e-expression length-prefixed (0xF5, multi-param)" {
         try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
     }
 }
+
+test "ion 1.1 binary macro-shape tagless group (minimal)" {
+    // Mirrors the conformance demo idea for `tiny_decimal_values`, but in a minimal synthetic form:
+    // - define `tiny_decimal` as a shape macro producing a decimal via `.make_decimal`
+    // - define `tiny_decimal_values` taking `tiny_decimal::vals*` and expanding `%vals`
+    // - invoke `tiny_decimal_values` in Ion 1.1 binary using a delimited arg group containing
+    //   two shape-encoded values: (1 2) and (3 4) as tagless int8 pairs.
+
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Macro at address 1: tiny_decimal (int8::a int8::b) => (.make_decimal a b)
+    const params_td = try arena.allocator().alloc(ion.macro.Param, 2);
+    params_td[0] = .{ .ty = .int8, .card = .one, .name = "a", .shape = null };
+    params_td[1] = .{ .ty = .int8, .card = .one, .name = "b", .shape = null };
+
+    const body_td = try arena.allocator().alloc(ion.value.Element, 1);
+    const call = try arena.allocator().alloc(ion.value.Element, 3);
+    call[0] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, ".make_decimal") } };
+    call[1] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "a") } };
+    call[2] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "b") } };
+    body_td[0] = .{ .annotations = &.{}, .value = .{ .sexp = call } };
+
+    // Macro at address 0: tiny_decimal_values (tiny_decimal::vals*) => (%vals)
+    const params_vals = try arena.allocator().alloc(ion.macro.Param, 1);
+    params_vals[0] = .{
+        .ty = .macro_shape,
+        .card = .zero_or_many,
+        .name = "vals",
+        .shape = .{ .module = null, .name = "tiny_decimal" },
+    };
+    const body_vals = try arena.allocator().alloc(ion.value.Element, 1);
+    body_vals[0] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%vals") } };
+
+    const macros = try arena.allocator().alloc(ion.macro.Macro, 2);
+    @memset(macros, ion.macro.Macro{ .name = null, .params = &.{}, .body = &.{} });
+    macros[0] = .{ .name = "tiny_decimal_values", .params = params_vals, .body = body_vals };
+    macros[1] = .{ .name = "tiny_decimal", .params = params_td, .body = body_td };
+
+    const tab = ion.macro.MacroTable{ .macros = macros };
+
+    // Invoke macro address 0 (6-bit address form) with one variadic parameter (bitmap/presence=2 => arg group).
+    // Arg group: delimited tagless chunk encoding with one chunk containing:
+    //   (1,2) (3,4) as two int8 pairs: 01 02 03 04
+    //
+    // Encoding details:
+    // - bitmap/presence: 0x02 (ArgGroup)
+    // - group header FlexUInt(0) sentinel: 0x01
+    // - chunk_len FlexUInt(4): (4<<1)|1 = 0x09
+    // - terminator FlexUInt(0): 0x01
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0x00, 0x02, 0x01, 0x09, 0x01, 0x02, 0x03, 0x04, 0x01 };
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab);
+    try std.testing.expectEqual(@as(usize, 2), elems.len);
+    try std.testing.expect(elems[0].value == .decimal);
+    try std.testing.expect(elems[1].value == .decimal);
+    try std.testing.expectEqual(@as(i32, 2), elems[0].value.decimal.exponent);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.decimal.coefficient.small);
+    try std.testing.expectEqual(@as(i32, 4), elems[1].value.decimal.exponent);
+    try std.testing.expectEqual(@as(i128, 3), elems[1].value.decimal.coefficient.small);
+}

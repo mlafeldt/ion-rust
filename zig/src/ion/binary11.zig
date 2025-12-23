@@ -321,6 +321,13 @@ const Decoder = struct {
                         if (p.card == .zero_or_one and ve.len > 1) return IonError.InvalidIon;
                         break :blk ve;
                     },
+                    .macro_shape => blk: {
+                        const shape = p.shape orelse return IonError.InvalidIon;
+                        const elem = try self.readMacroShapeValueExpr(shape);
+                        const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                        one[0] = elem;
+                        break :blk one;
+                    },
                     else => blk: {
                         const arg = try self.readArgSingle(p.ty);
                         const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
@@ -331,6 +338,13 @@ const Decoder = struct {
                 0b10 => switch (p.ty) {
                     .tagged => blk: {
                         const group = try self.readTaggedArgGroupValueExprs();
+                        if (p.card == .zero_or_one and group.len > 1) return IonError.InvalidIon;
+                        if (p.card == .one_or_many and group.len == 0) return IonError.InvalidIon;
+                        break :blk group;
+                    },
+                    .macro_shape => blk: {
+                        const shape = p.shape orelse return IonError.InvalidIon;
+                        const group = try self.readMacroShapeArgGroupValueExprs(shape);
                         if (p.card == .zero_or_one and group.len > 1) return IonError.InvalidIon;
                         if (p.card == .one_or_many and group.len == 0) return IonError.InvalidIon;
                         break :blk group;
@@ -348,6 +362,120 @@ const Decoder = struct {
             out.append(self.arena.allocator(), .{ .name = p.name, .values = vals }) catch return IonError.OutOfMemory;
         }
 
+        return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+    }
+
+    fn makeDecimalFromTwoInts(self: *Decoder, coeff_v: value.Value, exp_v: value.Value) IonError!value.Element {
+        _ = self;
+        if (coeff_v != .int or exp_v != .int) return IonError.InvalidIon;
+
+        const exp_i128: i128 = switch (exp_v.int) {
+            .small => |v| v,
+            .big => return IonError.Unsupported,
+        };
+        if (exp_i128 < std.math.minInt(i32) or exp_i128 > std.math.maxInt(i32)) return IonError.InvalidIon;
+
+        var is_negative = false;
+        var magnitude: value.Int = undefined;
+        switch (coeff_v.int) {
+            .small => |v| {
+                if (v < 0) {
+                    if (v == std.math.minInt(i128)) return IonError.Unsupported;
+                    is_negative = true;
+                    magnitude = .{ .small = @intCast(@abs(v)) };
+                } else {
+                    magnitude = .{ .small = v };
+                }
+            },
+            .big => return IonError.Unsupported,
+        }
+
+        const coeff_is_zero = switch (magnitude) {
+            .small => |v| v == 0,
+            .big => |v| v.eqlZero(),
+        };
+        if (coeff_is_zero) is_negative = false;
+
+        return .{
+            .annotations = &.{},
+            .value = .{ .decimal = .{ .is_negative = is_negative, .coefficient = magnitude, .exponent = @intCast(exp_i128) } },
+        };
+    }
+
+    fn readMacroShapeValueExpr(self: *Decoder, shape: ion.macro.MacroShape) IonError!value.Element {
+        if (shape.module) |m| {
+            // Minimal support for qualified system macro shapes: `$ion::make_decimal`.
+            if (!std.mem.eql(u8, m, "$ion")) return IonError.Unsupported;
+            if (std.mem.eql(u8, shape.name, "make_decimal")) {
+                const a = try self.readValueExpr();
+                if (a.len != 1) return IonError.InvalidIon;
+                const b = try self.readValueExpr();
+                if (b.len != 1) return IonError.InvalidIon;
+                return self.makeDecimalFromTwoInts(a[0].value, b[0].value);
+            }
+            return IonError.Unsupported;
+        }
+
+        const tab = self.mactab orelse return IonError.Unsupported;
+        const m = tab.macroForName(shape.name) orelse return IonError.Unsupported;
+
+        // Decode the shape macro's arguments from the byte stream.
+        const bindings_buf = self.arena.allocator().alloc(ArgBinding, m.params.len) catch return IonError.OutOfMemory;
+        for (m.params, 0..) |p, idx| {
+            if (p.card != .one) return IonError.Unsupported;
+            const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+            one[0] = switch (p.ty) {
+                .tagged => blk: {
+                    const ve = try self.readValueExpr();
+                    if (ve.len != 1) return IonError.InvalidIon;
+                    break :blk ve[0];
+                },
+                .macro_shape => return IonError.Unsupported,
+                else => blk: {
+                    var cursor = self.i;
+                    const v = try readTaglessFrom(self.input, &cursor, p.ty);
+                    self.i = cursor;
+                    break :blk .{ .annotations = &.{}, .value = v };
+                },
+            };
+            bindings_buf[idx] = .{ .name = p.name, .values = one };
+        }
+
+        const expanded = try self.expandMacroBodyBindings(m, bindings_buf);
+        if (expanded.len != 1) return IonError.InvalidIon;
+        return expanded[0];
+    }
+
+    fn readMacroShapeArgGroupValueExprs(self: *Decoder, shape: ion.macro.MacroShape) IonError![]value.Element {
+        const total_len = try readFlexUInt(self.input, &self.i);
+        if (total_len != 0) {
+            const payload = try self.readBytes(total_len);
+            var sub = Decoder{ .arena = self.arena, .input = payload, .i = 0, .mactab = self.mactab };
+            var out = std.ArrayListUnmanaged(value.Element){};
+            errdefer out.deinit(self.arena.allocator());
+            while (sub.i < sub.input.len) {
+                const e = try sub.readMacroShapeValueExpr(shape);
+                out.append(self.arena.allocator(), e) catch return IonError.OutOfMemory;
+            }
+            if (sub.i != sub.input.len) return IonError.InvalidIon;
+            return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+        }
+
+        // L=0 => delimited tagless group encoded as chunks:
+        //   <flexuint chunk_len> <chunk_bytes...> ... <flexuint 0>
+        var out = std.ArrayListUnmanaged(value.Element){};
+        errdefer out.deinit(self.arena.allocator());
+        while (true) {
+            const chunk_len = try readFlexUInt(self.input, &self.i);
+            if (chunk_len == 0) break;
+            const chunk = try self.readBytes(chunk_len);
+            var sub = Decoder{ .arena = self.arena, .input = chunk, .i = 0, .mactab = self.mactab };
+            while (sub.i < sub.input.len) {
+                const e = try sub.readMacroShapeValueExpr(shape);
+                out.append(self.arena.allocator(), e) catch return IonError.OutOfMemory;
+            }
+            if (sub.i != sub.input.len) return IonError.InvalidIon;
+        }
         return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
     }
 
@@ -1586,6 +1714,46 @@ const Decoder = struct {
                     const vals = lookup(bindings, name) orelse return IonError.InvalidIon;
                     out.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
                     continue;
+                }
+            }
+
+            // Minimal support for template invocations used by macro-shapes in the conformance demo.
+            // For example: `(macro tiny_decimal (int8::a int8::b) (.make_decimal a b))`
+            if (expr.annotations.len == 0 and expr.value == .sexp) {
+                const sx = expr.value.sexp;
+                if (sx.len != 0 and sx[0].annotations.len == 0 and sx[0].value == .symbol) {
+                    const head0 = sx[0].value.symbol.text orelse return IonError.InvalidIon;
+                    if (head0.len != 0 and head0[0] == '.') {
+                        const head_norm = blk: {
+                            var h = head0[1..];
+                            if (std.mem.startsWith(u8, h, "$ion::")) h = h["$ion::".len..];
+                            break :blk h;
+                        };
+                        if (std.mem.eql(u8, head_norm, "make_decimal")) {
+                            if (sx.len != 3) return IonError.InvalidIon;
+
+                            const resolveArg = struct {
+                                fn run(bs: []const ArgBinding, a: value.Element) IonError!value.Element {
+                                    if (a.annotations.len == 0 and a.value == .symbol) {
+                                        const t = a.value.symbol.text orelse return IonError.InvalidIon;
+                                        if (lookup(bs, t)) |vals| {
+                                            if (vals.len != 1) return IonError.InvalidIon;
+                                            return vals[0];
+                                        }
+                                    }
+                                    // Literal argument.
+                                    if (a.annotations.len != 0) return IonError.InvalidIon;
+                                    return a;
+                                }
+                            }.run;
+
+                            const a0 = try resolveArg(bindings, sx[1]);
+                            const a1 = try resolveArg(bindings, sx[2]);
+                            const dec = try self.makeDecimalFromTwoInts(a0.value, a1.value);
+                            out.append(self.arena.allocator(), dec) catch return IonError.OutOfMemory;
+                            continue;
+                        }
+                    }
                 }
             }
 
