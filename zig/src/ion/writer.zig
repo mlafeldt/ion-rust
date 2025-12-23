@@ -31,6 +31,10 @@ fn appendSlice(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, b
     out.appendSlice(allocator, bytes) catch return IonError.OutOfMemory;
 }
 
+fn appendUninit(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, len: usize) IonError![]u8 {
+    return out.addManyAsSlice(allocator, len) catch return IonError.OutOfMemory;
+}
+
 /// Serializes top-level Ion elements to Ion binary (Ion 1.0).
 ///
 /// Ownership: returns an allocated `[]u8` owned by `allocator`; caller must free it.
@@ -455,15 +459,12 @@ fn writeIntBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
             }
             const bits: usize = mag.toConst().bitCountAbs();
             const byte_len: usize = (bits + 7) / 8;
-            const bytes = allocator.alloc(u8, byte_len) catch return IonError.OutOfMemory;
-            defer allocator.free(bytes);
-            @memset(bytes, 0);
-            // Performance: write BigInt directly as big-endian bytes (avoid toString()/parse paths).
-            mag.toConst().writeTwosComplement(bytes, .big);
-
             const type_id: u8 = if (sign == .neg) 3 else 2;
-            try writeTypedValueHeader(allocator, out, type_id, bytes.len);
-            try appendSlice(out, allocator, bytes);
+            try writeTypedValueHeader(allocator, out, type_id, byte_len);
+            const dst = try appendUninit(out, allocator, byte_len);
+            @memset(dst, 0);
+            // Performance: write BigInt directly into the output buffer (avoid temp alloc + copy).
+            mag.toConst().writeTwosComplement(dst, .big);
         },
     }
 }
