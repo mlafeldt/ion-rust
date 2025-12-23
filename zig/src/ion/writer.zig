@@ -606,48 +606,52 @@ fn writeTimestampBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanag
             try appendByte(&body, allocator, 0x80);
         }
     } else {
-        var mag_buf: [16]u8 = undefined;
-        var bytes: []u8 = undefined;
-        var bytes_owned: ?[]u8 = null;
-        defer if (bytes_owned) |b| allocator.free(b);
-
         switch (frac.coefficient) {
             .small => |v| {
                 if (v < 0) return IonError.InvalidIon;
+                var mag_buf: [16]u8 = undefined;
                 var n: usize = 16;
                 var tmp: u128 = @intCast(v);
                 while (tmp != 0) : (tmp >>= 8) {
                     n -= 1;
                     mag_buf[n] = @intCast(tmp & 0xFF);
                 }
-                bytes = mag_buf[n..16];
+                var bytes = mag_buf[n..16];
+
+                if (frac.is_negative) {
+                    if ((bytes[0] & 0x80) != 0) {
+                        try appendByte(&body, allocator, 0x80);
+                    } else {
+                        bytes[0] |= 0x80;
+                    }
+                } else {
+                    // Timestamp fractional coefficient is a signed-magnitude Int field; keep sign bit clear.
+                    if ((bytes[0] & 0x80) != 0) {
+                        try appendByte(&body, allocator, 0x00);
+                    }
+                }
+                try appendSlice(&body, allocator, bytes);
             },
             .big => |bint| {
                 var mag = bint.*;
                 mag.abs();
                 const bits: usize = mag.toConst().bitCountAbs();
                 const byte_len: usize = (bits + 7) / 8;
-                const tmp_bytes = allocator.alloc(u8, byte_len) catch return IonError.OutOfMemory;
-                bytes_owned = tmp_bytes;
-                @memset(tmp_bytes, 0);
-                mag.toConst().writeTwosComplement(tmp_bytes, .big);
-                bytes = tmp_bytes;
+                const msb_bits: usize = if (bits == 0) 0 else ((bits - 1) % 8) + 1;
+
+                // Decide any required prefix before writing bytes so we can write directly into `body`.
+                if (frac.is_negative) {
+                    if (msb_bits == 8) try appendByte(&body, allocator, 0x80);
+                } else {
+                    if (msb_bits == 8) try appendByte(&body, allocator, 0x00);
+                }
+
+                const dst = try appendUninit(&body, allocator, byte_len);
+                @memset(dst, 0);
+                mag.toConst().writeTwosComplement(dst, .big);
+                if (frac.is_negative and msb_bits != 8) dst[0] |= 0x80;
             },
         }
-
-        if (frac.is_negative) {
-            if ((bytes[0] & 0x80) != 0) {
-                try appendByte(&body, allocator, 0x80);
-            } else {
-                bytes[0] |= 0x80;
-            }
-        } else {
-            // Timestamp fractional coefficient is a signed-magnitude Int field; keep sign bit clear.
-            if ((bytes[0] & 0x80) != 0) {
-                try appendByte(&body, allocator, 0x00);
-            }
-        }
-        try appendSlice(&body, allocator, bytes);
     }
     try writeTypedValueHeader(allocator, out, 6, body.items.len);
     try appendSlice(out, allocator, body.items);
