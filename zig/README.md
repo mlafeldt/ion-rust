@@ -77,23 +77,35 @@ Key properties:
     - IVM appearing inside the stream (ignored if it's `E0 01 00 EA`)
     - "Ordered struct" encoding variant (as used by ion-tests)
 
-### Binary Ion 1.1 parsing (minimal subset)
+### Binary Ion 1.1 parsing (partial)
 
 - `zig/src/ion/binary11.zig`
   - Parses streams starting with the Ion 1.1 IVM (`E0 01 01 EA`).
-  - Implemented value opcodes (driven by `ion-tests/conformance/data_model/*`):
+  - Implemented value opcodes:
     - nulls (`EA`, `EB <typecode>`)
     - booleans (`6E` true, `6F` false)
     - integers (`60..68`, `F6 <flexuint len> <payload>`) (little-endian two's complement)
     - floats (`6A` f0, `6B` f16, `6C` f32, `6D` f64) (little-endian payload)
     - decimals (`70..7F`, `F7 <flexuint len> <payload>`) with payload:
       `[flexint exponent][remaining bytes = coefficient (LE two's complement)]`
-    - short strings (`90..9F`) and short symbols with inline text (`A0..AF`)
-  - Implemented (conformance-driven):
+    - timestamps (short `80..8F`, long `F8 <flexuint len> <payload>`)
+    - strings (short `90..9F`, long `F9 <flexuint len> <payload>`)
+    - symbols:
+      - inline text (short `A0..AF`, long `FA <flexuint len> <payload>`)
+      - symbol IDs (`E1..E3`) and system symbol address (`EE`)
+    - blobs/clobs (`FE`/`FF`, length as FlexUInt)
+    - containers:
+      - list/sexp/struct short forms (`B0..BF`, `C0..CF`, `D0..DF`)
+      - list/sexp/struct long forms (`FB`/`FC`/`FD`, length as FlexUInt)
+      - list/sexp/struct delimited forms (`F1`/`F2`/`F3`)
+    - annotations sequences (`E4..E9`) applied to the following value expression
+  - Implemented (conformance-driven / incomplete):
     - A subset of Ion 1.1 binary e-expressions (system macro invocations via `0xEF <addr> ...` and user macro invocations).
     - `mactab` support for the conformance runner and `%x` expansion for simple single-parameter user macros.
-  - Not implemented (still `Unsupported` for the value space): containers (list/sexp/struct), blobs/clobs, timestamp value opcodes,
-    long strings/symbols and symbol ID encoding, annotation wrappers, and any full symtab/module mechanics.
+  - Not implemented:
+    - Full Ion 1.1 module/symbol resolution for symbol IDs (symbol IDs are preserved but typically not resolved to text).
+    - Full Ion 1.1 binary e-expression encoding/decoding (e.g. 12/20-bit addresses, `0xF5` length-prefixed e-expressions).
+    - Some FlexSym escape forms used outside the conformance suite.
 
 ### Writer (text + binary)
 
@@ -129,7 +141,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
-  - As of 2025-12-23, `cd zig && zig build test --summary all` runs 10 Zig tests; all pass.
+  - As of 2025-12-23, `cd zig && zig build test --summary all` runs 11 Zig tests; all pass.
 
 ### Skip list (currently empty)
 
