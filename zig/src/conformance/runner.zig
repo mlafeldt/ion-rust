@@ -990,6 +990,21 @@ fn parseAbstractIvmSymbol(s: value.Symbol) ?ParsedIvm {
     return .{ .invalid = .{ .major = major, .minor = minor } };
 }
 
+fn isLeapYear(year: i32) bool {
+    if (@rem(year, 400) == 0) return true;
+    if (@rem(year, 100) == 0) return false;
+    return (@rem(year, 4) == 0);
+}
+
+fn daysInMonth(year: i32, month: u8) u8 {
+    return switch (month) {
+        1, 3, 5, 7, 8, 10, 12 => 31,
+        4, 6, 9, 11 => 30,
+        2 => if (isLeapYear(year)) 29 else 28,
+        else => 0,
+    };
+}
+
 fn evalAbstractValueExpr(
     arena: *value.Arena,
     mactab: ?ion.macro.MacroTable,
@@ -1030,6 +1045,14 @@ fn evalAbstractValueExpr(
                             out.appendSlice(a, vals) catch return RunError.OutOfMemory;
                         }
                         return out.toOwnedSlice(a) catch return RunError.OutOfMemory;
+                    }
+                    if (std.mem.eql(u8, name, "meta")) {
+                        // (meta <expr*>)
+                        //
+                        // `meta` produces no values, but its arguments must still be evaluated so that
+                        // invalid expressions are not silently ignored.
+                        for (sx[1..]) |arg| _ = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, arg);
+                        return &.{};
                     }
                     if (std.mem.eql(u8, name, "make_blob")) {
                         // (make_blob <lob*>)
@@ -1141,6 +1164,229 @@ fn evalAbstractValueExpr(
                             .annotations = &.{},
                             .value = .{ .decimal = .{ .is_negative = is_negative, .coefficient = magnitude, .exponent = @intCast(exp_i128) } },
                         };
+                        return one;
+                    }
+                    if (std.mem.eql(u8, name, "make_timestamp")) {
+                        // (make_timestamp <year> [<month> [<day> [<hour> <minute> [<seconds> [<offset>]]]]])
+                        if (sx.len < 2 or sx.len > 8) return RunError.InvalidConformanceDsl;
+
+                        const getOptSingle = struct {
+                            fn run(
+                                arena_: *value.Arena,
+                                mactab_: ?ion.macro.MacroTable,
+                                symtab_: []const ?[]const u8,
+                                symtab_max_id_: u32,
+                                absences_: *std.AutoHashMapUnmanaged(u32, Absence),
+                                e: value.Element,
+                            ) RunError!?value.Element {
+                                const vals = try evalAbstractValueExpr(arena_, mactab_, symtab_, symtab_max_id_, absences_, e);
+                                if (vals.len == 0) return null;
+                                if (vals.len != 1) return RunError.InvalidConformanceDsl;
+                                return vals[0];
+                            }
+                        }.run;
+
+                        const year_elem = (try getOptSingle(arena, mactab, symtab, symtab_max_id, absences, sx[1])) orelse return RunError.InvalidConformanceDsl;
+                        if (year_elem.value != .int) return RunError.InvalidConformanceDsl;
+                        const year_i128: i128 = switch (year_elem.value.int) {
+                            .small => |v| v,
+                            .big => return RunError.Unsupported,
+                        };
+                        if (year_i128 < 1 or year_i128 > 9999) return RunError.InvalidConformanceDsl;
+                        const year: i32 = @intCast(year_i128);
+
+                        const month_elem: ?value.Element = if (sx.len >= 3) try getOptSingle(arena, mactab, symtab, symtab_max_id, absences, sx[2]) else null;
+                        const day_elem: ?value.Element = if (sx.len >= 4) try getOptSingle(arena, mactab, symtab, symtab_max_id, absences, sx[3]) else null;
+                        const hour_elem: ?value.Element = if (sx.len >= 5) try getOptSingle(arena, mactab, symtab, symtab_max_id, absences, sx[4]) else null;
+                        const minute_elem: ?value.Element = if (sx.len >= 6) try getOptSingle(arena, mactab, symtab, symtab_max_id, absences, sx[5]) else null;
+                        const seconds_elem: ?value.Element = if (sx.len >= 7) try getOptSingle(arena, mactab, symtab, symtab_max_id, absences, sx[6]) else null;
+                        const offset_elem: ?value.Element = if (sx.len >= 8) try getOptSingle(arena, mactab, symtab, symtab_max_id, absences, sx[7]) else null;
+
+                        if (day_elem != null and month_elem == null) return RunError.InvalidConformanceDsl;
+                        if (hour_elem != null and (day_elem == null or month_elem == null)) return RunError.InvalidConformanceDsl;
+                        if (hour_elem != null and minute_elem == null) return RunError.InvalidConformanceDsl;
+                        if (minute_elem != null and hour_elem == null) return RunError.InvalidConformanceDsl;
+                        if (seconds_elem != null and minute_elem == null) return RunError.InvalidConformanceDsl;
+                        if (offset_elem != null and minute_elem == null) return RunError.InvalidConformanceDsl;
+
+                        var ts: value.Timestamp = .{
+                            .year = year,
+                            .month = null,
+                            .day = null,
+                            .hour = null,
+                            .minute = null,
+                            .second = null,
+                            .fractional = null,
+                            .offset_minutes = null,
+                            .precision = .year,
+                        };
+
+                        if (month_elem) |me| {
+                            if (me.value != .int) return RunError.InvalidConformanceDsl;
+                            const m_i128: i128 = switch (me.value.int) {
+                                .small => |v| v,
+                                .big => return RunError.Unsupported,
+                            };
+                            if (m_i128 < 1 or m_i128 > 12) return RunError.InvalidConformanceDsl;
+                            ts.month = @intCast(m_i128);
+                            ts.precision = .month;
+                        }
+
+                        if (day_elem) |de| {
+                            if (de.value != .int) return RunError.InvalidConformanceDsl;
+                            const d_i128: i128 = switch (de.value.int) {
+                                .small => |v| v,
+                                .big => return RunError.Unsupported,
+                            };
+                            if (d_i128 < 1) return RunError.InvalidConformanceDsl;
+                            const max_day: i128 = @intCast(daysInMonth(year, ts.month orelse return RunError.InvalidConformanceDsl));
+                            if (d_i128 > max_day) return RunError.InvalidConformanceDsl;
+                            ts.day = @intCast(d_i128);
+                            ts.precision = .day;
+                        }
+
+                        if (hour_elem) |he| {
+                            if (he.value != .int) return RunError.InvalidConformanceDsl;
+                            const h_i128: i128 = switch (he.value.int) {
+                                .small => |v| v,
+                                .big => return RunError.Unsupported,
+                            };
+                            if (h_i128 < 0 or h_i128 > 23) return RunError.InvalidConformanceDsl;
+                            ts.hour = @intCast(h_i128);
+                            ts.precision = .minute;
+                        }
+
+                        if (minute_elem) |mine| {
+                            if (mine.value != .int) return RunError.InvalidConformanceDsl;
+                            const min_i128: i128 = switch (mine.value.int) {
+                                .small => |v| v,
+                                .big => return RunError.Unsupported,
+                            };
+                            if (min_i128 < 0 or min_i128 > 59) return RunError.InvalidConformanceDsl;
+                            ts.minute = @intCast(min_i128);
+                            ts.precision = .minute;
+                        }
+
+                        if (seconds_elem) |se| {
+                            if (se.value != .int and se.value != .decimal) return RunError.InvalidConformanceDsl;
+                            switch (se.value) {
+                                .int => |si| {
+                                    const s_i128: i128 = switch (si) {
+                                        .small => |v| v,
+                                        .big => return RunError.Unsupported,
+                                    };
+                                    if (s_i128 < 0 or s_i128 >= 60) return RunError.InvalidConformanceDsl;
+                                    ts.second = @intCast(s_i128);
+                                    ts.precision = .second;
+                                },
+                                .decimal => |dec| {
+                                    const coeff_is_zero = switch (dec.coefficient) {
+                                        .small => |v| v == 0,
+                                        .big => |v| v.eqlZero(),
+                                    };
+                                    if (dec.is_negative and !coeff_is_zero) return RunError.InvalidConformanceDsl;
+
+                                    const exp: i32 = dec.exponent;
+                                    const coeff_u128: u128 = switch (dec.coefficient) {
+                                        .small => |v| if (v < 0) return RunError.InvalidConformanceDsl else @intCast(v),
+                                        .big => return RunError.Unsupported,
+                                    };
+
+                                    if (exp >= 0) {
+                                        var scaled: u128 = coeff_u128;
+                                        var k: u32 = @intCast(exp);
+                                        while (k != 0) : (k -= 1) {
+                                            scaled = std.math.mul(u128, scaled, 10) catch return RunError.InvalidConformanceDsl;
+                                        }
+                                        if (scaled >= 60) return RunError.InvalidConformanceDsl;
+                                        ts.second = @intCast(scaled);
+                                        ts.precision = .second;
+                                    } else {
+                                        const digits: u32 = @intCast(-exp);
+                                        var pow10: u128 = 1;
+                                        var k: u32 = digits;
+                                        while (k != 0) : (k -= 1) {
+                                            pow10 = std.math.mul(u128, pow10, 10) catch return RunError.InvalidConformanceDsl;
+                                        }
+                                        const sec_u128: u128 = coeff_u128 / pow10;
+                                        const frac_u128: u128 = coeff_u128 % pow10;
+                                        if (sec_u128 >= 60) return RunError.InvalidConformanceDsl;
+                                        ts.second = @intCast(sec_u128);
+                                        ts.precision = .second;
+                                        if (frac_u128 != 0) {
+                                            const frac_coeff: value.Int = .{ .small = @intCast(frac_u128) };
+                                            ts.fractional = .{ .is_negative = false, .coefficient = frac_coeff, .exponent = exp };
+                                            ts.precision = .fractional;
+                                        } else if (exp < 0 and (coeff_u128 % pow10 == 0) and (coeff_u128 != 0)) {
+                                            // Exact integer value but written with fractional digits (e.g. 6.0).
+                                        }
+                                    }
+                                },
+                                else => unreachable,
+                            }
+                        }
+
+                        if (offset_elem) |oe| {
+                            if (oe.value != .int) return RunError.InvalidConformanceDsl;
+                            const off_i128: i128 = switch (oe.value.int) {
+                                .small => |v| v,
+                                .big => return RunError.Unsupported,
+                            };
+                            if (off_i128 <= -1440 or off_i128 >= 1440) return RunError.InvalidConformanceDsl;
+                            const off_i16: i16 = @intCast(off_i128);
+                            ts.offset_minutes = off_i16;
+
+                            if (ts.month != null and ts.day != null) {
+                                const days_before = blk: {
+                                    var doy: i32 = 0;
+                                    var m: u8 = 1;
+                                    while (m < ts.month.?) : (m += 1) {
+                                        doy += @intCast(daysInMonth(year, m));
+                                    }
+                                    doy += (@as(i32, @intCast(ts.day.?)) - 1);
+                                    break :blk doy;
+                                };
+                                const local_minutes: i32 = days_before * 1440 + @as(i32, @intCast(ts.hour.?)) * 60 + @as(i32, @intCast(ts.minute.?));
+                                const days_in_year: i32 = if (isLeapYear(year)) 366 else 365;
+                                const total_minutes_in_year: i32 = days_in_year * 1440;
+                                if (year == 1 and off_i16 > 0 and off_i16 > local_minutes) return RunError.InvalidConformanceDsl;
+                                if (year == 9999 and off_i16 < 0 and local_minutes + @as(i32, @intCast(-off_i16)) >= total_minutes_in_year) return RunError.InvalidConformanceDsl;
+                            }
+                        }
+
+                        const one = a.alloc(value.Element, 1) catch return RunError.OutOfMemory;
+                        one[0] = .{ .annotations = &.{}, .value = .{ .timestamp = ts } };
+                        return one;
+                    }
+                    if (std.mem.eql(u8, name, "annotate")) {
+                        // (annotate <annotations-expr> <value-expr>)
+                        if (sx.len != 3) return RunError.InvalidConformanceDsl;
+                        const ann_vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, sx[1]);
+                        const val_vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, sx[2]);
+                        if (val_vals.len != 1) return RunError.InvalidConformanceDsl;
+
+                        var anns = std.ArrayListUnmanaged(value.Symbol){};
+                        errdefer anns.deinit(a);
+                        for (ann_vals) |e| {
+                            // Argument annotations are silently dropped.
+                            switch (e.value) {
+                                .string => |s| {
+                                    const sym = value.makeSymbol(arena, s) catch return RunError.InvalidConformanceDsl;
+                                    anns.append(a, sym) catch return RunError.OutOfMemory;
+                                },
+                                .symbol => |s| anns.append(a, s) catch return RunError.OutOfMemory,
+                                else => return RunError.InvalidConformanceDsl,
+                            }
+                        }
+
+                        const v = val_vals[0];
+                        var all = std.ArrayListUnmanaged(value.Symbol){};
+                        errdefer all.deinit(a);
+                        all.appendSlice(a, anns.items) catch return RunError.OutOfMemory;
+                        all.appendSlice(a, v.annotations) catch return RunError.OutOfMemory;
+
+                        const one = a.alloc(value.Element, 1) catch return RunError.OutOfMemory;
+                        one[0] = .{ .annotations = all.toOwnedSlice(a) catch return RunError.OutOfMemory, .value = v.value };
                         return one;
                     }
 

@@ -451,6 +451,14 @@ fn evalMacroInvocation(
         out[0] = out_elem;
         return out;
     }
+    if (std.mem.eql(u8, name, "meta")) {
+        // (meta <expr*>)
+        //
+        // `meta` produces no values, but its arguments must still be evaluated so that invalid
+        // expressions are not silently ignored.
+        for (args) |a| _ = try evalExpr(arena, tab, env, a);
+        return @constCast(&.{});
+    }
     if (std.mem.eql(u8, name, "make_decimal")) {
         // (make_decimal <coefficient> <exponent>)
         if (args.len != 2) return IonError.InvalidIon;
