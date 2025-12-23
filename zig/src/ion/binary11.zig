@@ -3007,40 +3007,97 @@ fn readFlexUInt(input: []const u8, cursor: *usize) IonError!usize {
     const shift = detectFlexShift(input, cursor) orelse return IonError.Unsupported;
     if (shift == 0) return IonError.InvalidIon;
     if (cursor.* + shift > input.len) return IonError.Incomplete;
-    if (shift > 16) return IonError.Unsupported;
-    var raw: u128 = 0;
-    for (input[cursor.* .. cursor.* + shift], 0..) |b, idx| {
-        raw |= (@as(u128, b) << @intCast(idx * 8));
-    }
+    const raw = input[cursor.* .. cursor.* + shift];
     cursor.* += shift;
-    return @intCast(raw >> @intCast(shift));
+
+    // `shift` is both:
+    // - the encoded length in bytes, and
+    // - the number of low bits to discard from the little-endian integer.
+    //
+    // Some suites (including conformance) intentionally use non-minimal encodings, so avoid fixed
+    // caps like `shift <= 16`. Instead, decode only the bits needed to materialize a `usize` and
+    // then validate that any remaining high bits are zero.
+    const byte_shift: usize = shift / 8;
+    const bit_shift: u4 = @intCast(shift % 8);
+
+    var out: usize = 0;
+    const usize_bytes: usize = @sizeOf(usize);
+    var out_idx: usize = 0;
+    while (out_idx < usize_bytes) : (out_idx += 1) {
+        const src = byte_shift + out_idx;
+        const b0: u16 = if (src < raw.len) raw[src] else 0;
+        const b1: u16 = if (bit_shift != 0 and src + 1 < raw.len) raw[src + 1] else 0;
+        const ob: u8 = if (bit_shift == 0) blk: {
+            break :blk @intCast(b0);
+        } else blk: {
+            const combined: u16 = (b0 >> bit_shift) | (b1 << (@as(u4, 8) - bit_shift));
+            break :blk @intCast(combined & 0xFF);
+        };
+        out |= (@as(usize, ob) << @intCast(out_idx * 8));
+    }
+
+    const overflow_bit = std.math.add(usize, shift, @bitSizeOf(usize)) catch return IonError.Unsupported;
+    if (overflow_bit < raw.len * 8) {
+        const start_byte = overflow_bit / 8;
+        const start_bit: u3 = @intCast(overflow_bit % 8);
+        const mask: u8 = (@as(u8, 0xFF) << start_bit);
+        if ((raw[start_byte] & mask) != 0) return IonError.Unsupported;
+        for (raw[start_byte + 1 ..]) |b| if (b != 0) return IonError.Unsupported;
+    }
+
+    return out;
 }
 
 fn readFlexInt(input: []const u8, cursor: *usize) IonError!i32 {
     const shift = detectFlexShift(input, cursor) orelse return IonError.Unsupported;
     if (shift == 0) return IonError.InvalidIon;
     if (cursor.* + shift > input.len) return IonError.Incomplete;
-    if (shift > 16) return IonError.Unsupported;
-
-    var raw: u128 = 0;
-    for (input[cursor.* .. cursor.* + shift], 0..) |b, idx| {
-        raw |= (@as(u128, b) << @intCast(idx * 8));
-    }
+    const raw = input[cursor.* .. cursor.* + shift];
     cursor.* += shift;
 
-    // Sign-extend to i64 based on the top bit of the most significant byte.
-    const msb = input[cursor.* - 1];
-    if ((msb & 0x80) != 0) {
-        const used_bits_usize: usize = shift * 8;
-        if (used_bits_usize < 128) {
-            const used_bits: u7 = @intCast(used_bits_usize);
-            raw |= (~@as(u128, 0)) << used_bits;
+    const negative = (raw[raw.len - 1] & 0x80) != 0;
+    const byte_shift: usize = shift / 8;
+    const bit_shift: u4 = @intCast(shift % 8);
+
+    var low64: u64 = 0;
+    var out_idx: usize = 0;
+    while (out_idx < 8) : (out_idx += 1) {
+        const src = byte_shift + out_idx;
+        const b0: u16 = if (src < raw.len) raw[src] else 0;
+        const b1: u16 = if (bit_shift != 0 and src + 1 < raw.len) raw[src + 1] else 0;
+        const ob: u8 = if (bit_shift == 0) blk: {
+            break :blk @intCast(b0);
+        } else blk: {
+            const combined: u16 = (b0 >> bit_shift) | (b1 << (@as(u4, 8) - bit_shift));
+            break :blk @intCast(combined & 0xFF);
+        };
+        low64 |= (@as(u64, ob) << @intCast(out_idx * 8));
+    }
+
+    // If the shifted value's natural bit width is < 64, apply sign-extension for negative values.
+    const width_bits = std.math.mul(usize, shift, 7) catch return IonError.Unsupported;
+    if (negative and width_bits < 64) {
+        low64 |= (~@as(u64, 0)) << @intCast(width_bits);
+    }
+
+    // Validate that any remaining high bits (above bit 63 after shifting) match sign extension.
+    const overflow_bit = std.math.add(usize, shift, 64) catch return IonError.Unsupported;
+    if (overflow_bit < raw.len * 8) {
+        const start_byte = overflow_bit / 8;
+        const start_bit: u3 = @intCast(overflow_bit % 8);
+        const mask: u8 = (@as(u8, 0xFF) << start_bit);
+        if (!negative) {
+            if ((raw[start_byte] & mask) != 0) return IonError.Unsupported;
+            for (raw[start_byte + 1 ..]) |b| if (b != 0) return IonError.Unsupported;
+        } else {
+            if ((raw[start_byte] & mask) != mask) return IonError.Unsupported;
+            for (raw[start_byte + 1 ..]) |b| if (b != 0xFF) return IonError.Unsupported;
         }
     }
-    const signed: i128 = @bitCast(raw);
-    const v128: i128 = signed >> @intCast(shift);
-    if (v128 < std.math.minInt(i32) or v128 > std.math.maxInt(i32)) return IonError.Unsupported;
-    return @intCast(v128);
+
+    const v64: i64 = @bitCast(low64);
+    if (v64 < std.math.minInt(i32) or v64 > std.math.maxInt(i32)) return IonError.Unsupported;
+    return @intCast(v64);
 }
 
 fn readTwosComplementIntLE(arena: *value.Arena, bytes: []const u8) IonError!value.Int {
@@ -3117,11 +3174,13 @@ fn detectFlexShift(input: []const u8, cursor: *usize) ?usize {
     // This scan supports encodings where the tag bit is beyond the first byte (e.g. exponent=0
     // encoded in 9 bytes has a tag bit at bit 8 and begins with 0x00 0x01 ...).
     var idx: usize = 0;
-    while (cursor.* + idx < input.len and idx < 16) : (idx += 1) {
+    while (cursor.* + idx < input.len) : (idx += 1) {
         const b = input[cursor.* + idx];
         if (b == 0) continue;
         const tz: usize = @intCast(@ctz(b));
-        return idx * 8 + tz + 1;
+        const bits_before = std.math.mul(usize, idx, 8) catch return null;
+        const with_tz = std.math.add(usize, bits_before, tz) catch return null;
+        return std.math.add(usize, with_tz, 1) catch return null;
     }
     return null;
 }

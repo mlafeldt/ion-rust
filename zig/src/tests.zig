@@ -504,6 +504,33 @@ test "ion 1.1 binary containers (basic)" {
     }
 }
 
+test "ion 1.1 binary decimals accept large FlexInt encodings" {
+    // Conformance uses non-minimal FlexInt encodings (e.g. exponent=0 encoded in multiple bytes).
+    // Keep a regression test that exercises `shift > 16` so we don't accidentally reintroduce
+    // small fixed caps in FlexInt/FlexUInt decoding.
+
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Long decimal:
+    //   F7 <flexuint payload_len=17> <FlexInt(0) encoded with shift=17 bytes>
+    //
+    // FlexUInt(17) with minimal 1-byte encoding: (17<<1)|1 = 0x23.
+    // FlexInt(0) with shift=17: only the tag bit set at bit 16 => byte[2]=0x01, others 0.
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA,
+        0xF7, 0x23,
+        0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .decimal);
+    try std.testing.expect(!elems[0].value.decimal.is_negative);
+    try std.testing.expectEqual(@as(i32, 0), elems[0].value.decimal.exponent);
+    try std.testing.expectEqual(@as(i128, 0), elems[0].value.decimal.coefficient.small);
+}
+
 test "ion 1.1 binary e-expression 12-bit address (minimal)" {
     // Minimal coverage for the EExpressionWith12BitAddress encoding (0x40..0x4F).
     // This uses a synthetic user macro at address 64 that expands to its single argument.
