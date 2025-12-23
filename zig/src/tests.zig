@@ -666,3 +666,17 @@ test "ion 1.1 binary macro-shape tagless group (minimal)" {
     try std.testing.expectEqual(@as(i32, 4), elems[1].value.decimal.exponent);
     try std.testing.expectEqual(@as(i128, 3), elems[1].value.decimal.coefficient.small);
 }
+
+test "ion 1.1 binary e-expression length-prefixed system make_decimal (0xF5)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Length-prefixed system macro invocation:
+    //   F5 <flexuint addr=11> <flexuint args_len=4> <coeff:int(1)> <exp:int(2)>
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xF5, 0x17, 0x09, 0x61, 0x01, 0x61, 0x02 };
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .decimal);
+    try std.testing.expectEqual(@as(i32, 2), elems[0].value.decimal.exponent);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.decimal.coefficient.small);
+}

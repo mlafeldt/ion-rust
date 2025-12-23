@@ -258,6 +258,21 @@ const Decoder = struct {
             return decoded_args;
         }
 
+        // Minimal system macro support for length-prefixed e-expressions:
+        // - make_decimal (address 11)
+        if (addr == 11) {
+            // Signature: (make_decimal <coefficient> <exponent>)
+            const coeff = try sub.readValueExpr();
+            if (coeff.len != 1) return IonError.InvalidIon;
+            const exp = try sub.readValueExpr();
+            if (exp.len != 1) return IonError.InvalidIon;
+            if (sub.i != sub.input.len) return IonError.InvalidIon;
+
+            const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+            out[0] = try self.makeDecimalFromTwoInts(coeff[0].value, exp[0].value);
+            return out;
+        }
+
         return IonError.Unsupported;
     }
 
