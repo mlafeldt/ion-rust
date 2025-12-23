@@ -824,8 +824,17 @@ fn writeValueText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
                         try appendByte(out, allocator, '0');
                         return;
                     }
-                    const bytes = allocator.alloc(u8, byte_len) catch return IonError.OutOfMemory;
-                    defer allocator.free(bytes);
+                    var stack_buf: [256]u8 = undefined;
+                    var bytes: []u8 = undefined;
+                    var owned: ?[]u8 = null;
+                    defer if (owned) |b| allocator.free(b);
+                    if (byte_len <= stack_buf.len) {
+                        bytes = stack_buf[0..byte_len];
+                    } else {
+                        const tmp = allocator.alloc(u8, byte_len) catch return IonError.OutOfMemory;
+                        owned = tmp;
+                        bytes = tmp;
+                    }
                     @memset(bytes, 0);
                     mag.toConst().writeTwosComplement(bytes, .big);
                     const hex = "0123456789ABCDEF";
