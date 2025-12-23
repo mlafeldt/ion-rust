@@ -251,26 +251,12 @@ const Decoder = struct {
             }
         }
 
-        // System macro subset: support length-prefixed `(values <expr*>)`.
-        if (addr == 1) {
-            const decoded_args = try sub.readLengthPrefixedSystemValuesArgs();
-            if (sub.i != sub.input.len) return IonError.InvalidIon;
-            return decoded_args;
-        }
-
-        // Minimal system macro support for length-prefixed e-expressions:
-        // - make_decimal (address 11)
-        if (addr == 11) {
-            // Signature: (make_decimal <coefficient> <exponent>)
-            const coeff = try sub.readValueExpr();
-            if (coeff.len != 1) return IonError.InvalidIon;
-            const exp = try sub.readValueExpr();
-            if (exp.len != 1) return IonError.InvalidIon;
-            if (sub.i != sub.input.len) return IonError.InvalidIon;
-
-            const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
-            out[0] = try self.makeDecimalFromTwoInts(coeff[0].value, exp[0].value);
-            return out;
+        if (addr <= std.math.maxInt(u8)) {
+            const expanded = self.expandSystemMacroLengthPrefixed(@intCast(addr), &sub) catch |e| switch (e) {
+                IonError.Unsupported => null,
+                else => return e,
+            };
+            if (expanded) |vals| return vals;
         }
 
         return IonError.Unsupported;
@@ -295,6 +281,462 @@ const Decoder = struct {
         const p: ion.macro.Param = .{ .ty = .tagged, .card = .zero_or_many, .name = "vals", .shape = null };
         const bindings = try self.readLengthPrefixedArgBindings(&.{p});
         return bindings[0].values;
+    }
+
+    fn expandSystemMacroLengthPrefixed(self: *Decoder, addr: u8, sub: *Decoder) IonError![]value.Element {
+        // Note: Conformance uses the system macro addresses documented in `readSystemMacroInvocationAt`.
+        // Do not assume Ion-rust's internal system macro table address layout here.
+
+        const bindingSingle = struct {
+            fn run(b: ArgBinding) IonError!value.Element {
+                if (b.values.len != 1) return IonError.InvalidIon;
+                return b.values[0];
+            }
+        }.run;
+
+        const bindingOpt = struct {
+            fn run(b: ArgBinding) IonError!?value.Value {
+                if (b.values.len == 0) return null;
+                if (b.values.len != 1) return IonError.InvalidIon;
+                return b.values[0].value;
+            }
+        }.run;
+
+        const concatText = struct {
+            fn run(arena: *value.Arena, items: []const value.Element) IonError![]const u8 {
+                var texts = std.ArrayListUnmanaged([]const u8){};
+                defer texts.deinit(arena.allocator());
+                for (items) |e| {
+                    const t: []const u8 = switch (e.value) {
+                        .string => |s| s,
+                        .symbol => |sym| sym.text orelse return IonError.InvalidIon,
+                        else => return IonError.InvalidIon,
+                    };
+                    texts.append(arena.allocator(), t) catch return IonError.OutOfMemory;
+                }
+                var total: usize = 0;
+                for (texts.items) |t| total += t.len;
+                const buf = arena.allocator().alloc(u8, total) catch return IonError.OutOfMemory;
+                var i: usize = 0;
+                for (texts.items) |t| {
+                    if (t.len != 0) {
+                        @memcpy(buf[i .. i + t.len], t);
+                        i += t.len;
+                    }
+                }
+                return buf;
+            }
+        }.run;
+
+        const concatLob = struct {
+            fn run(arena: *value.Arena, items: []const value.Element) IonError![]const u8 {
+                var parts = std.ArrayListUnmanaged([]const u8){};
+                defer parts.deinit(arena.allocator());
+                for (items) |e| {
+                    const b: []const u8 = switch (e.value) {
+                        .blob => |bb| bb,
+                        .clob => |bb| bb,
+                        else => return IonError.InvalidIon,
+                    };
+                    parts.append(arena.allocator(), b) catch return IonError.OutOfMemory;
+                }
+                var total: usize = 0;
+                for (parts.items) |b| total += b.len;
+                const buf = arena.allocator().alloc(u8, total) catch return IonError.OutOfMemory;
+                var i: usize = 0;
+                for (parts.items) |b| {
+                    if (b.len != 0) {
+                        @memcpy(buf[i .. i + b.len], b);
+                        i += b.len;
+                    }
+                }
+                return buf;
+            }
+        }.run;
+
+        const flatten = struct {
+            fn run(arena: *value.Arena, seqs: []const value.Element) IonError![]value.Element {
+                var out = std.ArrayListUnmanaged(value.Element){};
+                errdefer out.deinit(arena.allocator());
+                for (seqs) |e| {
+                    switch (e.value) {
+                        .list => |items| out.appendSlice(arena.allocator(), items) catch return IonError.OutOfMemory,
+                        .sexp => |items| out.appendSlice(arena.allocator(), items) catch return IonError.OutOfMemory,
+                        else => return IonError.InvalidIon,
+                    }
+                }
+                return out.toOwnedSlice(arena.allocator()) catch return IonError.OutOfMemory;
+            }
+        }.run;
+
+        const mkOne = struct {
+            fn run(arena: *value.Arena, v: value.Element) IonError![]value.Element {
+                const out = arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                out[0] = v;
+                return out;
+            }
+        }.run;
+
+        return switch (addr) {
+            0 => blk: {
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                break :blk &.{};
+            },
+            1 => blk: {
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "x", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                break :blk bindings[0].values;
+            },
+            2 => blk: {
+                const p = [_]ion.macro.Param{
+                    .{ .ty = .tagged, .card = .zero_or_many, .name = "expr", .shape = null },
+                    .{ .ty = .tagged, .card = .zero_or_many, .name = "default_expr", .shape = null },
+                };
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                break :blk if (bindings[0].values.len != 0) bindings[0].values else bindings[1].values;
+            },
+            4 => blk: {
+                const p = [_]ion.macro.Param{
+                    .{ .ty = .tagged, .card = .one, .name = "n", .shape = null },
+                    .{ .ty = .tagged, .card = .zero_or_many, .name = "expr", .shape = null },
+                };
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const n_elem = try bindingSingle(bindings[0]);
+                if (n_elem.value != .int) return IonError.InvalidIon;
+                const n_i128: i128 = switch (n_elem.value.int) {
+                    .small => |v| v,
+                    .big => return IonError.Unsupported,
+                };
+                if (n_i128 < 0) return IonError.InvalidIon;
+                const n: usize = @intCast(n_i128);
+                const body = bindings[1].values;
+                var out = std.ArrayListUnmanaged(value.Element){};
+                errdefer out.deinit(self.arena.allocator());
+                var k: usize = 0;
+                while (k < n) : (k += 1) {
+                    out.appendSlice(self.arena.allocator(), body) catch return IonError.OutOfMemory;
+                }
+                break :blk out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+            },
+            6 => blk: {
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "deltas", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const args = bindings[0].values;
+                if (args.len == 0) break :blk &.{};
+                const out = self.arena.allocator().alloc(value.Element, args.len) catch return IonError.OutOfMemory;
+                var acc: i128 = 0;
+                for (args, 0..) |e, idx| {
+                    if (e.value != .int) return IonError.InvalidIon;
+                    const d: i128 = switch (e.value.int) {
+                        .small => |v| v,
+                        .big => return IonError.Unsupported,
+                    };
+                    if (idx == 0) acc = d else acc = std.math.add(i128, acc, d) catch return IonError.InvalidIon;
+                    out[idx] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = acc } } };
+                }
+                break :blk out;
+            },
+            7 => blk: {
+                const p = [_]ion.macro.Param{
+                    .{ .ty = .tagged, .card = .one, .name = "a", .shape = null },
+                    .{ .ty = .tagged, .card = .one, .name = "b", .shape = null },
+                };
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const a = try bindingSingle(bindings[0]);
+                const b = try bindingSingle(bindings[1]);
+                if (a.value != .int or b.value != .int) return IonError.InvalidIon;
+                const a_i: i128 = switch (a.value.int) {
+                    .small => |v| v,
+                    .big => return IonError.Unsupported,
+                };
+                const b_i: i128 = switch (b.value.int) {
+                    .small => |v| v,
+                    .big => return IonError.Unsupported,
+                };
+                const s = std.math.add(i128, a_i, b_i) catch return IonError.InvalidIon;
+                break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .int = .{ .small = s } } });
+            },
+            8 => blk: {
+                const p = [_]ion.macro.Param{
+                    .{ .ty = .tagged, .card = .zero_or_many, .name = "annotations", .shape = null },
+                    .{ .ty = .tagged, .card = .one, .name = "value_to_annotate", .shape = null },
+                };
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+
+                var anns = std.ArrayListUnmanaged(value.Symbol){};
+                defer anns.deinit(self.arena.allocator());
+                for (bindings[0].values) |e| {
+                    switch (e.value) {
+                        .string => |s| anns.append(self.arena.allocator(), try value.makeSymbol(self.arena, s)) catch return IonError.OutOfMemory,
+                        .symbol => |sym| anns.append(self.arena.allocator(), sym) catch return IonError.OutOfMemory,
+                        else => return IonError.InvalidIon,
+                    }
+                }
+
+                const inner = try bindingSingle(bindings[1]);
+                const ann_slice = anns.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+                const tmp = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                tmp[0] = inner;
+                break :blk try prependAnnotations(self.arena, ann_slice, tmp);
+            },
+            9 => blk: {
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "text", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const buf = try concatText(self.arena, bindings[0].values);
+                break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .string = buf } });
+            },
+            10 => blk: {
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "text", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const buf = try concatText(self.arena, bindings[0].values);
+                break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, buf) } });
+            },
+            11 => blk: {
+                const p = [_]ion.macro.Param{
+                    .{ .ty = .tagged, .card = .one, .name = "coefficient", .shape = null },
+                    .{ .ty = .tagged, .card = .one, .name = "exponent", .shape = null },
+                };
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const coeff = try bindingSingle(bindings[0]);
+                const exp = try bindingSingle(bindings[1]);
+                break :blk try mkOne(self.arena, try self.makeDecimalFromTwoInts(coeff.value, exp.value));
+            },
+            12 => blk: {
+                const p = [_]ion.macro.Param{
+                    .{ .ty = .tagged, .card = .one, .name = "year", .shape = null },
+                    .{ .ty = .tagged, .card = .zero_or_one, .name = "month", .shape = null },
+                    .{ .ty = .tagged, .card = .zero_or_one, .name = "day", .shape = null },
+                    .{ .ty = .tagged, .card = .zero_or_one, .name = "hour", .shape = null },
+                    .{ .ty = .tagged, .card = .zero_or_one, .name = "minute", .shape = null },
+                    .{ .ty = .tagged, .card = .zero_or_one, .name = "second", .shape = null },
+                    .{ .ty = .tagged, .card = .zero_or_one, .name = "offset_minutes", .shape = null },
+                };
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const year_e = try bindingSingle(bindings[0]);
+                if (year_e.value != .int) return IonError.InvalidIon;
+                const year_i128: i128 = switch (year_e.value.int) {
+                    .small => |v| v,
+                    .big => return IonError.Unsupported,
+                };
+                if (year_i128 < 1 or year_i128 > 9999) return IonError.InvalidIon;
+                const year: i32 = @intCast(year_i128);
+
+                const month_v = try bindingOpt(bindings[1]);
+                const day_v = try bindingOpt(bindings[2]);
+                const hour_v = try bindingOpt(bindings[3]);
+                const minute_v = try bindingOpt(bindings[4]);
+                const seconds_v = try bindingOpt(bindings[5]);
+                const offset_v = try bindingOpt(bindings[6]);
+
+                // Use the same structural validation as the existing (presence-byte) decoder.
+                if (day_v != null and month_v == null) return IonError.InvalidIon;
+                if (hour_v != null and (day_v == null or month_v == null)) return IonError.InvalidIon;
+                if (minute_v != null and hour_v == null) return IonError.InvalidIon;
+                if (seconds_v != null and minute_v == null) return IonError.InvalidIon;
+                if (offset_v != null and minute_v == null) return IonError.InvalidIon;
+
+                var ts: value.Timestamp = .{
+                    .year = year,
+                    .month = null,
+                    .day = null,
+                    .hour = null,
+                    .minute = null,
+                    .second = null,
+                    .fractional = null,
+                    .offset_minutes = null,
+                    .precision = .year,
+                };
+
+                if (month_v) |mv| {
+                    if (mv != .int) return IonError.InvalidIon;
+                    const m_i128: i128 = switch (mv.int) {
+                        .small => |v| v,
+                        .big => return IonError.Unsupported,
+                    };
+                    if (m_i128 < 1 or m_i128 > 12) return IonError.InvalidIon;
+                    ts.month = @intCast(m_i128);
+                    ts.precision = .month;
+                }
+
+                if (day_v) |dv| {
+                    if (dv != .int) return IonError.InvalidIon;
+                    const d_i128: i128 = switch (dv.int) {
+                        .small => |v| v,
+                        .big => return IonError.Unsupported,
+                    };
+                    if (d_i128 < 1) return IonError.InvalidIon;
+                    const max_day: i128 = @intCast(daysInMonth(year, ts.month orelse return IonError.InvalidIon));
+                    if (d_i128 > max_day) return IonError.InvalidIon;
+                    ts.day = @intCast(d_i128);
+                    ts.precision = .day;
+                }
+
+                if (hour_v) |hv| {
+                    if (minute_v == null) return IonError.InvalidIon;
+                    if (hv != .int) return IonError.InvalidIon;
+                    const h_i128: i128 = switch (hv.int) {
+                        .small => |v| v,
+                        .big => return IonError.Unsupported,
+                    };
+                    if (h_i128 < 0 or h_i128 >= 24) return IonError.InvalidIon;
+                    ts.hour = @intCast(h_i128);
+
+                    const mv = minute_v.?;
+                    if (mv != .int) return IonError.InvalidIon;
+                    const min_i128: i128 = switch (mv.int) {
+                        .small => |v| v,
+                        .big => return IonError.Unsupported,
+                    };
+                    if (min_i128 < 0 or min_i128 >= 60) return IonError.InvalidIon;
+                    ts.minute = @intCast(min_i128);
+                    ts.precision = .minute;
+
+                    if (seconds_v) |sv| {
+                        switch (sv) {
+                            .int => |ii| {
+                                const s_i128: i128 = switch (ii) {
+                                    .small => |v| v,
+                                    .big => return IonError.Unsupported,
+                                };
+                                if (s_i128 < 0 or s_i128 >= 60) return IonError.InvalidIon;
+                                ts.second = @intCast(s_i128);
+                                ts.precision = .second;
+                            },
+                            .decimal => |d| {
+                                const coeff_is_zero = switch (d.coefficient) {
+                                    .small => |v| v == 0,
+                                    .big => |v| v.eqlZero(),
+                                };
+                                if (d.is_negative and !coeff_is_zero) return IonError.InvalidIon;
+
+                                const exp: i32 = d.exponent;
+                                const coeff_u128: u128 = switch (d.coefficient) {
+                                    .small => |v| if (v < 0) return IonError.InvalidIon else @intCast(v),
+                                    .big => return IonError.Unsupported,
+                                };
+
+                                if (exp >= 0) {
+                                    var scaled: u128 = coeff_u128;
+                                    var k: u32 = @intCast(exp);
+                                    while (k != 0) : (k -= 1) {
+                                        scaled = std.math.mul(u128, scaled, 10) catch return IonError.InvalidIon;
+                                    }
+                                    if (scaled >= 60) return IonError.InvalidIon;
+                                    ts.second = @intCast(scaled);
+                                    ts.precision = .second;
+                                } else {
+                                    const digits: u32 = @intCast(-exp);
+                                    var pow10: u128 = 1;
+                                    var k: u32 = digits;
+                                    while (k != 0) : (k -= 1) {
+                                        pow10 = std.math.mul(u128, pow10, 10) catch return IonError.InvalidIon;
+                                    }
+                                    const sec_u128: u128 = coeff_u128 / pow10;
+                                    const frac_u128: u128 = coeff_u128 % pow10;
+                                    if (sec_u128 >= 60) return IonError.InvalidIon;
+                                    ts.second = @intCast(sec_u128);
+                                    ts.precision = .second;
+                                    if (frac_u128 != 0) {
+                                        const frac_coeff: value.Int = .{ .small = @intCast(frac_u128) };
+                                        ts.fractional = .{ .is_negative = false, .coefficient = frac_coeff, .exponent = exp };
+                                        ts.precision = .fractional;
+                                    }
+                                }
+                            },
+                            else => return IonError.InvalidIon,
+                        }
+                    }
+
+                    if (offset_v) |ov| {
+                        if (ov != .int) return IonError.InvalidIon;
+                        const off_i128: i128 = switch (ov.int) {
+                            .small => |v| v,
+                            .big => return IonError.Unsupported,
+                        };
+                        if (off_i128 <= -1440 or off_i128 >= 1440) return IonError.InvalidIon;
+                        const off_i16: i16 = @intCast(off_i128);
+                        ts.offset_minutes = off_i16;
+                    } else {
+                        ts.offset_minutes = null;
+                    }
+                }
+
+                break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .timestamp = ts } });
+            },
+            13 => blk: {
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "lob", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const buf = try concatLob(self.arena, bindings[0].values);
+                break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .blob = buf } });
+            },
+            14 => blk: {
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "sequences", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const flat = try flatten(self.arena, bindings[0].values);
+                break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .list = flat } });
+            },
+            15 => blk: {
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "sequences", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const flat = try flatten(self.arena, bindings[0].values);
+                break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .sexp = flat } });
+            },
+            17 => blk: {
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "fields", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                var out_fields = std.ArrayListUnmanaged(value.StructField){};
+                errdefer out_fields.deinit(self.arena.allocator());
+                for (bindings[0].values) |arg| {
+                    switch (arg.value) {
+                        .@"struct" => |st| out_fields.appendSlice(self.arena.allocator(), st.fields) catch return IonError.OutOfMemory,
+                        else => return IonError.InvalidIon,
+                    }
+                }
+                const fields = out_fields.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+                break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = fields } } });
+            },
+            19 => blk: {
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "args", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const args = bindings[0].values;
+
+                // Match existing heuristic: all unannotated text => set_symbols, else flatten.
+                var all_text = true;
+                for (args) |e| {
+                    if (e.annotations.len != 0) all_text = false;
+                    switch (e.value) {
+                        .string => {},
+                        .symbol => |s| {
+                            if (s.text == null) all_text = false;
+                        },
+                        else => all_text = false,
+                    }
+                }
+                if (all_text) break :blk &.{}; // set_symbols produces nothing
+                break :blk try flatten(self.arena, args);
+            },
+            20, 21, 22, 23 => blk: {
+                // Directives / module mutations: conformance only checks they parse and do not
+                // contribute application values.
+                break :blk &.{};
+            },
+            else => IonError.Unsupported,
+        };
     }
 
     fn bitmapSizeInBytesForParams(params: []const ion.macro.Param) usize {

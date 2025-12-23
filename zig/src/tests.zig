@@ -680,3 +680,16 @@ test "ion 1.1 binary e-expression length-prefixed system make_decimal (0xF5)" {
     try std.testing.expectEqual(@as(i32, 2), elems[0].value.decimal.exponent);
     try std.testing.expectEqual(@as(i128, 1), elems[0].value.decimal.coefficient.small);
 }
+
+test "ion 1.1 binary e-expression length-prefixed system make_string (0xF5)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // F5 <addr=9> <args_len=8> <bitmap=10 (arg group)> <FlexUInt(6)> <"hello"> (short string)
+    // FlexUInt(9)=0x13, FlexUInt(8)=0x11, group length FlexUInt(6)=0x0D
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xF5, 0x13, 0x11, 0x02, 0x0D, 0x95, 0x68, 0x65, 0x6C, 0x6C, 0x6F };
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .string);
+    try std.testing.expectEqualStrings("hello", elems[0].value.string);
+}
