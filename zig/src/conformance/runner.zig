@@ -1100,6 +1100,49 @@ fn evalAbstractValueExpr(
                         };
                         return one;
                     }
+                    if (std.mem.eql(u8, name, "make_decimal")) {
+                        // (make_decimal <coefficient> <exponent>)
+                        if (sx.len != 3) return RunError.InvalidConformanceDsl;
+                        const coeff_vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, sx[1]);
+                        const exp_vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, sx[2]);
+                        if (coeff_vals.len != 1 or exp_vals.len != 1) return RunError.InvalidConformanceDsl;
+                        if (coeff_vals[0].value != .int or exp_vals[0].value != .int) return RunError.InvalidConformanceDsl;
+
+                        const exp_i128: i128 = switch (exp_vals[0].value.int) {
+                            .small => |v| v,
+                            .big => return RunError.Unsupported,
+                        };
+                        if (exp_i128 < std.math.minInt(i32) or exp_i128 > std.math.maxInt(i32)) return RunError.InvalidConformanceDsl;
+
+                        var is_negative = false;
+                        var magnitude: value.Int = undefined;
+                        switch (coeff_vals[0].value.int) {
+                            .small => |v| {
+                                if (v < 0) {
+                                    if (v == std.math.minInt(i128)) return RunError.Unsupported;
+                                    is_negative = true;
+                                    magnitude = .{ .small = @intCast(@abs(v)) };
+                                } else {
+                                    magnitude = .{ .small = v };
+                                }
+                            },
+                            .big => return RunError.Unsupported,
+                        }
+
+                        // Negative zero is not representable as an int; ensure we don't emit it.
+                        const coeff_is_zero = switch (magnitude) {
+                            .small => |v| v == 0,
+                            .big => |v| v.eqlZero(),
+                        };
+                        if (coeff_is_zero) is_negative = false;
+
+                        const one = a.alloc(value.Element, 1) catch return RunError.OutOfMemory;
+                        one[0] = .{
+                            .annotations = &.{},
+                            .value = .{ .decimal = .{ .is_negative = is_negative, .coefficient = magnitude, .exponent = @intCast(exp_i128) } },
+                        };
+                        return one;
+                    }
 
                     // User macro invocation: evaluate arguments to value lists and expand.
                     const tab = mactab orelse return RunError.Unsupported;
