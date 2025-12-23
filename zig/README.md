@@ -206,6 +206,22 @@ Minor gaps (not exhaustive):
 1) Ion hash / ordering helpers (present in Rust) are not implemented in Zig.
 2) Catalog API / builder-style APIs are not implemented.
 
+### Parity checklist (vs ion-rust)
+
+This is a rough “where to look next” map. Passing `ion-tests/` does not imply feature parity with ion-rust.
+
+| Area | Zig | ion-rust reference |
+|------|-----|--------------------|
+| Ion 1.0 read (text + binary) | `zig/src/ion/text.zig`, `zig/src/ion/binary.zig` | `src/lazy/text/raw/mod.rs`, `src/lazy/binary/raw/mod.rs` |
+| Ion 1.0 write (text + binary) | `zig/src/ion/writer.zig` | `src/lazy/encoder/text/v1_0/writer.rs`, `src/lazy/encoder/binary/v1_0/writer.rs` |
+| Ion 1.1 text read (macros/e-expressions) | partial (`zig/src/ion/text.zig`, `zig/src/ion/tdl_eval.zig`) | `src/lazy/text/raw/v1_1/reader.rs`, `src/lazy/text/raw/v1_1/arg_group.rs` |
+| Ion 1.1 binary read | partial (`zig/src/ion/binary11.zig`) | `src/lazy/binary/raw/v1_1/reader.rs`, `src/lazy/binary/raw/v1_1/e_expression.rs` |
+| Ion 1.1 text write | not implemented | `src/lazy/encoder/text/v1_1/writer.rs` |
+| Ion 1.1 binary write | not implemented | `src/lazy/encoder/binary/v1_1/writer.rs` (FlexInt/FlexUInt/FlexSym, containers) |
+| Streaming/lazy reader | not implemented (DOM-only) | `src/lazy/reader.rs`, `src/lazy/system_reader.rs` |
+| Ion hash / ordering | not implemented | `src/ion_hash/`, `src/ion_data/ion_ord.rs` |
+| Catalog API | not implemented | `src/catalog.rs` |
+
 ## To-dos (spec completeness / performance)
 
 ### Performance
