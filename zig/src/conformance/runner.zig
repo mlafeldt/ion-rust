@@ -1031,6 +1031,37 @@ fn evalAbstractValueExpr(
                         }
                         return out.toOwnedSlice(a) catch return RunError.OutOfMemory;
                     }
+                    if (std.mem.eql(u8, name, "make_blob")) {
+                        // (make_blob <lob*>)
+                        var parts = std.ArrayListUnmanaged([]const u8){};
+                        defer parts.deinit(a);
+
+                        for (sx[1..]) |arg| {
+                            const vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, arg);
+                            for (vals) |e| {
+                                switch (e.value) {
+                                    .blob => |b| parts.append(a, b) catch return RunError.OutOfMemory,
+                                    .clob => |b| parts.append(a, b) catch return RunError.OutOfMemory,
+                                    else => return RunError.InvalidConformanceDsl,
+                                }
+                            }
+                        }
+
+                        var total: usize = 0;
+                        for (parts.items) |b| total += b.len;
+                        const buf = a.alloc(u8, total) catch return RunError.OutOfMemory;
+                        var i: usize = 0;
+                        for (parts.items) |b| {
+                            if (b.len != 0) {
+                                @memcpy(buf[i .. i + b.len], b);
+                                i += b.len;
+                            }
+                        }
+
+                        const one = a.alloc(value.Element, 1) catch return RunError.OutOfMemory;
+                        one[0] = .{ .annotations = &.{}, .value = .{ .blob = buf } };
+                        return one;
+                    }
 
                     // User macro invocation: evaluate arguments to value lists and expand.
                     const tab = mactab orelse return RunError.Unsupported;
