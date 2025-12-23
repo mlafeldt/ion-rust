@@ -1969,8 +1969,9 @@ const Parser = struct {
             }
             const raw = self.input[digits_start..self.i];
             try validateUnderscoresHex(raw);
-            const digits = try stripUnderscores(self.arena.gpa, raw);
-            defer self.arena.gpa.free(digits);
+            const stripped = try stripUnderscoresIfNeeded(self.arena.gpa, raw);
+            defer if (stripped.owned) self.arena.gpa.free(stripped.s);
+            const digits = stripped.s;
             const mag_u128 = std.fmt.parseInt(u128, digits, 16) catch |e| switch (e) {
                 error.Overflow => null,
                 else => return IonError.InvalidIon,
@@ -2007,8 +2008,9 @@ const Parser = struct {
             }
             const raw = self.input[digits_start..self.i];
             try validateUnderscoresBinary(raw);
-            const digits = try stripUnderscores(self.arena.gpa, raw);
-            defer self.arena.gpa.free(digits);
+            const stripped = try stripUnderscoresIfNeeded(self.arena.gpa, raw);
+            defer if (stripped.owned) self.arena.gpa.free(stripped.s);
+            const digits = stripped.s;
             const mag_u128 = std.fmt.parseInt(u128, digits, 2) catch |e| switch (e) {
                 error.Overflow => null,
                 else => return IonError.InvalidIon,
@@ -2046,8 +2048,9 @@ const Parser = struct {
         }
         const tok_raw = self.input[start..self.i];
         try validateUnderscoresDecimal(tok_raw);
-        const tok = try stripUnderscores(self.arena.gpa, tok_raw);
-        defer self.arena.gpa.free(tok);
+        const stripped_tok = try stripUnderscoresIfNeeded(self.arena.gpa, tok_raw);
+        defer if (stripped_tok.owned) self.arena.gpa.free(stripped_tok.s);
+        const tok = stripped_tok.s;
 
         try validateNoLeadingZero(tok);
 
@@ -2779,15 +2782,20 @@ fn validateNoLeadingZero(tok: []const u8) IonError!void {
     if (tok[start] == '0' and i - start > 1) return IonError.InvalidIon;
 }
 
-fn stripUnderscores(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    if (std.mem.indexOfScalar(u8, s, '_') == null) return allocator.dupe(u8, s);
+const Stripped = struct {
+    s: []const u8,
+    owned: bool,
+};
+
+fn stripUnderscoresIfNeeded(allocator: std.mem.Allocator, s: []const u8) !Stripped {
+    if (std.mem.indexOfScalar(u8, s, '_') == null) return .{ .s = s, .owned = false };
     var out = std.ArrayListUnmanaged(u8){};
     errdefer out.deinit(allocator);
     for (s) |c| {
         if (c == '_') continue;
         try out.append(allocator, c);
     }
-    return out.toOwnedSlice(allocator);
+    return .{ .s = try out.toOwnedSlice(allocator), .owned = true };
 }
 
 fn decodeEscape(self: *Parser, out: *std.ArrayListUnmanaged(u8), as_bytes: bool) IonError!void {
