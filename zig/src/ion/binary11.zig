@@ -22,6 +22,11 @@ const symtab = @import("symtab.zig");
 const IonError = ion.IonError;
 const MacroTable = ion.macro.MacroTable;
 
+const ArgBinding = struct {
+    name: []const u8,
+    values: []value.Element,
+};
+
 /// Parses an Ion binary stream that begins with the Ion 1.1 IVM (`E0 01 01 EA`).
 ///
 /// All returned slices are allocated in `arena` and valid until the arena is deinited.
@@ -240,10 +245,9 @@ const Decoder = struct {
 
         if (self.mactab) |tab| {
             if (tab.macroForAddress(addr)) |m| {
-                if (m.params.len != 1) return IonError.Unsupported;
-                const decoded_args = try sub.readLengthPrefixedArgsSingleParam(m.params[0]);
+                const bindings = try sub.readLengthPrefixedArgBindings(m.params);
                 if (sub.i != sub.input.len) return IonError.InvalidIon;
-                return self.expandMacroBody(m, decoded_args);
+                return self.expandMacroBodyBindings(m, bindings);
             }
         }
 
@@ -255,6 +259,10 @@ const Decoder = struct {
         }
 
         return IonError.Unsupported;
+    }
+
+    fn emptyElems() []value.Element {
+        return @constCast(@as([]const value.Element, &.{}));
     }
 
     fn readEExpBitmap(self: *Decoder, bitmap_size_in_bytes: usize) IonError!u64 {
@@ -269,66 +277,78 @@ const Decoder = struct {
 
     fn readLengthPrefixedSystemValuesArgs(self: *Decoder) IonError![]value.Element {
         // Signature: (values <expr*>)
-        //
-        // For a single variadic parameter, the bitmap is 1 byte and only the low 2 bits are used.
-        const bits = try self.readEExpBitmap(1);
-        const grouping: u2 = @intCast(bits & 0b11);
-        return switch (grouping) {
-            0b00 => &.{},
-            0b01 => try self.readValueExpr(),
-            0b10 => try self.readTaggedArgGroupValueExprs(),
-            else => IonError.InvalidIon,
-        };
+        const p: ion.macro.Param = .{ .ty = .tagged, .card = .zero_or_many, .name = "vals", .shape = null };
+        const bindings = try self.readLengthPrefixedArgBindings(&.{p});
+        return bindings[0].values;
     }
 
-    fn readLengthPrefixedArgsSingleParam(self: *Decoder, p: ion.macro.Param) IonError![]value.Element {
-        // For `.one` parameters, argument encoding is always a single value expression literal.
-        if (p.card == .one) {
-            return switch (p.ty) {
-                .tagged => blk: {
-                    const vals = try self.readValueExpr();
-                    if (vals.len != 1) return IonError.InvalidIon;
-                    break :blk vals;
+    fn bitmapSizeInBytesForParams(params: []const ion.macro.Param) usize {
+        const bits_per_param: usize = 2;
+        const bits_per_byte: usize = 8;
+        var variadic: usize = 0;
+        for (params) |p| {
+            if (p.card != .one) variadic += 1;
+        }
+        return ((variadic * bits_per_param) + 7) / bits_per_byte;
+    }
+
+    fn nextBitmapGrouping(bits: *u64) IonError!u2 {
+        const g: u2 = @intCast(bits.* & 0b11);
+        bits.* >>= 2;
+        if (g == 0b11) return IonError.InvalidIon;
+        return g;
+    }
+
+    fn readLengthPrefixedArgBindings(self: *Decoder, params: []const ion.macro.Param) IonError![]const ArgBinding {
+        const bitmap_len = bitmapSizeInBytesForParams(params);
+        var bitmap_bits = try self.readEExpBitmap(bitmap_len);
+
+        var out = std.ArrayListUnmanaged(ArgBinding){};
+        errdefer out.deinit(self.arena.allocator());
+
+        for (params) |p| {
+            const grouping: u2 = if (p.card == .one) 0b01 else try nextBitmapGrouping(&bitmap_bits);
+
+            const vals: []value.Element = switch (grouping) {
+                0b00 => blk: {
+                    if (p.card == .one_or_many) return IonError.InvalidIon;
+                    break :blk emptyElems();
                 },
-                else => blk: {
-                    const arg = try self.readArgSingle(p.ty);
-                    const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
-                    out[0] = arg;
-                    break :blk out;
+                0b01 => switch (p.ty) {
+                    .tagged => blk: {
+                        const ve = try self.readValueExpr();
+                        if (p.card == .one and ve.len != 1) return IonError.InvalidIon;
+                        if (p.card == .zero_or_one and ve.len > 1) return IonError.InvalidIon;
+                        break :blk ve;
+                    },
+                    else => blk: {
+                        const arg = try self.readArgSingle(p.ty);
+                        const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                        one[0] = arg;
+                        break :blk one;
+                    },
                 },
+                0b10 => switch (p.ty) {
+                    .tagged => blk: {
+                        const group = try self.readTaggedArgGroupValueExprs();
+                        if (p.card == .zero_or_one and group.len > 1) return IonError.InvalidIon;
+                        if (p.card == .one_or_many and group.len == 0) return IonError.InvalidIon;
+                        break :blk group;
+                    },
+                    else => blk: {
+                        const group = try self.readExpressionGroup(p.ty);
+                        if (p.card == .zero_or_one and group.len > 1) return IonError.InvalidIon;
+                        if (p.card == .one_or_many and group.len == 0) return IonError.InvalidIon;
+                        break :blk group;
+                    },
+                },
+                else => return IonError.InvalidIon,
             };
+
+            out.append(self.arena.allocator(), .{ .name = p.name, .values = vals }) catch return IonError.OutOfMemory;
         }
 
-        // Variadic/optional parameters use the arg-grouping bitmap (2 bits per such parameter).
-        const bits = try self.readEExpBitmap(1);
-        const grouping: u2 = @intCast(bits & 0b11);
-
-        return switch (grouping) {
-            0b00 => blk: {
-                if (p.card == .one_or_many) return IonError.InvalidIon;
-                break :blk &.{};
-            },
-            0b01 => switch (p.ty) {
-                .tagged => try self.readValueExpr(),
-                else => blk: {
-                    const arg = try self.readArgSingle(p.ty);
-                    const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
-                    out[0] = arg;
-                    break :blk out;
-                },
-            },
-            0b10 => switch (p.ty) {
-                .tagged => try self.readTaggedArgGroupValueExprs(),
-                else => blk: {
-                    const group = try self.readExpressionGroup(p.ty);
-                    // Cardinality checks.
-                    if (p.card == .zero_or_one and group.len > 1) return IonError.InvalidIon;
-                    if (p.card == .one_or_many and group.len == 0) return IonError.InvalidIon;
-                    break :blk group;
-                },
-            },
-            else => IonError.InvalidIon,
-        };
+        return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
     }
 
     fn readTaggedArgGroupValueExprs(self: *Decoder) IonError![]value.Element {
@@ -365,41 +385,48 @@ const Decoder = struct {
     fn readUserMacroInvocationAt(self: *Decoder, addr: usize) IonError![]value.Element {
         const tab = self.mactab orelse return IonError.Unsupported;
         const m = tab.macroForAddress(addr) orelse return IonError.Unsupported;
-        if (m.params.len != 1) return IonError.Unsupported;
-        const p = m.params[0];
+        const bindings = try self.readUserMacroArgBindingsConformance(m.params);
+        return self.expandMacroBodyBindings(m, bindings);
+    }
 
-        // Parse arguments.
-        var args = std.ArrayListUnmanaged(value.Element){};
-        errdefer args.deinit(self.arena.allocator());
+    fn readUserMacroArgBindingsConformance(self: *Decoder, params: []const ion.macro.Param) IonError![]const ArgBinding {
+        var out = std.ArrayListUnmanaged(ArgBinding){};
+        errdefer out.deinit(self.arena.allocator());
 
-        if (p.card == .one) {
-            const arg = try self.readArgSingle(p.ty);
-            args.append(self.arena.allocator(), arg) catch return IonError.OutOfMemory;
-        } else {
-            if (self.i >= self.input.len) return IonError.Incomplete;
-            const presence = self.input[self.i];
-            self.i += 1;
-            switch (presence) {
-                0 => {
-                    if (p.card == .one_or_many) return IonError.InvalidIon;
-                },
-                1 => {
-                    const arg = try self.readArgSingle(p.ty);
-                    args.append(self.arena.allocator(), arg) catch return IonError.OutOfMemory;
-                },
-                2 => {
-                    const group = try self.readExpressionGroup(p.ty);
-                    // Cardinality checks.
-                    if (p.card == .zero_or_one and group.len > 1) return IonError.InvalidIon;
-                    if (p.card == .one_or_many and group.len == 0) return IonError.InvalidIon;
-                    args.appendSlice(self.arena.allocator(), group) catch return IonError.OutOfMemory;
-                },
-                else => return IonError.InvalidIon,
-            }
+        for (params) |p| {
+            const vals: []value.Element = if (p.card == .one) blk: {
+                const arg = try self.readArgSingle(p.ty);
+                const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                one[0] = arg;
+                break :blk one;
+            } else blk: {
+                if (self.i >= self.input.len) return IonError.Incomplete;
+                const presence = self.input[self.i];
+                self.i += 1;
+                switch (presence) {
+                    0 => {
+                        if (p.card == .one_or_many) return IonError.InvalidIon;
+                        break :blk emptyElems();
+                    },
+                    1 => {
+                        const arg = try self.readArgSingle(p.ty);
+                        const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                        one[0] = arg;
+                        break :blk one;
+                    },
+                    2 => {
+                        const group = try self.readExpressionGroup(p.ty);
+                        if (p.card == .zero_or_one and group.len > 1) return IonError.InvalidIon;
+                        if (p.card == .one_or_many and group.len == 0) return IonError.InvalidIon;
+                        break :blk group;
+                    },
+                    else => return IonError.InvalidIon,
+                }
+            };
+            out.append(self.arena.allocator(), .{ .name = p.name, .values = vals }) catch return IonError.OutOfMemory;
         }
 
-        // Expand macro body. Conformance currently uses only `(%x)` bodies to inline arguments.
-        return self.expandMacroBody(m, args.items);
+        return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
     }
 
     fn readMacroInvocationUnqualified(self: *Decoder) IonError![]value.Element {
@@ -1538,7 +1565,7 @@ const Decoder = struct {
         return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
     }
 
-    fn expandMacroBody(self: *Decoder, m: ion.macro.Macro, args: []const value.Element) IonError![]value.Element {
+    fn expandMacroBodyBindings(self: *Decoder, m: ion.macro.Macro, bindings: []const ArgBinding) IonError![]value.Element {
         var out = std.ArrayListUnmanaged(value.Element){};
         errdefer out.deinit(self.arena.allocator());
 
@@ -1551,10 +1578,17 @@ const Decoder = struct {
         // import cycle with `ion.zig`).
         if (m.params.len == 1 and m.body.len == 1) {
             if (isTaglessValuesBody(m.body[0], m.params[0].name)) {
-                out.appendSlice(self.arena.allocator(), args) catch return IonError.OutOfMemory;
+                out.appendSlice(self.arena.allocator(), bindings[0].values) catch return IonError.OutOfMemory;
                 return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
             }
         }
+
+        const lookup = struct {
+            fn run(bs: []const ArgBinding, name: []const u8) ?[]const value.Element {
+                for (bs) |b| if (std.mem.eql(u8, b.name, name)) return b.values;
+                return null;
+            }
+        }.run;
 
         for (m.body) |expr| {
             // Variable expansion: conformance DSL encodes `%x` as an operator token `%` followed
@@ -1565,8 +1599,8 @@ const Decoder = struct {
                     const st = sx[0].value.symbol.text orelse return IonError.InvalidIon;
                     if (st.len >= 2 and st[0] == '%') {
                         const name = st[1..];
-                        if (!std.mem.eql(u8, name, m.params[0].name)) return IonError.InvalidIon;
-                        out.appendSlice(self.arena.allocator(), args) catch return IonError.OutOfMemory;
+                        const vals = lookup(bindings, name) orelse return IonError.InvalidIon;
+                        out.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
                         continue;
                     }
                 }
@@ -1574,8 +1608,8 @@ const Decoder = struct {
                     const op = sx[0].value.symbol.text orelse return IonError.InvalidIon;
                     const name = sx[1].value.symbol.text orelse return IonError.InvalidIon;
                     if (std.mem.eql(u8, op, "%")) {
-                        if (!std.mem.eql(u8, name, m.params[0].name)) return IonError.InvalidIon;
-                        out.appendSlice(self.arena.allocator(), args) catch return IonError.OutOfMemory;
+                        const vals = lookup(bindings, name) orelse return IonError.InvalidIon;
+                        out.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
                         continue;
                     }
                 }
@@ -1583,8 +1617,8 @@ const Decoder = struct {
                 const st = expr.value.symbol.text orelse return IonError.InvalidIon;
                 if (st.len >= 2 and st[0] == '%') {
                     const name = st[1..];
-                    if (!std.mem.eql(u8, name, m.params[0].name)) return IonError.InvalidIon;
-                    out.appendSlice(self.arena.allocator(), args) catch return IonError.OutOfMemory;
+                    const vals = lookup(bindings, name) orelse return IonError.InvalidIon;
+                    out.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
                     continue;
                 }
             }

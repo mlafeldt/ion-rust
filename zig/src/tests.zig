@@ -565,3 +565,44 @@ test "ion 1.1 binary e-expression length-prefixed (0xF5, minimal)" {
     try std.testing.expect(elems[0].value == .int);
     try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
 }
+
+test "ion 1.1 binary e-expression length-prefixed (0xF5, multi-param)" {
+    // Exercises length-prefixed decoding for a signature with required + optional params.
+
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Macro at address 64: expands to `%a` then `%b`.
+    const params = try arena.allocator().alloc(ion.macro.Param, 2);
+    params[0] = .{ .ty = .tagged, .card = .one, .name = "a", .shape = null };
+    params[1] = .{ .ty = .tagged, .card = .zero_or_one, .name = "b", .shape = null };
+
+    const body = try arena.allocator().alloc(ion.value.Element, 2);
+    body[0] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%a") } };
+    body[1] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%b") } };
+
+    const macros = try arena.allocator().alloc(ion.macro.Macro, 65);
+    @memset(macros, ion.macro.Macro{ .name = null, .params = &.{}, .body = &.{} });
+    macros[64] = .{ .name = null, .params = params, .body = body };
+
+    const tab = ion.macro.MacroTable{ .macros = macros };
+
+    // Case 1: b present as ValueExprLiteral.
+    // args payload: <bitmap=01> <a:int(1)> <b:int(2)>
+    {
+        const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xF5, 0x81, 0x0B, 0x01, 0x61, 0x01, 0x61, 0x02 };
+        const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab);
+        try std.testing.expectEqual(@as(usize, 2), elems.len);
+        try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+        try std.testing.expectEqual(@as(i128, 2), elems[1].value.int.small);
+    }
+
+    // Case 2: b empty.
+    // args payload: <bitmap=00> <a:int(1)>
+    {
+        const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xF5, 0x81, 0x07, 0x00, 0x61, 0x01 };
+        const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab);
+        try std.testing.expectEqual(@as(usize, 1), elems.len);
+        try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+    }
+}
