@@ -30,6 +30,23 @@ fn bigIntAbsLtPow10(allocator: std.mem.Allocator, mag: std.math.big.int.Const, s
     // any finite `mag` will be < 10^scale, so the "too many digits" check cannot fail.
     if (scale > std.math.maxInt(u32)) return true;
 
+    // Fast path: for small scales we can compare against a `u128` threshold without allocating BigInts.
+    // 10^38 fits within u128; 10^39 does not.
+    if (scale <= 38) {
+        const bits = mag.bitCountAbs();
+        if (bits > 128) return false;
+
+        var threshold: u128 = 1;
+        var i: usize = 0;
+        while (i < scale) : (i += 1) threshold *= 10;
+
+        var buf: [16]u8 = undefined;
+        @memset(&buf, 0);
+        mag.writeTwosComplement(&buf, .big);
+        const v = std.mem.readInt(u128, &buf, .big);
+        return v < threshold;
+    }
+
     var ten = std.math.big.int.Managed.initSet(allocator, 10) catch return IonError.OutOfMemory;
     defer ten.deinit();
     var pow10 = std.math.big.int.Managed.init(allocator) catch return IonError.OutOfMemory;
