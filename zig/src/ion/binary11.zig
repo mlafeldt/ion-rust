@@ -828,7 +828,21 @@ const Decoder = struct {
 
         const exp_i128: i128 = switch (exp_v.int) {
             .small => |v| v,
-            .big => return IonError.Unsupported,
+            .big => |bi| blk: {
+                // Full Ion 1.1 allows arbitrarily large ints, but the Ion decimal exponent in our
+                // in-memory model is an i32. Accept big exponents only if they fit.
+                const c = bi.toConst();
+                const bits = c.bitCountAbs();
+                if (c.positive) {
+                    if (bits > 31) return IonError.InvalidIon;
+                } else {
+                    if (bits > 32) return IonError.InvalidIon;
+                }
+                var buf: [16]u8 = undefined;
+                @memset(&buf, if (c.positive) 0x00 else 0xFF);
+                c.writeTwosComplement(&buf, .big);
+                break :blk std.mem.readInt(i128, &buf, .big);
+            },
         };
         if (exp_i128 < std.math.minInt(i32) or exp_i128 > std.math.maxInt(i32)) return IonError.InvalidIon;
 
@@ -844,7 +858,14 @@ const Decoder = struct {
                     magnitude = .{ .small = v };
                 }
             },
-            .big => return IonError.Unsupported,
+            .big => |bi| {
+                // Coefficients are stored as magnitude + separate sign so we can represent -0.
+                // Normalize to magnitude here, matching `decodeDecimal11()`.
+                const negative = !bi.toConst().positive;
+                if (negative) bi.negate();
+                is_negative = negative;
+                magnitude = .{ .big = bi };
+            },
         }
 
         const coeff_is_zero = switch (magnitude) {

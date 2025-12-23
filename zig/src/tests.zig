@@ -708,6 +708,42 @@ test "ion 1.1 binary e-expression length-prefixed system make_decimal (0xF5)" {
     try std.testing.expectEqual(@as(i128, 1), elems[0].value.decimal.coefficient.small);
 }
 
+test "ion 1.1 binary e-expression length-prefixed system make_decimal (big coefficient)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Coefficient is a long int (F6) with a 17-byte payload representing 2^128 (LE two's complement).
+    // Exponent is int(0) using the short form opcode 0x60.
+    //
+    // args_len = 20 bytes:
+    //   <F6> <flexuint 17> <17 bytes payload> <0x60>
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA,
+        0xF5, 0x17, 0x29,
+        0xF6, 0x23,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x60,
+    };
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .decimal);
+    try std.testing.expectEqual(@as(i32, 0), elems[0].value.decimal.exponent);
+    try std.testing.expect(!elems[0].value.decimal.is_negative);
+
+    const coeff = elems[0].value.decimal.coefficient;
+    try std.testing.expect(coeff == .big);
+    const bi = coeff.big;
+    try std.testing.expect(bi.toConst().positive);
+    try std.testing.expectEqual(@as(usize, 129), bi.toConst().bitCountAbs());
+
+    var buf: [17]u8 = undefined;
+    @memset(&buf, 0);
+    bi.toConst().writeTwosComplement(&buf, .big);
+    const expected = &[_]u8{ 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    try std.testing.expectEqualSlices(u8, expected, &buf);
+}
+
 test "ion 1.1 binary e-expression length-prefixed system make_string (0xF5)" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
