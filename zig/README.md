@@ -107,6 +107,7 @@ Key properties:
     - `mactab` support for the conformance runner and `%x` expansion for simple single-parameter user macros.
   - Not implemented:
     - Full Ion 1.1 module/symbol resolution for symbol IDs (symbol IDs are preserved but typically not resolved to text).
+      - Optional helper: `zig/src/ion/value.zig` `value.resolveSystemSymbols11(&arena, elems)` can populate Ion 1.1 *system* symbol texts (SIDs 1..62) after parsing, but it is intentionally not applied by default to keep conformance output representation stable.
     - Full Ion 1.1 binary e-expression encoding/decoding (for example: `0xF5` for arbitrary macro signatures and argument types, and the `0xF5` length-prefixed variant for macros other than system `values`).
     - Some FlexSym escape forms used outside the conformance suite.
 

@@ -9,6 +9,7 @@ const std = @import("std");
 const IonError = @import("../ion.zig").IonError;
 const big = std.math.big.int;
 const Limb = std.math.big.Limb;
+const symtab = @import("symtab.zig");
 
 /// Arena allocator used by the parser to allocate all decoded values for a document.
 pub const Arena = struct {
@@ -120,6 +121,38 @@ pub const StructField = struct {
 pub const Struct = struct {
     fields: []StructField,
 };
+
+pub fn resolveSystemSymbols11(arena: *Arena, elems: []Element) IonError!void {
+    for (elems) |*e| try resolveElement11(arena, e);
+}
+
+fn resolveElement11(arena: *Arena, e: *Element) IonError!void {
+    for (e.annotations) |*a| try resolveSymbol11(arena, a);
+    try resolveValue11(arena, &e.value);
+}
+
+fn resolveValue11(arena: *Arena, v: *Value) IonError!void {
+    switch (v.*) {
+        .symbol => |*s| try resolveSymbol11(arena, s),
+        .list => |items| for (items) |*e| try resolveElement11(arena, e),
+        .sexp => |items| for (items) |*e| try resolveElement11(arena, e),
+        .@"struct" => |st| {
+            for (st.fields) |*f| {
+                try resolveSymbol11(arena, &f.name);
+                try resolveElement11(arena, &f.value);
+            }
+        },
+        else => {},
+    }
+}
+
+fn resolveSymbol11(arena: *Arena, s: *Symbol) IonError!void {
+    if (s.text != null) return;
+    const sid = s.sid orelse return;
+    if (symtab.SystemSymtab11.textForSid(sid)) |t| {
+        s.text = try arena.dupe(t);
+    }
+}
 
 /// Ion value union.
 pub const Value = union(IonType) {
