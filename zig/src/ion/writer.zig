@@ -1054,10 +1054,8 @@ fn writeBlobText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8),
     try appendSlice(out, allocator, "{{");
     const enc = std.base64.standard.Encoder;
     const out_len = enc.calcSize(b.len);
-    const tmp = allocator.alloc(u8, out_len) catch return IonError.OutOfMemory;
-    defer allocator.free(tmp);
-    _ = enc.encode(tmp, b);
-    try appendSlice(out, allocator, tmp);
+    const dst = try appendUninit(out, allocator, out_len);
+    _ = enc.encode(dst, b);
     try appendSlice(out, allocator, "}}");
 }
 
