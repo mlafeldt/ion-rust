@@ -1987,10 +1987,15 @@ const Parser = struct {
                 return IonError.InvalidIon;
             }
             const raw = self.input[digits_start..self.i];
-            try validateUnderscoresHex(raw);
-            const stripped = try stripUnderscoresIfNeeded(self.arena.gpa, raw);
-            defer if (stripped.owned) self.arena.gpa.free(stripped.s);
-            const digits = stripped.s;
+            var digits: []const u8 = raw;
+            var owned_digits: ?[]u8 = null;
+            defer if (owned_digits) |b| self.arena.gpa.free(b);
+            if (std.mem.indexOfScalar(u8, raw, '_') != null) {
+                try validateUnderscoresHex(raw);
+                const stripped = try stripUnderscoresIfNeeded(self.arena.gpa, raw);
+                if (stripped.owned) owned_digits = @constCast(stripped.s);
+                digits = stripped.s;
+            }
             const mag_u128 = std.fmt.parseInt(u128, digits, 16) catch |e| switch (e) {
                 error.Overflow => null,
                 else => return IonError.InvalidIon,
@@ -2026,10 +2031,15 @@ const Parser = struct {
                 return IonError.InvalidIon;
             }
             const raw = self.input[digits_start..self.i];
-            try validateUnderscoresBinary(raw);
-            const stripped = try stripUnderscoresIfNeeded(self.arena.gpa, raw);
-            defer if (stripped.owned) self.arena.gpa.free(stripped.s);
-            const digits = stripped.s;
+            var digits: []const u8 = raw;
+            var owned_digits: ?[]u8 = null;
+            defer if (owned_digits) |b| self.arena.gpa.free(b);
+            if (std.mem.indexOfScalar(u8, raw, '_') != null) {
+                try validateUnderscoresBinary(raw);
+                const stripped = try stripUnderscoresIfNeeded(self.arena.gpa, raw);
+                if (stripped.owned) owned_digits = @constCast(stripped.s);
+                digits = stripped.s;
+            }
             const mag_u128 = std.fmt.parseInt(u128, digits, 2) catch |e| switch (e) {
                 error.Overflow => null,
                 else => return IonError.InvalidIon,
@@ -2066,10 +2076,15 @@ const Parser = struct {
             return IonError.InvalidIon;
         }
         const tok_raw = self.input[start..self.i];
-        try validateUnderscoresDecimal(tok_raw);
-        const stripped_tok = try stripUnderscoresIfNeeded(self.arena.gpa, tok_raw);
-        defer if (stripped_tok.owned) self.arena.gpa.free(stripped_tok.s);
-        const tok = stripped_tok.s;
+        var tok: []const u8 = tok_raw;
+        var owned_tok: ?[]u8 = null;
+        defer if (owned_tok) |b| self.arena.gpa.free(b);
+        if (std.mem.indexOfScalar(u8, tok_raw, '_') != null) {
+            try validateUnderscoresDecimal(tok_raw);
+            const stripped_tok = try stripUnderscoresIfNeeded(self.arena.gpa, tok_raw);
+            if (stripped_tok.owned) owned_tok = @constCast(stripped_tok.s);
+            tok = stripped_tok.s;
+        }
 
         try validateNoLeadingZero(tok);
 
