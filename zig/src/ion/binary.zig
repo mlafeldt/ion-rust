@@ -757,12 +757,20 @@ fn bigIntFromMagnitudeBytes(arena: *value.Arena, magnitude_be: []const u8) IonEr
     // The corpus/conformance suites exercise a lot of large integers/decimals, and string formatting
     // here quickly becomes a dominant allocation + CPU cost.
     const bi = try arena.makeBigInt();
-    const bit_count: usize = magnitude_be.len * 8;
+    // Trim leading zeros so we don't over-allocate limbs and carry around spurious padding.
+    var start: usize = 0;
+    while (start < magnitude_be.len and magnitude_be[start] == 0) : (start += 1) {}
+    if (start == magnitude_be.len) return bi;
+
+    const trimmed = magnitude_be[start..];
+    const msb: u8 = trimmed[0];
+    const msb_bits: usize = 8 - @clz(msb);
+    const bit_count: usize = (trimmed.len - 1) * 8 + msb_bits;
     const limb_bits: usize = @bitSizeOf(std.math.big.Limb);
     const needed_limbs: usize = if (bit_count == 0) 1 else (bit_count + limb_bits - 1) / limb_bits;
     bi.ensureCapacity(needed_limbs) catch return IonError.OutOfMemory;
     var m = bi.toMutable();
-    m.readTwosComplement(magnitude_be, bit_count, .big, .unsigned);
+    m.readTwosComplement(trimmed, bit_count, .big, .unsigned);
     bi.setMetadata(true, m.len);
     return bi;
 }
