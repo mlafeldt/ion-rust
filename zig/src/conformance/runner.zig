@@ -1470,6 +1470,85 @@ fn evalAbstractValueExpr(
                         one[0] = .{ .annotations = all.toOwnedSlice(a) catch return RunError.OutOfMemory, .value = v.value };
                         return one;
                     }
+                    if (std.mem.eql(u8, name, "make_field")) {
+                        // (make_field <name> <value>)
+                        if (sx.len != 3) return RunError.InvalidConformanceDsl;
+                        const name_vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, sx[1]);
+                        const val_vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, sx[2]);
+                        if (name_vals.len != 1 or val_vals.len != 1) return RunError.InvalidConformanceDsl;
+                        const name_elem = name_vals[0];
+                        const val_elem = val_vals[0];
+                        const name_sym: value.Symbol = switch (name_elem.value) {
+                            .string => |s| value.makeSymbol(arena, s) catch return RunError.InvalidConformanceDsl,
+                            .symbol => |s| s,
+                            else => return RunError.InvalidConformanceDsl,
+                        };
+                        const fields = a.alloc(value.StructField, 1) catch return RunError.OutOfMemory;
+                        fields[0] = .{ .name = name_sym, .value = val_elem };
+                        const one = a.alloc(value.Element, 1) catch return RunError.OutOfMemory;
+                        one[0] = .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = fields } } };
+                        return one;
+                    }
+                    if (std.mem.eql(u8, name, "make_struct")) {
+                        // Concatenate fields from each struct argument in order (duplicates preserved).
+                        var total_fields: usize = 0;
+                        var structs = std.ArrayListUnmanaged(value.Element){};
+                        errdefer structs.deinit(a);
+                        for (sx[1..]) |arg| {
+                            const vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, arg);
+                            structs.appendSlice(a, vals) catch return RunError.OutOfMemory;
+                        }
+                        for (structs.items) |e| {
+                            if (e.value != .@"struct") return RunError.InvalidConformanceDsl;
+                            total_fields += e.value.@"struct".fields.len;
+                        }
+                        const fields = a.alloc(value.StructField, total_fields) catch return RunError.OutOfMemory;
+                        var idx: usize = 0;
+                        for (structs.items) |e| {
+                            const st = e.value.@"struct";
+                            @memcpy(fields[idx .. idx + st.fields.len], st.fields);
+                            idx += st.fields.len;
+                        }
+                        const one = a.alloc(value.Element, 1) catch return RunError.OutOfMemory;
+                        one[0] = .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = fields } } };
+                        return one;
+                    }
+                    if (std.mem.eql(u8, name, "make_list") or std.mem.eql(u8, name, "make_sexp")) {
+                        var out_items = std.ArrayListUnmanaged(value.Element){};
+                        errdefer out_items.deinit(a);
+                        for (sx[1..]) |arg| {
+                            const vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, arg);
+                            for (vals) |e| {
+                                switch (e.value) {
+                                    .list => |items| out_items.appendSlice(a, items) catch return RunError.OutOfMemory,
+                                    .sexp => |items| out_items.appendSlice(a, items) catch return RunError.OutOfMemory,
+                                    else => return RunError.InvalidConformanceDsl,
+                                }
+                            }
+                        }
+                        const seq = out_items.toOwnedSlice(a) catch return RunError.OutOfMemory;
+                        const one = a.alloc(value.Element, 1) catch return RunError.OutOfMemory;
+                        one[0] = .{
+                            .annotations = &.{},
+                            .value = if (std.mem.eql(u8, name, "make_list")) .{ .list = seq } else .{ .sexp = seq },
+                        };
+                        return one;
+                    }
+                    if (std.mem.eql(u8, name, "flatten")) {
+                        var out = std.ArrayListUnmanaged(value.Element){};
+                        errdefer out.deinit(a);
+                        for (sx[1..]) |arg| {
+                            const vals = try evalAbstractValueExpr(arena, mactab, symtab, symtab_max_id, absences, arg);
+                            for (vals) |e| {
+                                switch (e.value) {
+                                    .list => |items| out.appendSlice(a, items) catch return RunError.OutOfMemory,
+                                    .sexp => |items| out.appendSlice(a, items) catch return RunError.OutOfMemory,
+                                    else => return RunError.InvalidConformanceDsl,
+                                }
+                            }
+                        }
+                        return out.toOwnedSlice(a) catch return RunError.OutOfMemory;
+                    }
 
                     // User macro invocation: evaluate arguments to value lists and expand.
                     const tab = mactab orelse return RunError.Unsupported;
