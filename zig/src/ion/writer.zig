@@ -1072,9 +1072,10 @@ fn writeEscapedBytes(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(
                 else
                     (c < 0x20 or c == 0x7F);
                 if (needs_hex) {
-                    var buf: [4]u8 = undefined;
-                    const s = std.fmt.bufPrint(&buf, "\\x{X:0>2}", .{c}) catch return IonError.InvalidIon;
-                    try appendSlice(out, allocator, s);
+                    // Fast path: avoid fmt machinery for a fixed `\\xNN` escape.
+                    const hex = "0123456789ABCDEF";
+                    var buf: [4]u8 = .{ '\\', 'x', hex[c >> 4], hex[c & 0x0F] };
+                    try appendSlice(out, allocator, &buf);
                 } else {
                     try appendByte(out, allocator, c);
                 }
