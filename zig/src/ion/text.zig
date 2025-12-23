@@ -2208,8 +2208,17 @@ const Parser = struct {
         const d = digits[start..];
 
         const byte_len: usize = (d.len + 1) / 2;
-        const tmp = self.arena.gpa.alloc(u8, byte_len) catch return IonError.OutOfMemory;
-        defer self.arena.gpa.free(tmp);
+        var stack_buf: [256]u8 = undefined;
+        var tmp: []u8 = undefined;
+        var owned: ?[]u8 = null;
+        defer if (owned) |b| self.arena.gpa.free(b);
+        if (byte_len <= stack_buf.len) {
+            tmp = stack_buf[0..byte_len];
+        } else {
+            const heap = self.arena.gpa.alloc(u8, byte_len) catch return IonError.OutOfMemory;
+            owned = heap;
+            tmp = heap;
+        }
         @memset(tmp, 0);
 
         var di: usize = 0;
