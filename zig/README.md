@@ -195,7 +195,7 @@ Major gaps (not exhaustive):
 
 1) Ion 1.1 binary: only a small subset of the value space is implemented (see `zig/src/ion/binary11.zig`); most container/value encodings are still `Unsupported`.
 2) Ion 1.1 writing: no Ion 1.1 binary writer, and the text writer does not emit Ion 1.1 e-expressions/macros.
-3) System macros: 23/24 are implemented for text parsing + conformance needs; `make_blob` (address 13) is not implemented.
+3) System macros: `make_blob` is now implemented in Ion 1.1 text parsing and TDL evaluation, but the Ion 1.1 binary value space is still incomplete (see above).
 4) TDL / macro system: enough to satisfy `ion-tests/conformance`, not a full TDL compiler/evaluator.
 5) Streaming/lazy reading: Zig implementation is DOM-only; it parses the whole document into memory.
 6) BigInt in Ion 1.1 paths: several Ion 1.1 evaluation/encoding helpers return `IonError.Unsupported` on big ints (Ion 1.0 corpus still passes, including big ints).

@@ -156,7 +156,7 @@ const Decoder = struct {
             // 10 => make_symbol
             // 11 => make_decimal
             // 12 => make_timestamp
-            // 13 => flatten OR set_symbols (disambiguated by argument shape)
+            // 13 => make_blob
             // 14 => make_list
             // 15 => make_sexp
             // 16 => parse_ion OR make_field (disambiguated by argument shape)
@@ -176,6 +176,7 @@ const Decoder = struct {
             10 => self.expandMakeSymbol(),
             11 => self.expandMakeDecimal(),
             12 => self.expandMakeTimestamp(),
+            13 => self.expandMakeBlob(),
             14 => self.expandMakeSequence(.list),
             15 => self.expandMakeSequence(.sexp),
             16 => self.expandSystem16(),
@@ -439,6 +440,52 @@ const Decoder = struct {
         const sym = value.makeSymbolId(null, buf);
         const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
         out[0] = .{ .annotations = &.{}, .value = .{ .symbol = sym } };
+        return out;
+    }
+
+    fn expandMakeBlob(self: *Decoder) IonError![]value.Element {
+        // (make_blob <lob*>)
+        if (self.i >= self.input.len) return IonError.Incomplete;
+        const presence = self.input[self.i];
+        self.i += 1;
+
+        var parts = std.ArrayListUnmanaged([]const u8){};
+        defer parts.deinit(self.arena.allocator());
+
+        const addLob = struct {
+            fn run(arena: *value.Arena, list: *std.ArrayListUnmanaged([]const u8), v: value.Value) IonError!void {
+                const b: []const u8 = switch (v) {
+                    .blob => |bb| bb,
+                    .clob => |bb| bb,
+                    else => return IonError.InvalidIon,
+                };
+                list.append(arena.allocator(), b) catch return IonError.OutOfMemory;
+            }
+        }.run;
+
+        switch (presence) {
+            0 => {},
+            1 => try addLob(self.arena, &parts, try self.readValue()),
+            2 => {
+                const group = try self.readExpressionGroup(.tagged);
+                for (group) |e| try addLob(self.arena, &parts, e.value);
+            },
+            else => return IonError.InvalidIon,
+        }
+
+        var total: usize = 0;
+        for (parts.items) |b| total += b.len;
+        const buf = self.arena.allocator().alloc(u8, total) catch return IonError.OutOfMemory;
+        var i: usize = 0;
+        for (parts.items) |b| {
+            if (b.len != 0) {
+                @memcpy(buf[i .. i + b.len], b);
+                i += b.len;
+            }
+        }
+
+        const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+        out[0] = .{ .annotations = &.{}, .value = .{ .blob = buf } };
         return out;
     }
 

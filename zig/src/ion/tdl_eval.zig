@@ -414,6 +414,43 @@ fn evalMacroInvocation(
         out[0] = out_elem;
         return out;
     }
+    if (std.mem.eql(u8, name, "make_blob")) {
+        // (make_blob <lob*>)
+        //
+        // Concatenates the bytes of each blob/clob argument (annotations dropped) and produces a
+        // single unannotated blob. Nulls and non-lob values signal an error.
+        var parts = std.ArrayListUnmanaged([]const u8){};
+        defer parts.deinit(arena.allocator());
+
+        for (args) |a| {
+            const vals = try evalExpr(arena, tab, env, a);
+            for (vals) |e| {
+                // Argument annotations are silently dropped.
+                const b: []const u8 = switch (e.value) {
+                    .blob => |bb| bb,
+                    .clob => |bb| bb,
+                    else => return IonError.InvalidIon,
+                };
+                parts.append(arena.allocator(), b) catch return IonError.OutOfMemory;
+            }
+        }
+
+        var total: usize = 0;
+        for (parts.items) |p| total += p.len;
+        const buf = arena.allocator().alloc(u8, total) catch return IonError.OutOfMemory;
+        var i: usize = 0;
+        for (parts.items) |p| {
+            if (p.len != 0) {
+                @memcpy(buf[i .. i + p.len], p);
+                i += p.len;
+            }
+        }
+
+        const out_elem: value.Element = .{ .annotations = &.{}, .value = .{ .blob = buf } };
+        const out = arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+        out[0] = out_elem;
+        return out;
+    }
     if (std.mem.eql(u8, name, "make_decimal")) {
         // (make_decimal <coefficient> <exponent>)
         if (args.len != 2) return IonError.InvalidIon;

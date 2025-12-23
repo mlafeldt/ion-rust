@@ -338,6 +338,7 @@ const Parser = struct {
             sum,
             make_string,
             make_symbol,
+            make_blob,
             make_list,
             make_sexp,
             make_decimal,
@@ -362,6 +363,7 @@ const Parser = struct {
                     10 => .make_symbol,
                     11 => .make_decimal,
                     12 => .make_timestamp,
+                    13 => .make_blob,
                     14 => .make_list,
                     15 => .make_sexp,
                     16 => .make_field,
@@ -389,6 +391,7 @@ const Parser = struct {
             if (std.mem.eql(u8, macro_id, "sum") or std.mem.eql(u8, macro_id, "$ion::sum")) break :blk .sum;
             if (std.mem.eql(u8, macro_id, "make_string") or std.mem.eql(u8, macro_id, "$ion::make_string")) break :blk .make_string;
             if (std.mem.eql(u8, macro_id, "make_symbol") or std.mem.eql(u8, macro_id, "$ion::make_symbol")) break :blk .make_symbol;
+            if (std.mem.eql(u8, macro_id, "make_blob") or std.mem.eql(u8, macro_id, "$ion::make_blob")) break :blk .make_blob;
             if (std.mem.eql(u8, macro_id, "make_decimal") or std.mem.eql(u8, macro_id, "$ion::make_decimal")) break :blk .make_decimal;
             if (std.mem.eql(u8, macro_id, "make_timestamp") or std.mem.eql(u8, macro_id, "$ion::make_timestamp")) break :blk .make_timestamp;
             if (std.mem.eql(u8, macro_id, "make_list") or std.mem.eql(u8, macro_id, "$ion::make_list")) break :blk .make_list;
@@ -645,6 +648,30 @@ const Parser = struct {
             }
             const out_text = buf.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
             const out_elem = value.Element{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, out_text) } };
+            const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+            out[0] = out_elem;
+            return out;
+        }
+
+        if (kind != null and kind.? == .make_blob) {
+            // (make_blob <lob*>)
+            //
+            // Concatenates the bytes of each blob/clob argument (annotations dropped) and produces
+            // a single unannotated blob. Nulls and non-lob values signal an error.
+            var buf = std.ArrayListUnmanaged(u8){};
+            errdefer buf.deinit(self.arena.allocator());
+            for (exprs.items) |res| {
+                for (res) |e| {
+                    // Argument annotations are silently dropped.
+                    switch (e.value) {
+                        .blob => |b| buf.appendSlice(self.arena.allocator(), b) catch return IonError.OutOfMemory,
+                        .clob => |b| buf.appendSlice(self.arena.allocator(), b) catch return IonError.OutOfMemory,
+                        else => return IonError.InvalidIon,
+                    }
+                }
+            }
+            const out_bytes = buf.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+            const out_elem = value.Element{ .annotations = &.{}, .value = .{ .blob = out_bytes } };
             const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
             out[0] = out_elem;
             return out;
