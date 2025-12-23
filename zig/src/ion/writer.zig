@@ -527,8 +527,7 @@ fn writeDecimalBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged
                 try appendSlice(&body, allocator, bytes);
             },
             .big => |bint| {
-                var mag = bint.*;
-                mag.abs();
+                const mag = bint.*;
                 const bits: usize = mag.toConst().bitCountAbs();
                 const byte_len: usize = (bits + 7) / 8;
                 const msb_bits: usize = if (bits == 0) 0 else ((bits - 1) % 8) + 1;
@@ -633,8 +632,7 @@ fn writeTimestampBinary(allocator: std.mem.Allocator, out: *std.ArrayListUnmanag
                 try appendSlice(&body, allocator, bytes);
             },
             .big => |bint| {
-                var mag = bint.*;
-                mag.abs();
+                const mag = bint.*;
                 const bits: usize = mag.toConst().bitCountAbs();
                 const byte_len: usize = (bits + 7) / 8;
                 const msb_bits: usize = if (bits == 0) 0 else ((bits - 1) % 8) + 1;
@@ -868,9 +866,7 @@ fn writeValueText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
                     try appendSlice(out, allocator, coeff_s);
                 },
                 .big => |c| {
-                    var mag = c.*;
-                    mag.abs();
-                    const coeff_s = mag.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
+                    const coeff_s = c.*.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
                     defer allocator.free(coeff_s);
                     try appendSlice(out, allocator, coeff_s);
                 },
@@ -974,9 +970,7 @@ fn writeTimestampText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged
                     try appendSlice(out, allocator, coeff_s);
                 },
                 .big => |c| {
-                    var mag = c.*;
-                    mag.abs();
-                    const s = mag.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
+                    const s = c.*.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
                     coeff_owned = s;
                     coeff_s = s;
                     if (coeff_s.len < digits) {
