@@ -17,6 +17,7 @@
 const std = @import("std");
 const ion = @import("../ion.zig");
 const value = @import("value.zig");
+const symtab = @import("symtab.zig");
 
 const IonError = ion.IonError;
 const MacroTable = ion.macro.MacroTable;
@@ -46,29 +47,129 @@ const Decoder = struct {
         errdefer out.deinit(self.arena.allocator());
 
         while (self.i < self.input.len) {
-            // Ion Version Marker can appear in-stream; accept and ignore only the Ion 1.1 IVM.
-            if (self.i + 4 <= self.input.len and std.mem.eql(u8, self.input[self.i .. self.i + 4], &.{ 0xE0, 0x01, 0x01, 0xEA })) {
-                self.i += 4;
-                continue;
-            }
+            const vals = try self.readValueExpr();
+            out.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
+        }
 
+        return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+    }
+
+    fn readValueExpr(self: *Decoder) IonError![]value.Element {
+        if (self.i >= self.input.len) return IonError.Incomplete;
+
+        // Ion Version Marker can appear in-stream; accept and ignore only the Ion 1.1 IVM.
+        if (self.i + 4 <= self.input.len and std.mem.eql(u8, self.input[self.i .. self.i + 4], &.{ 0xE0, 0x01, 0x01, 0xEA })) {
+            self.i += 4;
+            return &.{};
+        }
+
+        // NOP padding can occur anywhere.
+        const op0 = self.input[self.i];
+        if (op0 == 0xEC or op0 == 0xED) {
+            try self.skipNopPadding();
+            return &.{};
+        }
+
+        // Annotations sequences apply to the following value expression.
+        if (op0 >= 0xE4 and op0 <= 0xE9) {
+            const anns = try self.readAnnotationsSequence();
+            const inner = try self.readValueExpr();
+            if (inner.len == 0) return IonError.InvalidIon;
+            return try prependAnnotations(self.arena, anns, inner);
+        }
+
+        // E-expressions.
+        if (op0 == 0xEF) return self.readSystemMacroInvocationQualified();
+        if (op0 < 0x60) return self.readMacroInvocationUnqualified();
+        if (op0 == 0xF5) return IonError.Unsupported; // e-expression with length prefix (not yet implemented)
+
+        const v = try self.readValue();
+        const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+        one[0] = .{ .annotations = &.{}, .value = v };
+        return one;
+    }
+
+    fn skipNopPadding(self: *Decoder) IonError!void {
+        while (self.i < self.input.len) {
             const op = self.input[self.i];
-            // System macro invocations (`0xEF <addr> ...`).
-            if (op == 0xEF) {
-                const expanded = try self.readSystemMacroInvocationQualified();
-                out.appendSlice(self.arena.allocator(), expanded) catch return IonError.OutOfMemory;
+            if (op == 0xEC) {
+                self.i += 1;
                 continue;
             }
-            // Conformance-driven: treat low opcodes as user macro invocations (e-expressions).
-            // All value opcodes currently implemented are >= 0x60 or in the EA/EB range.
-            if (op < 0x60) {
-                const expanded = try self.readMacroInvocationUnqualified();
-                out.appendSlice(self.arena.allocator(), expanded) catch return IonError.OutOfMemory;
+            if (op == 0xED) {
+                self.i += 1;
+                const n = try readFlexUInt(self.input, &self.i);
+                if (self.i + n > self.input.len) return IonError.Incomplete;
+                self.i += n;
                 continue;
             }
+            break;
+        }
+    }
 
-            const v = try self.readValue();
-            out.append(self.arena.allocator(), .{ .annotations = &.{}, .value = v }) catch return IonError.OutOfMemory;
+    fn readAnnotationsSequence(self: *Decoder) IonError![]value.Symbol {
+        if (self.i >= self.input.len) return IonError.Incomplete;
+        const op = self.input[self.i];
+        self.i += 1;
+
+        var out = std.ArrayListUnmanaged(value.Symbol){};
+        errdefer out.deinit(self.arena.allocator());
+
+        const pushSymAddr = struct {
+            fn run(list: *std.ArrayListUnmanaged(value.Symbol), arena: *value.Arena, sid: usize) IonError!void {
+                if (sid > std.math.maxInt(u32)) return IonError.Unsupported;
+                list.append(arena.allocator(), value.makeSymbolId(@intCast(sid), null)) catch return IonError.OutOfMemory;
+            }
+        }.run;
+
+        switch (op) {
+            0xE4 => {
+                const sid = try readFlexUInt(self.input, &self.i);
+                try pushSymAddr(&out, self.arena, sid);
+            },
+            0xE5 => {
+                const a = try readFlexUInt(self.input, &self.i);
+                const b = try readFlexUInt(self.input, &self.i);
+                try pushSymAddr(&out, self.arena, a);
+                try pushSymAddr(&out, self.arena, b);
+            },
+            0xE6 => {
+                const seq_len = try readFlexUInt(self.input, &self.i);
+                if (self.i + seq_len > self.input.len) return IonError.Incomplete;
+                const bytes = self.input[self.i .. self.i + seq_len];
+                self.i += seq_len;
+
+                var j: usize = 0;
+                while (j < bytes.len) {
+                    const sid = try readFlexUInt(bytes, &j);
+                    try pushSymAddr(&out, self.arena, sid);
+                }
+                if (j != bytes.len) return IonError.InvalidIon;
+            },
+            0xE7 => {
+                const sym = try readFlexSymSymbol(self.arena, self.input, &self.i);
+                out.append(self.arena.allocator(), sym) catch return IonError.OutOfMemory;
+            },
+            0xE8 => {
+                const a = try readFlexSymSymbol(self.arena, self.input, &self.i);
+                const b = try readFlexSymSymbol(self.arena, self.input, &self.i);
+                out.append(self.arena.allocator(), a) catch return IonError.OutOfMemory;
+                out.append(self.arena.allocator(), b) catch return IonError.OutOfMemory;
+            },
+            0xE9 => {
+                const seq_len = try readFlexUInt(self.input, &self.i);
+                if (self.i + seq_len > self.input.len) return IonError.Incomplete;
+                const bytes = self.input[self.i .. self.i + seq_len];
+                self.i += seq_len;
+
+                var j: usize = 0;
+                while (j < bytes.len) {
+                    const sym = try readFlexSymSymbol(self.arena, bytes, &j);
+                    out.append(self.arena.allocator(), sym) catch return IonError.OutOfMemory;
+                }
+                if (j != bytes.len) return IonError.InvalidIon;
+            },
+            else => return IonError.InvalidIon,
         }
 
         return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
@@ -1344,10 +1445,20 @@ const Decoder = struct {
         if (op == 0x6E) return value.Value{ .bool = true };
         if (op == 0x6F) return value.Value{ .bool = false };
 
+        // Short timestamp: 80..8F (size in opcode table; payload is little-endian bitfields).
+        if (op >= 0x80 and op <= 0x8F) {
+            const code: usize = op - 0x80;
+            const sizes = [_]usize{ 1, 2, 2, 4, 5, 6, 7, 8, 5, 5, 7, 8, 9 };
+            if (code >= sizes.len) return IonError.InvalidIon;
+            const payload = try self.readBytes(sizes[code]);
+            return value.Value{ .timestamp = try decodeTimestampShort11(payload, code) };
+        }
+
         // Short strings: 90..9F (len in opcode).
         if (op >= 0x90 and op <= 0x9F) {
             const len: usize = op - 0x90;
             const b = try self.readBytes(len);
+            if (!std.unicode.utf8ValidateSlice(b)) return IonError.InvalidIon;
             const s = try self.arena.dupe(b);
             return value.Value{ .string = s };
         }
@@ -1356,8 +1467,73 @@ const Decoder = struct {
         if (op >= 0xA0 and op <= 0xAF) {
             const len: usize = op - 0xA0;
             const b = try self.readBytes(len);
+            if (!std.unicode.utf8ValidateSlice(b)) return IonError.InvalidIon;
             const t = try self.arena.dupe(b);
             return value.Value{ .symbol = value.makeSymbolId(null, t) };
+        }
+
+        // Short list: B0..BF (len in opcode).
+        if (op >= 0xB0 and op <= 0xBF) {
+            const len: usize = op - 0xB0;
+            const body = try self.readBytes(len);
+            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.mactab };
+            var items = std.ArrayListUnmanaged(value.Element){};
+            errdefer items.deinit(self.arena.allocator());
+            while (sub.i < sub.input.len) {
+                const vals = try sub.readValueExpr();
+                items.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
+            }
+            return value.Value{ .list = items.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory };
+        }
+
+        // Short sexp: C0..CF (len in opcode).
+        if (op >= 0xC0 and op <= 0xCF) {
+            const len: usize = op - 0xC0;
+            const body = try self.readBytes(len);
+            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.mactab };
+            var items = std.ArrayListUnmanaged(value.Element){};
+            errdefer items.deinit(self.arena.allocator());
+            while (sub.i < sub.input.len) {
+                const vals = try sub.readValueExpr();
+                items.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
+            }
+            return value.Value{ .sexp = items.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory };
+        }
+
+        // Short struct: D0..DF (len in opcode).
+        if (op >= 0xD0 and op <= 0xDF) {
+            if (op == 0xD1) return IonError.InvalidIon; // reserved
+            const len: usize = op - 0xD0;
+            const body = try self.readBytes(len);
+            const st = try parseStructBody(self.arena, body, self.mactab);
+            return value.Value{ .@"struct" = st };
+        }
+
+        // Ion 1.1 IVM opcode (`E0`, 3 bytes payload) may appear in-stream; accept and ignore only the Ion 1.1 IVM.
+        if (op == 0xE0) {
+            const b = try self.readBytes(3);
+            if (b[0] == 0x01 and b[1] == 0x01 and b[2] == 0xEA) return IonError.Unsupported; // should have been handled by `readValueExpr()`
+            return IonError.InvalidIon;
+        }
+
+        // Symbol address: E1..E3 (fixed uint with bias).
+        if (op >= 0xE1 and op <= 0xE3) {
+            const len: usize = op - 0xE0;
+            const b = try self.readBytes(len);
+            const id_raw: usize = readFixedUIntLE(b);
+            const biases = [_]usize{ 0, 256, 65792 };
+            const sid: usize = id_raw + biases[len - 1];
+            if (sid > std.math.maxInt(u32)) return IonError.Unsupported;
+            return value.Value{ .symbol = value.makeSymbolId(@intCast(sid), null) };
+        }
+
+        // System symbol address: EE (1-byte fixed uint address).
+        if (op == 0xEE) {
+            const b = try self.readBytes(1);
+            const addr: u32 = b[0];
+            const t = symtab.SystemSymtab11.textForSid(addr) orelse return IonError.InvalidIon;
+            const owned = try self.arena.dupe(t);
+            return value.Value{ .symbol = value.makeSymbolId(null, owned) };
         }
 
         // integers: 60..68 (len in opcode)
@@ -1410,6 +1586,115 @@ const Decoder = struct {
             return value.Value{ .decimal = try decodeDecimal11(self.arena, payload) };
         }
 
+        // Long timestamp: F8 (length follows).
+        if (op == 0xF8) {
+            const len = try readFlexUInt(self.input, &self.i);
+            const payload = try self.readBytes(len);
+            return value.Value{ .timestamp = try decodeTimestampLong11(payload) };
+        }
+
+        // Long string: F9 (length follows).
+        if (op == 0xF9) {
+            const len = try readFlexUInt(self.input, &self.i);
+            const b = try self.readBytes(len);
+            if (!std.unicode.utf8ValidateSlice(b)) return IonError.InvalidIon;
+            const s = try self.arena.dupe(b);
+            return value.Value{ .string = s };
+        }
+
+        // Long symbol with inline text: FA (length follows).
+        if (op == 0xFA) {
+            const len = try readFlexUInt(self.input, &self.i);
+            const b = try self.readBytes(len);
+            if (!std.unicode.utf8ValidateSlice(b)) return IonError.InvalidIon;
+            const t = try self.arena.dupe(b);
+            return value.Value{ .symbol = value.makeSymbolId(null, t) };
+        }
+
+        // Long list: FB (length follows).
+        if (op == 0xFB) {
+            const len = try readFlexUInt(self.input, &self.i);
+            const body = try self.readBytes(len);
+            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.mactab };
+            var items = std.ArrayListUnmanaged(value.Element){};
+            errdefer items.deinit(self.arena.allocator());
+            while (sub.i < sub.input.len) {
+                const vals = try sub.readValueExpr();
+                items.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
+            }
+            return value.Value{ .list = items.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory };
+        }
+
+        // Long sexp: FC (length follows).
+        if (op == 0xFC) {
+            const len = try readFlexUInt(self.input, &self.i);
+            const body = try self.readBytes(len);
+            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.mactab };
+            var items = std.ArrayListUnmanaged(value.Element){};
+            errdefer items.deinit(self.arena.allocator());
+            while (sub.i < sub.input.len) {
+                const vals = try sub.readValueExpr();
+                items.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
+            }
+            return value.Value{ .sexp = items.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory };
+        }
+
+        // Long struct: FD (length follows).
+        if (op == 0xFD) {
+            const len = try readFlexUInt(self.input, &self.i);
+            const body = try self.readBytes(len);
+            const st = try parseStructBody(self.arena, body, self.mactab);
+            return value.Value{ .@"struct" = st };
+        }
+
+        // Delimited containers.
+        if (op == 0xF1) {
+            var items = std.ArrayListUnmanaged(value.Element){};
+            errdefer items.deinit(self.arena.allocator());
+            while (true) {
+                if (self.i >= self.input.len) return IonError.Incomplete;
+                if (self.input[self.i] == 0xF0) {
+                    self.i += 1;
+                    break;
+                }
+                const vals = try self.readValueExpr();
+                items.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
+            }
+            return value.Value{ .list = items.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory };
+        }
+        if (op == 0xF2) {
+            var items = std.ArrayListUnmanaged(value.Element){};
+            errdefer items.deinit(self.arena.allocator());
+            while (true) {
+                if (self.i >= self.input.len) return IonError.Incomplete;
+                if (self.input[self.i] == 0xF0) {
+                    self.i += 1;
+                    break;
+                }
+                const vals = try self.readValueExpr();
+                items.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
+            }
+            return value.Value{ .sexp = items.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory };
+        }
+        if (op == 0xF3) {
+            const st = try parseStructDelimited(self.arena, self.input, &self.i, self.mactab);
+            return value.Value{ .@"struct" = st };
+        }
+
+        // Blob / clob.
+        if (op == 0xFE) {
+            const len = try readFlexUInt(self.input, &self.i);
+            const b = try self.readBytes(len);
+            const owned = try self.arena.dupe(b);
+            return value.Value{ .blob = owned };
+        }
+        if (op == 0xFF) {
+            const len = try readFlexUInt(self.input, &self.i);
+            const b = try self.readBytes(len);
+            const owned = try self.arena.dupe(b);
+            return value.Value{ .clob = owned };
+        }
+
         return IonError.Unsupported;
     }
 
@@ -1420,6 +1705,324 @@ const Decoder = struct {
         return out;
     }
 };
+
+fn prependAnnotations(arena: *value.Arena, prefix: []const value.Symbol, elems: []const value.Element) IonError![]value.Element {
+    if (prefix.len == 0) return @constCast(elems);
+    const out = arena.allocator().alloc(value.Element, elems.len) catch return IonError.OutOfMemory;
+    for (elems, 0..) |e, i| {
+        var merged = std.ArrayListUnmanaged(value.Symbol){};
+        errdefer merged.deinit(arena.allocator());
+        merged.appendSlice(arena.allocator(), prefix) catch return IonError.OutOfMemory;
+        merged.appendSlice(arena.allocator(), e.annotations) catch return IonError.OutOfMemory;
+        out[i] = .{ .annotations = merged.toOwnedSlice(arena.allocator()) catch return IonError.OutOfMemory, .value = e.value };
+    }
+    return out;
+}
+
+fn readFixedUIntLE(bytes: []const u8) usize {
+    var v: usize = 0;
+    for (bytes, 0..) |b, idx| v |= (@as(usize, b) << @intCast(idx * 8));
+    return v;
+}
+
+const FlexSymDecoded = union(enum) {
+    symbol: value.Symbol,
+    end_delimited, // DelimitedContainerClose (0xF0) encoded via FlexSym escape.
+};
+
+fn readFlexSym(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!FlexSymDecoded {
+    const v = try readFlexInt(input, cursor);
+    if (v > 0) {
+        return .{ .symbol = value.makeSymbolId(@intCast(@as(u32, @intCast(v))), null) };
+    }
+    if (v < 0) {
+        const len: usize = @intCast(@as(i64, -@as(i64, v)));
+        if (cursor.* + len > input.len) return IonError.Incomplete;
+        const b = input[cursor.* .. cursor.* + len];
+        cursor.* += len;
+        if (!std.unicode.utf8ValidateSlice(b)) return IonError.InvalidIon;
+        const owned = try arena.dupe(b);
+        return .{ .symbol = value.makeSymbolId(null, owned) };
+    }
+
+    if (cursor.* >= input.len) return IonError.Incomplete;
+    const esc = input[cursor.*];
+    cursor.* += 1;
+    return switch (esc) {
+        0x60 => .{ .symbol = value.makeSymbolId(0, null) },
+        0x61...0xE0 => blk: {
+            const addr: u32 = @intCast(esc - 0x60);
+            const t = symtab.SystemSymtab11.textForSid(addr) orelse return IonError.InvalidIon;
+            const owned = try arena.dupe(t);
+            break :blk .{ .symbol = value.makeSymbolId(null, owned) };
+        },
+        0xF0 => .end_delimited,
+        else => IonError.Unsupported,
+    };
+}
+
+fn readFlexSymSymbol(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!value.Symbol {
+    const d = try readFlexSym(arena, input, cursor);
+    return switch (d) {
+        .symbol => |s| s,
+        .end_delimited => return IonError.InvalidIon,
+    };
+}
+
+fn parseStructBody(arena: *value.Arena, body: []const u8, mactab: ?*const MacroTable) IonError!value.Struct {
+    var d = Decoder{ .arena = arena, .input = body, .i = 0, .mactab = mactab };
+    var fields = std.ArrayListUnmanaged(value.StructField){};
+    errdefer fields.deinit(arena.allocator());
+
+    const Mode = enum { symbol_address, flex_sym };
+    var mode: Mode = .symbol_address;
+
+    while (d.i < d.input.len) {
+        var name_sym: value.Symbol = undefined;
+        switch (mode) {
+            .symbol_address => {
+                const id = try readFlexUInt(d.input, &d.i);
+                if (id == 0) {
+                    mode = .flex_sym;
+                    continue;
+                }
+                if (id > std.math.maxInt(u32)) return IonError.Unsupported;
+                name_sym = value.makeSymbolId(@intCast(id), null);
+            },
+            .flex_sym => {
+                const dec = try readFlexSym(arena, d.input, &d.i);
+                switch (dec) {
+                    .symbol => |s| name_sym = s,
+                    .end_delimited => return IonError.InvalidIon,
+                }
+            },
+        }
+
+        // If the next value expression is NOP padding, the field is omitted.
+        if (d.i < d.input.len and (d.input[d.i] == 0xEC or d.input[d.i] == 0xED)) {
+            try d.skipNopPadding();
+            continue;
+        }
+
+        const vals = try d.readValueExpr();
+        if (vals.len != 1) return IonError.InvalidIon;
+        fields.append(arena.allocator(), .{ .name = name_sym, .value = vals[0] }) catch return IonError.OutOfMemory;
+    }
+
+    return .{ .fields = fields.toOwnedSlice(arena.allocator()) catch return IonError.OutOfMemory };
+}
+
+fn parseStructDelimited(arena: *value.Arena, input: []const u8, cursor: *usize, mactab: ?*const MacroTable) IonError!value.Struct {
+    var d = Decoder{ .arena = arena, .input = input, .i = cursor.*, .mactab = mactab };
+    defer cursor.* = d.i;
+
+    var fields = std.ArrayListUnmanaged(value.StructField){};
+    errdefer fields.deinit(arena.allocator());
+
+    while (true) {
+        const dec = try readFlexSym(arena, d.input, &d.i);
+        switch (dec) {
+            .end_delimited => break,
+            .symbol => |name_sym| {
+                if (d.i < d.input.len and (d.input[d.i] == 0xEC or d.input[d.i] == 0xED)) {
+                    try d.skipNopPadding();
+                    continue;
+                }
+                const vals = try d.readValueExpr();
+                if (vals.len != 1) return IonError.InvalidIon;
+                fields.append(arena.allocator(), .{ .name = name_sym, .value = vals[0] }) catch return IonError.OutOfMemory;
+            },
+        }
+    }
+
+    return .{ .fields = fields.toOwnedSlice(arena.allocator()) catch return IonError.OutOfMemory };
+}
+
+fn extractBitsU16(v: u16, mask: u16) u16 {
+    return (v & mask) >> @intCast(@ctz(mask));
+}
+
+fn extractBitsU32(v: u32, mask: u32) u32 {
+    return (v & mask) >> @intCast(@ctz(mask));
+}
+
+fn decodeTimestampShort11(payload: []const u8, length_code: usize) IonError!value.Timestamp {
+    // Ported from ion-rust's BinaryEncoding_1_1 short timestamp decoding logic.
+    // This preserves representation (including subsecond precision) for roundtrips.
+    if (payload.len == 0) return IonError.InvalidIon;
+
+    // Year is biased by 1970 in the low 7 bits of the first byte.
+    const year: i32 = @intCast(@as(u32, payload[0] & 0x7F) + 1970);
+    var ts: value.Timestamp = .{
+        .year = year,
+        .month = null,
+        .day = null,
+        .hour = null,
+        .minute = null,
+        .second = null,
+        .fractional = null,
+        .offset_minutes = null,
+        .precision = .year,
+    };
+    if (length_code == 0) return ts;
+
+    const m16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(payload[0..2].ptr)), .little);
+    const month: u8 = @intCast(extractBitsU16(m16, 0x0780));
+    ts.month = month;
+    ts.precision = .month;
+    if (length_code == 1) return ts;
+
+    const day: u8 = (payload[1] & 0xF8) >> 3;
+    ts.day = day;
+    ts.precision = .day;
+    if (length_code == 2) return ts;
+
+    const hour: u8 = payload[2] & 0x1F;
+    const hm16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(payload[2..4].ptr)), .little);
+    const minute: u8 = @intCast((hm16 >> 5) & 0x3F);
+    ts.hour = hour;
+    ts.minute = minute;
+    ts.precision = .minute;
+
+    if (length_code < 8) {
+        // UTC/unknown offset indicated by a bit in payload[3].
+        const is_utc = (payload[3] & 0x08) != 0;
+        ts.offset_minutes = if (is_utc) 0 else null;
+        if (length_code == 3) return ts;
+
+        const second_u16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(payload[3..5].ptr)), .little);
+        const sec: u8 = @intCast(extractBitsU16(second_u16, 0x03F0));
+        ts.second = sec;
+        ts.precision = .second;
+        if (length_code == 4) return ts;
+
+        if (length_code == 5) {
+            const ms_u16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(payload[4..6].ptr)), .little);
+            const ms: u32 = @intCast(extractBitsU16(ms_u16, 0x0FFC));
+            ts.fractional = .{ .is_negative = false, .coefficient = .{ .small = ms }, .exponent = -3 };
+            ts.precision = .fractional;
+            return ts;
+        }
+        if (length_code == 6) {
+            const u = std.mem.readInt(u32, @as(*const [4]u8, @ptrCast(payload[3..7].ptr)), .little);
+            const us: u32 = extractBitsU32(u, 0x3FFF_FC00);
+            ts.fractional = .{ .is_negative = false, .coefficient = .{ .small = us }, .exponent = -6 };
+            ts.precision = .fractional;
+            return ts;
+        }
+        if (length_code == 7) {
+            const u = std.mem.readInt(u32, @as(*const [4]u8, @ptrCast(payload[4..8].ptr)), .little);
+            const ns: u32 = u >> 2;
+            ts.fractional = .{ .is_negative = false, .coefficient = .{ .small = ns }, .exponent = -9 };
+            ts.precision = .fractional;
+            return ts;
+        }
+        return IonError.InvalidIon;
+    } else {
+        // Known offset (15-minute multiple with bias -14:00).
+        const off_u16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(payload[3..5].ptr)), .little);
+        const off_mult: i32 = @intCast(extractBitsU16(off_u16, 0x03F8));
+        const offset: i16 = @intCast(off_mult * 15 - (14 * 60));
+        ts.offset_minutes = offset;
+        if (length_code == 8) return ts;
+
+        const sec: u8 = @intCast(payload[4] >> 2);
+        ts.second = sec;
+        ts.precision = .second;
+        if (length_code == 9) return ts;
+
+        if (length_code == 0xA) {
+            const ms_u16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(payload[5..7].ptr)), .little);
+            const ms: u32 = @intCast(extractBitsU16(ms_u16, 0x03FF));
+            ts.fractional = .{ .is_negative = false, .coefficient = .{ .small = ms }, .exponent = -3 };
+            ts.precision = .fractional;
+            return ts;
+        }
+        if (length_code == 0xB) {
+            const u = std.mem.readInt(u32, @as(*const [4]u8, @ptrCast(payload[4..8].ptr)), .little);
+            const us: u32 = extractBitsU32(u, 0x0FFF_00);
+            ts.fractional = .{ .is_negative = false, .coefficient = .{ .small = us }, .exponent = -6 };
+            ts.precision = .fractional;
+            return ts;
+        }
+        if (length_code == 0xC) {
+            const u = std.mem.readInt(u32, @as(*const [4]u8, @ptrCast(payload[5..9].ptr)), .little);
+            const ns: u32 = u & 0x3FFF_FFFF;
+            ts.fractional = .{ .is_negative = false, .coefficient = .{ .small = ns }, .exponent = -9 };
+            ts.precision = .fractional;
+            return ts;
+        }
+
+        return IonError.InvalidIon;
+    }
+}
+
+fn decodeTimestampLong11(payload: []const u8) IonError!value.Timestamp {
+    // Ported from ion-rust's BinaryEncoding_1_1 long timestamp decoding logic.
+    if (payload.len < 2 or payload.len == 4 or payload.len == 5) return IonError.InvalidIon;
+
+    const y16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(payload[0..2].ptr)), .little);
+    const year: i32 = @intCast(y16 & 0x3FFF);
+    var ts: value.Timestamp = .{
+        .year = year,
+        .month = null,
+        .day = null,
+        .hour = null,
+        .minute = null,
+        .second = null,
+        .fractional = null,
+        .offset_minutes = null,
+        .precision = .year,
+    };
+    if (payload.len == 2) return ts;
+
+    const m16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(payload[1..3].ptr)), .little);
+    const month: u8 = @intCast(extractBitsU16(m16, 0x03C0));
+    const day: u8 = @intCast((payload[2] & 0x7C) >> 2); // mask 0x7C, shift 2
+    ts.month = month;
+    ts.precision = .month;
+    if (payload.len == 3 and day == 0) return ts;
+
+    ts.day = day;
+    ts.precision = .day;
+    if (payload.len == 3) return ts;
+
+    const h16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(payload[2..4].ptr)), .little);
+    const hour: u8 = @intCast(extractBitsU16(h16, 0x0F80));
+    const min16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(payload[3..5].ptr)), .little);
+    const minute: u8 = @intCast(extractBitsU16(min16, 0x03F0));
+    const off16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(payload[4..6].ptr)), .little);
+    const off_bits: u16 = extractBitsU16(off16, 0x3FFC);
+    const offset: ?i16 = if (off_bits == 0x0FFF) null else @intCast(@as(i32, off_bits) - 1440);
+
+    ts.hour = hour;
+    ts.minute = minute;
+    ts.offset_minutes = offset;
+    ts.precision = .minute;
+    if (payload.len == 6) return ts;
+
+    const s16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(payload[5..7].ptr)), .little);
+    const sec: u8 = @intCast(extractBitsU16(s16, 0x0FC0));
+    ts.second = sec;
+    ts.precision = .second;
+    if (payload.len == 7) return ts;
+
+    // Fractional seconds: [flexuint scale][fixed uint coeff bytes...]
+    var j: usize = 7;
+    const scale = try readFlexUInt(payload, &j);
+    const coeff_len: usize = payload.len - j;
+    if (coeff_len > 16) return IonError.Unsupported;
+    const coeff_bytes = payload[j..];
+    const coeff_u: u128 = blk: {
+        var buf: [16]u8 = [_]u8{0} ** 16;
+        std.mem.copyForwards(u8, buf[0..coeff_bytes.len], coeff_bytes);
+        break :blk std.mem.readInt(u128, @as(*const [16]u8, @ptrCast(buf[0..16].ptr)), .little);
+    };
+    if (coeff_u > std.math.maxInt(i128)) return IonError.Unsupported;
+    ts.fractional = .{ .is_negative = false, .coefficient = .{ .small = @intCast(coeff_u) }, .exponent = -@as(i32, @intCast(scale)) };
+    ts.precision = .fractional;
+    return ts;
+}
 
 fn isTaglessValuesBody(expr: value.Element, param_name: []const u8) bool {
     if (expr.annotations.len != 0 or expr.value != .sexp) return false;
