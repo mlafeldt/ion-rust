@@ -335,6 +335,7 @@ known texts sparsely. See `zig/src/ion/symtab.zig` (`SymbolTable.addImport()` an
 2) Lists require commas; sexps do not allow commas, matching "bad" fixtures.
 3) Timestamps are validated tightly (ranges, precision rules, explicit offsets for time precision).
 4) Binary streams can contain IVM mid-stream; the parser tolerates Ion 1.0 IVM and ignores it.
+5) The test harness can be run from either the repo root (`zig build test`) or from `zig/` directly (`zig test src/tests.zig`).
 
 ## Repo pointers
 
