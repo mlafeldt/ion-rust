@@ -33,7 +33,19 @@ fn walkAndTest(
     skip_list: []const []const u8,
     test_fn: fn ([]const u8, []const u8) anyerror!void,
 ) !void {
-    var dir = try std.fs.cwd().openDir(base_path, .{ .iterate = true });
+    // Some commands (e.g. `zig test src/tests.zig`) run with CWD set to `zig/`, while the normal
+    // `zig build test` runs from the repo root. Try both so the tests are runnable either way.
+    var alt_base_path: ?[]const u8 = null;
+    defer if (alt_base_path) |p| allocator.free(p);
+
+    var dir = std.fs.cwd().openDir(base_path, .{ .iterate = true }) catch |e| switch (e) {
+        error.FileNotFound => blk: {
+            const alt = try std.fs.path.join(allocator, &.{ "..", base_path });
+            alt_base_path = alt;
+            break :blk try std.fs.cwd().openDir(alt, .{ .iterate = true });
+        },
+        else => return e,
+    };
     defer dir.close();
 
     var walker = try dir.walk(allocator);
@@ -51,7 +63,7 @@ fn walkAndTest(
         const repo_rel = full_path;
         if (isSkipped(repo_rel, skip_list)) continue;
 
-        const data = try std.fs.cwd().readFileAlloc(allocator, repo_rel, 64 * 1024 * 1024);
+        const data = try dir.readFileAlloc(allocator, entry.path, 64 * 1024 * 1024);
         defer allocator.free(data);
 
         try test_fn(repo_rel, data);
