@@ -30,7 +30,7 @@ fn writeElement(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), 
 
 fn writeValue(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), v: value.Value) IonError!void {
     switch (v) {
-        .null => try appendByte(out, allocator, 0xEA),
+        .null => |t| try writeNull(allocator, out, t),
         .bool => |b| try appendByte(out, allocator, if (b) 0x6E else 0x6F),
         .int => |i| try writeInt(allocator, out, i),
         .float => |f| try writeFloat(allocator, out, f),
@@ -42,8 +42,36 @@ fn writeValue(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), v:
         .list => |items| try writeSequence(allocator, out, 0xB0, 0xFB, items),
         .sexp => |items| try writeSequence(allocator, out, 0xC0, 0xFC, items),
         .@"struct" => |st| try writeStruct(allocator, out, st),
-        .timestamp => return IonError.Unsupported, // TODO
+        .timestamp => |ts| try writeTimestamp(allocator, out, ts),
     }
+}
+
+fn ionTypeToTypeCode(t: value.IonType) ?u8 {
+    return switch (t) {
+        .null => null,
+        .bool => 0x00,
+        .int => 0x01,
+        .float => 0x02,
+        .decimal => 0x03,
+        .timestamp => 0x04,
+        .string => 0x05,
+        .symbol => 0x06,
+        .blob => 0x07,
+        .clob => 0x08,
+        .list => 0x09,
+        .sexp => 0x0A,
+        .@"struct" => 0x0B,
+    };
+}
+
+fn writeNull(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), t: value.IonType) IonError!void {
+    if (t == .null) {
+        try appendByte(out, allocator, 0xEA);
+        return;
+    }
+    const tc = ionTypeToTypeCode(t) orelse return IonError.InvalidIon;
+    try appendByte(out, allocator, 0xEB);
+    try appendByte(out, allocator, tc);
 }
 
 fn writeInt(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), i: value.Int) IonError!void {
@@ -59,6 +87,125 @@ fn writeInt(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), i: v
     try appendByte(out, allocator, 0xF6);
     try writeFlexUIntShift1(out, allocator, bytes.len);
     try appendSlice(out, allocator, bytes);
+}
+
+fn writeTimestamp(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), ts: value.Timestamp) IonError!void {
+    // Keep this encoding simple: always use the long timestamp opcode (0xF8) and emit the
+    // bit-field payload format that `binary11.decodeTimestampLong11()` expects.
+    //
+    // This is not intended to be a canonical/minimal encoder; it's a regression-test/tooling
+    // writer for the existing decoder.
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try encodeTimestampLongPayload(&payload, allocator, ts);
+
+    try appendByte(out, allocator, 0xF8);
+    try writeFlexUIntShift1(out, allocator, payload.items.len);
+    try appendSlice(out, allocator, payload.items);
+}
+
+fn encodeTimestampLongPayload(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, ts: value.Timestamp) IonError!void {
+    if (ts.year < 0 or ts.year > 0x3FFF) return IonError.InvalidIon;
+
+    const fixed_len: usize = switch (ts.precision) {
+        .year => 2,
+        .month, .day => 3,
+        .minute => 6,
+        .second => 7,
+        .fractional => 7, // scale + coeff appended after the fixed header
+    };
+
+    const buf = try allocator.alloc(u8, fixed_len);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    const setBitsU16At = struct {
+        fn run(bytes: []u8, offset: usize, mask: u16, v: u16) void {
+            const cur = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(bytes[offset .. offset + 2].ptr)), .little);
+            const shift: u4 = @intCast(@ctz(mask));
+            const next = (cur & ~mask) | ((v << shift) & mask);
+            std.mem.writeInt(u16, @as(*[2]u8, @ptrCast(bytes[offset .. offset + 2].ptr)), next, .little);
+        }
+    }.run;
+
+    // year: low 14 bits of payload[0..2]
+    setBitsU16At(buf, 0, 0x3FFF, @intCast(ts.year));
+    if (ts.precision == .year) {
+        try appendSlice(out, allocator, buf);
+        return;
+    }
+
+    const month = ts.month orelse return IonError.InvalidIon;
+    if (month < 1 or month > 12) return IonError.InvalidIon;
+    // month: bits 6..9 of u16 at payload[1..3]
+    setBitsU16At(buf, 1, 0x03C0, @intCast(month));
+
+    const day: u8 = if (ts.precision == .month) 0 else (ts.day orelse return IonError.InvalidIon);
+    if (ts.precision != .month) {
+        if (day < 1 or day > 31) return IonError.InvalidIon;
+    }
+    // day: payload[2] bits 2..6
+    buf[2] = (buf[2] & ~@as(u8, 0x7C)) | ((day & 0x1F) << 2);
+
+    if (ts.precision == .month or ts.precision == .day) {
+        try appendSlice(out, allocator, buf);
+        return;
+    }
+
+    const hour = ts.hour orelse return IonError.InvalidIon;
+    const minute = ts.minute orelse return IonError.InvalidIon;
+    if (hour > 23 or minute > 59) return IonError.InvalidIon;
+
+    const off_bits: u16 = blk: {
+        if (ts.offset_minutes) |off| {
+            if (off < -1440 or off > 1439) return IonError.InvalidIon;
+            const tmp: i32 = @as(i32, off) + 1440;
+            if (tmp == 0x0FFF) return IonError.InvalidIon; // reserved for unknown offset
+            break :blk @intCast(tmp);
+        } else {
+            break :blk 0x0FFF; // unknown offset
+        }
+    };
+
+    // hour: bits 7..11 of u16 at payload[2..4]
+    setBitsU16At(buf, 2, 0x0F80, @intCast(hour));
+    // minute: bits 4..9 of u16 at payload[3..5]
+    setBitsU16At(buf, 3, 0x03F0, @intCast(minute));
+    // offset bits: bits 2..13 of u16 at payload[4..6]
+    setBitsU16At(buf, 4, 0x3FFC, off_bits);
+
+    if (ts.precision == .minute) {
+        try appendSlice(out, allocator, buf);
+        return;
+    }
+
+    const sec = ts.second orelse return IonError.InvalidIon;
+    if (sec > 59) return IonError.InvalidIon;
+    // seconds: bits 6..11 of u16 at payload[5..7]
+    setBitsU16At(buf, 5, 0x0FC0, @intCast(sec));
+
+    try appendSlice(out, allocator, buf);
+    if (ts.precision == .second) return;
+
+    const frac = ts.fractional orelse return IonError.InvalidIon;
+    if (frac.is_negative) return IonError.InvalidIon;
+    if (frac.exponent > 0) return IonError.InvalidIon;
+    const scale: usize = @intCast(-frac.exponent);
+    try writeFlexUIntShift1(out, allocator, scale);
+
+    const coeff_u128: u128 = switch (frac.coefficient) {
+        .small => |v| blk: {
+            if (v < 0) return IonError.InvalidIon;
+            break :blk @intCast(v);
+        },
+        .big => return IonError.Unsupported,
+    };
+    if (coeff_u128 == 0) return;
+    var coeff_buf: [16]u8 = undefined;
+    std.mem.writeInt(u128, &coeff_buf, coeff_u128, .little);
+    var coeff_len: usize = 16;
+    while (coeff_len > 0 and coeff_buf[coeff_len - 1] == 0) : (coeff_len -= 1) {}
+    try appendSlice(out, allocator, coeff_buf[0..coeff_len]);
 }
 
 fn writeFloat(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), f: f64) IonError!void {
