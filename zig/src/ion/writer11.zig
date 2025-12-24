@@ -39,9 +39,9 @@ fn writeValue(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), v:
         .symbol => |s| try writeSymbol(allocator, out, s),
         .blob => |b| try writeLob(allocator, out, 0xFE, b),
         .clob => |b| try writeLob(allocator, out, 0xFF, b),
-        .list => |items| try writeSequence(allocator, out, 0xB0, 0xFB, items),
-        .sexp => |items| try writeSequence(allocator, out, 0xC0, 0xFC, items),
-        .@"struct" => |st| try writeStruct(allocator, out, st),
+        .list => |items| try writeDelimitedList(allocator, out, items),
+        .sexp => |items| try writeDelimitedSexp(allocator, out, items),
+        .@"struct" => |st| try writeDelimitedStruct(allocator, out, st),
         .timestamp => |ts| try writeTimestamp(allocator, out, ts),
     }
 }
@@ -324,6 +324,29 @@ fn writeLob(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), op: 
     try appendByte(out, allocator, op);
     try writeFlexUIntShift1(out, allocator, bytes.len);
     try appendSlice(out, allocator, bytes);
+}
+
+fn writeDelimitedList(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), items: []const value.Element) IonError!void {
+    try appendByte(out, allocator, 0xF1);
+    for (items) |e| try writeElement(allocator, out, e);
+    try appendByte(out, allocator, 0xF0);
+}
+
+fn writeDelimitedSexp(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), items: []const value.Element) IonError!void {
+    try appendByte(out, allocator, 0xF2);
+    for (items) |e| try writeElement(allocator, out, e);
+    try appendByte(out, allocator, 0xF0);
+}
+
+fn writeDelimitedStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), st: value.Struct) IonError!void {
+    try appendByte(out, allocator, 0xF3);
+    for (st.fields) |f| {
+        try writeFlexSymSymbol(out, allocator, f.name);
+        try writeElement(allocator, out, f.value);
+    }
+    // Delimited struct close marker: FlexSym escape F0.
+    try writeFlexIntShift1(out, allocator, 0);
+    try appendByte(out, allocator, 0xF0);
 }
 
 fn writeSequence(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), short_base: u8, long_op: u8, items: []const value.Element) IonError!void {
