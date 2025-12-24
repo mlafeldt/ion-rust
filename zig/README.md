@@ -132,7 +132,7 @@ Key properties:
 - `zig/src/ion/writer11.zig` (experimental / partial)
   - Emits Ion 1.1 IVM and a subset of Ion 1.1 binary value opcodes.
   - Intended for regression tests/ad-hoc tooling; not used by the main corpus/conformance harness yet.
-  - Limitations: no annotations, no timestamps, no macro/e-expression emission, no module mutation modeling, and symbols must have inline text (no SID-only output).
+  - Limitations: no timestamps, no macro/e-expression emission, no module mutation modeling, and symbols must have inline text (no SID-only output).
 
 ### Equality semantics
 
@@ -151,7 +151,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
-  - As of 2025-12-24, `cd zig && zig build test --summary all` runs 29 Zig tests; all pass.
+  - As of 2025-12-24, `cd zig && zig build test --summary all` runs 30 Zig tests; all pass.
 
 ### Skip list (currently empty)
 

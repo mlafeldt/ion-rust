@@ -1038,3 +1038,28 @@ test "ion 1.1 binary writer roundtrip (basic)" {
     const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
 }
+
+test "ion 1.1 binary writer roundtrip (annotations)" {
+    var ann_text_arr = [_]ion.value.Symbol{.{ .sid = null, .text = "ann" }};
+    var ann_sids_arr = [_]ion.value.Symbol{
+        .{ .sid = 1, .text = null },
+        .{ .sid = 2, .text = null },
+        .{ .sid = 3, .text = null },
+    };
+    const ann_text: []ion.value.Symbol = ann_text_arr[0..];
+    const ann_sids: []ion.value.Symbol = ann_sids_arr[0..];
+
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = ann_text, .value = .{ .int = .{ .small = 7 } } },
+        .{ .annotations = ann_sids, .value = .{ .string = "x" } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11(std.testing.allocator, doc);
+    defer std.testing.allocator.free(bytes);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
+}
