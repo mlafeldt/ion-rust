@@ -1383,6 +1383,123 @@ test "ion 1.1 binary system make_timestamp supports big decimal seconds coeffici
     try std.testing.expectEqual(@as(i128, 1), frac.coefficient.small);
 }
 
+test "ion 1.1 text system sum supports big ints" {
+    // $ion_1_1 (:sum 2^200 1) => 2^200 + 1 (BigInt)
+    var doc_bytes = std.ArrayListUnmanaged(u8){};
+    defer doc_bytes.deinit(std.testing.allocator);
+
+    try doc_bytes.appendSlice(std.testing.allocator, "$ion_1_1 (:sum 0x1");
+    var i: usize = 0;
+    while (i < 50) : (i += 1) try doc_bytes.append(std.testing.allocator, '0');
+    try doc_bytes.appendSlice(std.testing.allocator, " 1)");
+
+    var doc = try ion.parseDocument(std.testing.allocator, doc_bytes.items);
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), doc.elements.len);
+    try std.testing.expect(doc.elements[0].value == .int);
+    try std.testing.expect(doc.elements[0].value.int == .big);
+    const bi = doc.elements[0].value.int.big;
+    try std.testing.expect(bi.toConst().positive);
+    try std.testing.expectEqual(@as(usize, 201), bi.toConst().bitCountAbs());
+}
+
+test "ion 1.1 text system delta supports big ints" {
+    // $ion_1_1 (:delta 2^200 1) => [2^200, 2^200+1]
+    var doc_bytes = std.ArrayListUnmanaged(u8){};
+    defer doc_bytes.deinit(std.testing.allocator);
+
+    try doc_bytes.appendSlice(std.testing.allocator, "$ion_1_1 (:delta 0x1");
+    var i: usize = 0;
+    while (i < 50) : (i += 1) try doc_bytes.append(std.testing.allocator, '0');
+    try doc_bytes.appendSlice(std.testing.allocator, " 1)");
+
+    var doc = try ion.parseDocument(std.testing.allocator, doc_bytes.items);
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), doc.elements.len);
+    for (doc.elements) |e| {
+        try std.testing.expect(e.value == .int);
+        try std.testing.expect(e.value.int == .big);
+        try std.testing.expect(e.value.int.big.toConst().positive);
+    }
+
+    var buf0: [26]u8 = undefined;
+    var buf1: [26]u8 = undefined;
+    @memset(&buf0, 0);
+    @memset(&buf1, 0);
+    doc.elements[0].value.int.big.toConst().writeTwosComplement(&buf0, .big);
+    doc.elements[1].value.int.big.toConst().writeTwosComplement(&buf1, .big);
+
+    var expected0 = [_]u8{0} ** 26;
+    expected0[0] = 0x01;
+    var expected1 = [_]u8{0} ** 26;
+    expected1[0] = 0x01;
+    expected1[25] = 0x01;
+
+    try std.testing.expectEqualSlices(u8, &expected0, &buf0);
+    try std.testing.expectEqualSlices(u8, &expected1, &buf1);
+}
+
+test "ion 1.1 text system make_decimal accepts big coefficient" {
+    // $ion_1_1 (:make_decimal 2^200 0) => decimal(coefficient=2^200, exponent=0)
+    var doc_bytes = std.ArrayListUnmanaged(u8){};
+    defer doc_bytes.deinit(std.testing.allocator);
+
+    try doc_bytes.appendSlice(std.testing.allocator, "$ion_1_1 (:make_decimal 0x1");
+    var i: usize = 0;
+    while (i < 50) : (i += 1) try doc_bytes.append(std.testing.allocator, '0');
+    try doc_bytes.appendSlice(std.testing.allocator, " 0)");
+
+    var doc = try ion.parseDocument(std.testing.allocator, doc_bytes.items);
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), doc.elements.len);
+    try std.testing.expect(doc.elements[0].value == .decimal);
+    const d = doc.elements[0].value.decimal;
+    try std.testing.expectEqual(@as(i32, 0), d.exponent);
+    try std.testing.expect(!d.is_negative);
+    try std.testing.expect(d.coefficient == .big);
+    try std.testing.expectEqual(@as(usize, 201), d.coefficient.big.toConst().bitCountAbs());
+}
+
+test "ion 1.1 text system make_timestamp supports big decimal seconds coefficient" {
+    // Build:
+    //   seconds = (3*10^50 + 1)d-50 => second=3, fractional=1d-50
+    var coeff = std.ArrayListUnmanaged(u8){};
+    defer coeff.deinit(std.testing.allocator);
+    try coeff.append(std.testing.allocator, '3');
+    var i: usize = 0;
+    while (i < 49) : (i += 1) try coeff.append(std.testing.allocator, '0');
+    try coeff.append(std.testing.allocator, '1');
+
+    var doc_bytes = std.ArrayListUnmanaged(u8){};
+    defer doc_bytes.deinit(std.testing.allocator);
+    try doc_bytes.appendSlice(std.testing.allocator, "$ion_1_1 (:make_timestamp 2025 12 24 1 2 ");
+    try doc_bytes.appendSlice(std.testing.allocator, coeff.items);
+    try doc_bytes.appendSlice(std.testing.allocator, "d-50)");
+
+    var doc = try ion.parseDocument(std.testing.allocator, doc_bytes.items);
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), doc.elements.len);
+    try std.testing.expect(doc.elements[0].value == .timestamp);
+    const ts = doc.elements[0].value.timestamp;
+    try std.testing.expectEqual(@as(i32, 2025), ts.year);
+    try std.testing.expectEqual(@as(u8, 12), ts.month.?);
+    try std.testing.expectEqual(@as(u8, 24), ts.day.?);
+    try std.testing.expectEqual(@as(u8, 1), ts.hour.?);
+    try std.testing.expectEqual(@as(u8, 2), ts.minute.?);
+    try std.testing.expectEqual(@as(u8, 3), ts.second.?);
+    try std.testing.expect(ts.precision == .fractional);
+    try std.testing.expect(ts.fractional != null);
+    const frac = ts.fractional.?;
+    try std.testing.expectEqual(@as(i32, -50), frac.exponent);
+    try std.testing.expect(!frac.is_negative);
+    try std.testing.expect(frac.coefficient == .small);
+    try std.testing.expectEqual(@as(i128, 1), frac.coefficient.small);
+}
+
 test "ion 1.1 binary writer roundtrip (basic)" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
