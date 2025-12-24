@@ -120,6 +120,24 @@ fn writeTimestampShort(allocator: std.mem.Allocator, out: *std.ArrayListUnmanage
 
     const year_diff: u8 = @intCast(ts.year - 1970);
 
+    // Helper to build byte payloads that match `binary11.decodeTimestampShort11()`.
+    const setBitsU16At = struct {
+        fn run(bytes: []u8, offset: usize, mask: u16, v: u16) void {
+            const cur = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(bytes[offset .. offset + 2].ptr)), .little);
+            const shift: u4 = @intCast(@ctz(mask));
+            const next = (cur & ~mask) | ((v << shift) & mask);
+            std.mem.writeInt(u16, @as(*[2]u8, @ptrCast(bytes[offset .. offset + 2].ptr)), next, .little);
+        }
+    }.run;
+    const setBitsU32At = struct {
+        fn run(bytes: []u8, offset: usize, mask: u32, v: u32) void {
+            const cur = std.mem.readInt(u32, @as(*const [4]u8, @ptrCast(bytes[offset .. offset + 4].ptr)), .little);
+            const shift: u5 = @intCast(@ctz(mask));
+            const next = (cur & ~mask) | ((v << shift) & mask);
+            std.mem.writeInt(u32, @as(*[4]u8, @ptrCast(bytes[offset .. offset + 4].ptr)), next, .little);
+        }
+    }.run;
+
     switch (ts.precision) {
         .year => {
             // 80 + 0, payload size 1.
@@ -156,10 +174,75 @@ fn writeTimestampShort(allocator: std.mem.Allocator, out: *std.ArrayListUnmanage
             if (day < 1 or day > 31) return IonError.InvalidIon;
             if (hour > 23 or minute > 59) return IonError.InvalidIon;
 
-            const is_utc: bool = if (ts.offset_minutes) |off| blk: {
-                if (off != 0) return false; // short codes 3..5 cannot represent non-zero offsets
-                break :blk true;
-            } else false;
+            // If a known offset is present and representable, emit the known-offset short codes.
+            if (ts.offset_minutes) |off| {
+                if (@mod(off, @as(i16, 15)) == 0) {
+                    const off_i32: i32 = off;
+                    // Decoder uses: offset = off_mult*15 - (14*60). So off_mult = (offset + 840)/15.
+                    const biased = off_i32 + 14 * 60;
+                    if (biased >= 0 and @mod(biased, 15) == 0) {
+                        const off_mult: i32 = @divTrunc(biased, 15);
+                        if (off_mult >= 0 and off_mult <= 127) {
+                            const fixed_len: usize = switch (ts.precision) {
+                                .minute => 5,
+                                .second => 5,
+                                .fractional => 7, // ms only; else fall back to long
+                                else => unreachable,
+                            };
+                            var buf = [_]u8{0} ** 7;
+                            const payload = buf[0..fixed_len];
+
+                            // year/month/day
+                            payload[0] = (year_diff & 0x7F) | ((month & 0x01) << 7);
+                            payload[1] = @as(u8, @intCast((month >> 1) & 0x07)) | ((day & 0x1F) << 3);
+                            // hour/minute
+                            payload[2] = (hour & 0x1F) | ((minute & 0x07) << 5);
+                            payload[3] = @intCast((minute >> 3) & 0x07); // minute high bits in bits0..2
+
+                            // offset multiple in u16 at payload[3..5], mask 0x03F8 (bits3..9)
+                            setBitsU16At(payload, 3, 0x03F8, @intCast(off_mult));
+
+                            if (ts.precision == .minute) {
+                                try appendByte(out, allocator, 0x88);
+                                try appendSlice(out, allocator, payload);
+                                return true;
+                            }
+
+                            const sec = ts.second orelse return IonError.InvalidIon;
+                            if (sec > 59) return IonError.InvalidIon;
+                            // seconds: payload[4] >> 2
+                            payload[4] = (payload[4] & 0x03) | (@as(u8, @intCast(sec)) << 2);
+
+                            if (ts.precision == .second) {
+                                try appendByte(out, allocator, 0x89);
+                                try appendSlice(out, allocator, payload);
+                                return true;
+                            }
+
+                            const frac = ts.fractional orelse return IonError.InvalidIon;
+                            if (frac.is_negative) return IonError.InvalidIon;
+                            if (frac.exponent != -3) return false;
+                            const ms_u16: u16 = switch (frac.coefficient) {
+                                .small => |v| blk: {
+                                    if (v < 0) return IonError.InvalidIon;
+                                    if (v > 1023) return false;
+                                    break :blk @intCast(v);
+                                },
+                                .big => return false,
+                            };
+                            // ms bits: u16 at payload[5..7], mask 0x03FF
+                            setBitsU16At(payload, 5, 0x03FF, ms_u16);
+                            try appendByte(out, allocator, 0x8A);
+                            try appendSlice(out, allocator, payload);
+                            return true;
+                        }
+                    }
+                }
+                // Non-zero/non-representable offsets: use long timestamp.
+                return false;
+            }
+
+            const is_utc: bool = ts.offset_minutes != null;
 
             // Base 2 bytes: year/month/day
             const b0: u8 = (year_diff & 0x7F) | ((month & 0x01) << 7);
@@ -202,31 +285,81 @@ fn writeTimestampShort(allocator: std.mem.Allocator, out: *std.ArrayListUnmanage
             // Milliseconds only: exponent -3 and coefficient fits in the short table (0..1023).
             const frac = ts.fractional orelse return IonError.InvalidIon;
             if (frac.is_negative) return IonError.InvalidIon;
-            if (frac.exponent != -3) return false;
-            const ms_u16: u16 = switch (frac.coefficient) {
-                .small => |v| blk: {
-                    if (v < 0) return IonError.InvalidIon;
-                    if (v > 1023) return false;
-                    break :blk @intCast(v);
-                },
-                .big => return false,
-            };
+            if (frac.exponent == -3) {
+                const ms_u16: u16 = switch (frac.coefficient) {
+                    .small => |v| blk: {
+                        if (v < 0) return IonError.InvalidIon;
+                        if (v > 1023) return false;
+                        break :blk @intCast(v);
+                    },
+                    .big => return false,
+                };
 
-            // Milliseconds occupy bits 2..11 of u16 at payload[4..6]:
-            // - payload[4] bits 2..7 = low 6 bits
-            // - payload[5] bits 0..3 = high 4 bits
-            b4 |= @as(u8, @intCast((ms_u16 & 0x3F) << 2));
-            const b5: u8 = @intCast((ms_u16 >> 6) & 0x0F);
+                // Milliseconds occupy bits 2..11 of u16 at payload[4..6]:
+                // - payload[4] bits 2..7 = low 6 bits
+                // - payload[5] bits 0..3 = high 4 bits
+                b4 |= @as(u8, @intCast((ms_u16 & 0x3F) << 2));
+                const b5: u8 = @intCast((ms_u16 >> 6) & 0x0F);
 
-            // 80 + 5, payload size 6.
-            try appendByte(out, allocator, 0x85);
-            try appendByte(out, allocator, b0);
-            try appendByte(out, allocator, b1);
-            try appendByte(out, allocator, b2);
-            try appendByte(out, allocator, b3);
-            try appendByte(out, allocator, b4);
-            try appendByte(out, allocator, b5);
-            return true;
+                // 80 + 5, payload size 6.
+                try appendByte(out, allocator, 0x85);
+                try appendByte(out, allocator, b0);
+                try appendByte(out, allocator, b1);
+                try appendByte(out, allocator, b2);
+                try appendByte(out, allocator, b3);
+                try appendByte(out, allocator, b4);
+                try appendByte(out, allocator, b5);
+                return true;
+            }
+
+            if (frac.exponent == -6) {
+                const us_u32: u32 = switch (frac.coefficient) {
+                    .small => |v| blk: {
+                        if (v < 0) return IonError.InvalidIon;
+                        if (v > 1_048_575) return false; // 20 bits
+                        break :blk @intCast(v);
+                    },
+                    .big => return false,
+                };
+                var payload = [_]u8{0} ** 7;
+                payload[0] = b0;
+                payload[1] = b1;
+                payload[2] = b2;
+                payload[3] = b3;
+                payload[4] = b4;
+                // us bits live in u32 at payload[3..7], mask 0x3FFF_FC00
+                setBitsU32At(&payload, 3, 0x3FFF_FC00, us_u32);
+                try appendByte(out, allocator, 0x86);
+                try appendSlice(out, allocator, &payload);
+                return true;
+            }
+
+            if (frac.exponent == -9) {
+                const ns_u32: u32 = switch (frac.coefficient) {
+                    .small => |v| blk: {
+                        if (v < 0) return IonError.InvalidIon;
+                        if (v > 999_999_999) return false;
+                        break :blk @intCast(v);
+                    },
+                    .big => return false,
+                };
+                var payload = [_]u8{0} ** 8;
+                payload[0] = b0;
+                payload[1] = b1;
+                payload[2] = b2;
+                payload[3] = b3;
+                payload[4] = b4; // includes seconds high bits in bits0..1
+                // ns bits live in u32 at payload[4..8], bits2..31. Encode as (ns<<2).
+                const raw: u32 = ns_u32 << 2;
+                std.mem.writeInt(u32, @as(*[4]u8, @ptrCast(payload[4..8].ptr)), raw, .little);
+                // Re-apply seconds bits (payload[4] bits0..1) after overwriting u32.
+                payload[4] = (payload[4] & 0xFC) | (b4 & 0x03);
+                try appendByte(out, allocator, 0x87);
+                try appendSlice(out, allocator, &payload);
+                return true;
+            }
+
+            return false;
         },
     }
 }
