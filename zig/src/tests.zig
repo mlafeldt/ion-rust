@@ -1271,3 +1271,34 @@ test "ion 1.1 binary writer encodes positive big int with sign bit set" {
     const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
 }
+
+test "ion 1.1 binary writer encodes negative big int with sign extension" {
+    // -2^128 cannot be represented as i128, so it uses the BigInt path.
+    var b = std.math.big.int.Managed.init(std.testing.allocator) catch return error.OutOfMemory;
+    defer b.deinit();
+
+    // Two's complement LE for -2^128: 17 bytes with byte[16]=0xFF and bytes[0..16]=0x00.
+    var tc: [17]u8 = [_]u8{0} ** 17;
+    tc[16] = 0xFF;
+    {
+        const bit_count: usize = tc.len * 8;
+        const limb_bits: usize = @bitSizeOf(std.math.big.Limb);
+        const needed_limbs: usize = (bit_count + limb_bits - 1) / limb_bits;
+        b.ensureCapacity(needed_limbs) catch return error.OutOfMemory;
+        var m = b.toMutable();
+        m.readTwosComplement(&tc, bit_count, .little, .signed);
+        b.setMetadata(m.positive, m.len);
+    }
+
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .big = &b } } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11(std.testing.allocator, doc);
+    defer std.testing.allocator.free(bytes);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
+}
