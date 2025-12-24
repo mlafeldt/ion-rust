@@ -1005,6 +1005,190 @@ test "ion 1.1 binary e-expression length-prefixed system make_string (0xF5)" {
     try std.testing.expectEqualStrings("hello", elems[0].value.string);
 }
 
+test "ion 1.1 binary e-expression length-prefixed system sum supports big ints" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Build a length-prefixed invocation:
+    //   F5 <addr=7> <args_len> <int(2^200)> <int(1)>
+    // where the large int is encoded as a long int (F6) with a 26-byte LE payload.
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+
+    const appendFlexUIntShift1 = struct {
+        fn run(list: *std.ArrayListUnmanaged(u8), v: usize) !void {
+            const raw: u128 = (@as(u128, v) << 1) | 1;
+            var tmp = raw;
+            while (tmp != 0) : (tmp >>= 8) {
+                try list.append(std.testing.allocator, @intCast(tmp & 0xFF));
+            }
+        }
+    }.run;
+
+    var args = std.ArrayListUnmanaged(u8){};
+    defer args.deinit(std.testing.allocator);
+
+    // int(2^200)
+    try args.appendSlice(std.testing.allocator, &.{ 0xF6, 0x35 });
+    var pow2_200 = [_]u8{0} ** 26;
+    pow2_200[25] = 0x01;
+    try args.appendSlice(std.testing.allocator, &pow2_200);
+    // int(1)
+    try args.appendSlice(std.testing.allocator, &.{ 0x61, 0x01 });
+
+    try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xF5 });
+    try appendFlexUIntShift1(&bytes, 7);
+    try appendFlexUIntShift1(&bytes, args.items.len);
+    try bytes.appendSlice(std.testing.allocator, args.items);
+
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expect(elems[0].value.int == .big);
+    const bi = elems[0].value.int.big;
+    try std.testing.expect(bi.toConst().positive);
+    try std.testing.expectEqual(@as(usize, 201), bi.toConst().bitCountAbs());
+}
+
+test "ion 1.1 binary e-expression length-prefixed system delta supports big ints" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Build a length-prefixed invocation:
+    //   F5 <addr=6> <args_len> <bitmap=10> <group len> <int(2^200)> <int(1)>
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+
+    const appendFlexUIntShift1 = struct {
+        fn run(list: *std.ArrayListUnmanaged(u8), v: usize) !void {
+            const raw: u128 = (@as(u128, v) << 1) | 1;
+            var tmp = raw;
+            while (tmp != 0) : (tmp >>= 8) {
+                try list.append(std.testing.allocator, @intCast(tmp & 0xFF));
+            }
+        }
+    }.run;
+
+    var group = std.ArrayListUnmanaged(u8){};
+    defer group.deinit(std.testing.allocator);
+    try group.appendSlice(std.testing.allocator, &.{ 0xF6, 0x35 });
+    var pow2_200 = [_]u8{0} ** 26;
+    pow2_200[25] = 0x01;
+    try group.appendSlice(std.testing.allocator, &pow2_200);
+    try group.appendSlice(std.testing.allocator, &.{ 0x61, 0x01 });
+
+    var args = std.ArrayListUnmanaged(u8){};
+    defer args.deinit(std.testing.allocator);
+    // Bitmap for a single variadic param: 10 (arg group).
+    try args.append(std.testing.allocator, 0x02);
+    try appendFlexUIntShift1(&args, group.items.len);
+    try args.appendSlice(std.testing.allocator, group.items);
+
+    try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xF5 });
+    try appendFlexUIntShift1(&bytes, 6);
+    try appendFlexUIntShift1(&bytes, args.items.len);
+    try bytes.appendSlice(std.testing.allocator, args.items);
+
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
+    try std.testing.expectEqual(@as(usize, 2), elems.len);
+
+    for (elems) |e| {
+        try std.testing.expect(e.value == .int);
+        try std.testing.expect(e.value.int == .big);
+        try std.testing.expect(e.value.int.big.toConst().positive);
+    }
+
+    var buf0: [26]u8 = undefined;
+    var buf1: [26]u8 = undefined;
+    @memset(&buf0, 0);
+    @memset(&buf1, 0);
+    elems[0].value.int.big.toConst().writeTwosComplement(&buf0, .big);
+    elems[1].value.int.big.toConst().writeTwosComplement(&buf1, .big);
+
+    var expected0_buf = [_]u8{0} ** 26;
+    expected0_buf[0] = 0x01;
+    var expected1_buf = [_]u8{0} ** 26;
+    expected1_buf[0] = 0x01;
+    expected1_buf[25] = 0x01;
+
+    try std.testing.expectEqualSlices(u8, &expected0_buf, &buf0);
+    try std.testing.expectEqualSlices(u8, &expected1_buf, &buf1);
+}
+
+test "ion 1.1 binary e-expression length-prefixed system make_timestamp supports big decimal seconds coefficient" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Build a decimal seconds value with a huge coefficient:
+    // exponent = -50, coefficient = 3*10^50 + 1 => seconds=3, fractional=1d-50.
+    const ten = try arena.makeBigInt();
+    ten.set(@as(u8, 10)) catch return error.OutOfMemory;
+    const pow10 = try arena.makeBigInt();
+    pow10.pow(ten, 50) catch return error.OutOfMemory;
+    const three = try arena.makeBigInt();
+    three.set(@as(u8, 3)) catch return error.OutOfMemory;
+    const scaled = try arena.makeBigInt();
+    scaled.mul(three, pow10) catch return error.OutOfMemory;
+    scaled.addScalar(scaled, 1) catch return error.OutOfMemory;
+
+    const sec_decimal: ion.value.Decimal = .{
+        .is_negative = false,
+        .coefficient = .{ .big = scaled },
+        .exponent = -50,
+    };
+
+    // Use writer11 to get the Ion 1.1 binary encoding of this decimal, then embed it as the
+    // `seconds` argument to a length-prefixed `make_timestamp` invocation.
+    const decimal_doc = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .decimal = sec_decimal } }};
+    const decimal_bytes = try ion.writer11.writeBinary11(std.testing.allocator, decimal_doc);
+    defer std.testing.allocator.free(decimal_bytes);
+    const seconds_value_bytes = decimal_bytes[4..];
+
+    const appendFlexUIntShift1 = struct {
+        fn run(list: *std.ArrayListUnmanaged(u8), v: usize) !void {
+            const raw: u128 = (@as(u128, v) << 1) | 1;
+            var tmp = raw;
+            while (tmp != 0) : (tmp >>= 8) {
+                try list.append(std.testing.allocator, @intCast(tmp & 0xFF));
+            }
+        }
+    }.run;
+
+    // make_timestamp(year=2025, month=12, day=24, hour=1, minute=2, seconds=<big decimal>, offset absent)
+    //
+    // Variadic params (month/day/hour/minute/seconds/offset) are bitmap-encoded first. Here:
+    // month/day/hour/minute/seconds present (01), offset absent (00) => bytes { 0x55, 0x01 }.
+    var args = std.ArrayListUnmanaged(u8){};
+    defer args.deinit(std.testing.allocator);
+    try args.appendSlice(std.testing.allocator, &.{ 0x55, 0x01 });
+    // year=2025 (int len=2, LE 0x07E9)
+    try args.appendSlice(std.testing.allocator, &.{ 0x62, 0xE9, 0x07 });
+    // month/day/hour/minute
+    try args.appendSlice(std.testing.allocator, &.{ 0x61, 0x0C, 0x61, 0x18, 0x61, 0x01, 0x61, 0x02 });
+    // seconds decimal
+    try args.appendSlice(std.testing.allocator, seconds_value_bytes);
+
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+    try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xF5 });
+    try appendFlexUIntShift1(&bytes, 12);
+    try appendFlexUIntShift1(&bytes, args.items.len);
+    try bytes.appendSlice(std.testing.allocator, args.items);
+
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .timestamp);
+    const ts = elems[0].value.timestamp;
+    try std.testing.expectEqual(@as(u8, 3), ts.second.?);
+    try std.testing.expect(ts.precision == .fractional);
+    try std.testing.expect(ts.fractional != null);
+    const frac = ts.fractional.?;
+    try std.testing.expectEqual(@as(i32, -50), frac.exponent);
+    try std.testing.expect(!frac.is_negative);
+    try std.testing.expect(frac.coefficient == .small);
+    try std.testing.expectEqual(@as(i128, 1), frac.coefficient.small);
+}
+
 test "ion 1.1 binary system sum supports big ints" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
