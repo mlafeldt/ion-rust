@@ -1068,3 +1068,111 @@ test "ion 1.1 binary writer roundtrip (annotations)" {
     const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
 }
+
+test "ion 1.1 binary writer roundtrip (typed nulls)" {
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .null = .null } },
+        .{ .annotations = &.{}, .value = .{ .null = .bool } },
+        .{ .annotations = &.{}, .value = .{ .null = .int } },
+        .{ .annotations = &.{}, .value = .{ .null = .float } },
+        .{ .annotations = &.{}, .value = .{ .null = .decimal } },
+        .{ .annotations = &.{}, .value = .{ .null = .timestamp } },
+        .{ .annotations = &.{}, .value = .{ .null = .string } },
+        .{ .annotations = &.{}, .value = .{ .null = .symbol } },
+        .{ .annotations = &.{}, .value = .{ .null = .blob } },
+        .{ .annotations = &.{}, .value = .{ .null = .clob } },
+        .{ .annotations = &.{}, .value = .{ .null = .list } },
+        .{ .annotations = &.{}, .value = .{ .null = .sexp } },
+        .{ .annotations = &.{}, .value = .{ .null = .@"struct" } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11(std.testing.allocator, doc);
+    defer std.testing.allocator.free(bytes);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
+}
+
+test "ion 1.1 binary writer roundtrip (timestamps long form)" {
+    const frac: ion.value.Decimal = .{ .is_negative = false, .coefficient = .{ .small = 123 }, .exponent = -3 };
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = null,
+            .day = null,
+            .hour = null,
+            .minute = null,
+            .second = null,
+            .fractional = null,
+            .offset_minutes = null,
+            .precision = .year,
+        } } },
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = null,
+            .hour = null,
+            .minute = null,
+            .second = null,
+            .fractional = null,
+            .offset_minutes = null,
+            .precision = .month,
+        } } },
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = null,
+            .minute = null,
+            .second = null,
+            .fractional = null,
+            .offset_minutes = null,
+            .precision = .day,
+        } } },
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = 1,
+            .minute = 2,
+            .second = null,
+            .fractional = null,
+            .offset_minutes = null,
+            .precision = .minute,
+        } } },
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = 1,
+            .minute = 2,
+            .second = 3,
+            .fractional = null,
+            .offset_minutes = 0,
+            .precision = .second,
+        } } },
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = 1,
+            .minute = 2,
+            .second = 3,
+            .fractional = frac,
+            .offset_minutes = -480,
+            .precision = .fractional,
+        } } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11(std.testing.allocator, doc);
+    defer std.testing.allocator.free(bytes);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
+}
