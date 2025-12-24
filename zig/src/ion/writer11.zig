@@ -210,10 +210,39 @@ fn encodeTimestampLongPayload(out: *std.ArrayListUnmanaged(u8), allocator: std.m
 }
 
 fn writeFloat(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), f: f64) IonError!void {
+    // Prefer the narrower float encodings when the value is exactly representable.
     if (f == 0.0 and !std.math.signbit(f)) {
         try appendByte(out, allocator, 0x6A);
         return;
     }
+
+    // Preserve NaN/Inf bit patterns by defaulting to f64.
+    if (!std.math.isFinite(f)) {
+        try appendByte(out, allocator, 0x6D);
+        var buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &buf, @bitCast(f), .little);
+        try appendSlice(out, allocator, &buf);
+        return;
+    }
+
+    const hf: f16 = @floatCast(f);
+    if (@as(f64, @floatCast(hf)) == f) {
+        try appendByte(out, allocator, 0x6B);
+        var buf: [2]u8 = undefined;
+        std.mem.writeInt(u16, &buf, @bitCast(hf), .little);
+        try appendSlice(out, allocator, &buf);
+        return;
+    }
+
+    const f32v: f32 = @floatCast(f);
+    if (@as(f64, @floatCast(f32v)) == f) {
+        try appendByte(out, allocator, 0x6C);
+        var buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &buf, @bitCast(f32v), .little);
+        try appendSlice(out, allocator, &buf);
+        return;
+    }
+
     try appendByte(out, allocator, 0x6D);
     var buf: [8]u8 = undefined;
     std.mem.writeInt(u64, &buf, @bitCast(f), .little);
