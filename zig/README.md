@@ -59,7 +59,10 @@ Key properties:
     - Expression groups: `(:: <expr>*)`
     - Macro IDs: unqualified/qualified names and numeric addresses (e.g. `(:values ...)`, `(:1 ...)`, `(:$ion::values ...)`, `(:$ion::1 ...)`)
     - Implemented expansions: `none`, `values`, `default`, `repeat`, `delta`, `sum`, `annotate`, `make_string`, `make_symbol`, `make_decimal`, `make_timestamp`, `make_field`, `make_struct`, `make_list`, `make_sexp`, `flatten`
-    - Conformance-only: supports `set_symbols` / `add_symbols` and an Ion 1.1 "default module" symbol model where user symbols occupy `$1..$n` and system symbols follow.
+    - Conformance-only directives:
+      - `set_symbols` / `add_symbols` and an Ion 1.1 "default module" symbol model where user symbols occupy `$1..$n` and system symbols follow.
+      - `set_macros` / `add_macros` mutate the active macro table for subsequent parsing (used by `ion-tests/conformance/demos/metaprogramming.ion`).
+      - `meta` / `use` are validated for syntax and produce no values; module import side effects are modeled by the conformance runner, not the text parser.
     - This is still far from a complete Ion 1.1 macro system.
 
 ### Binary Ion 1.0 parsing
@@ -106,6 +109,9 @@ Key properties:
       - user macro invocations via 6-bit / 12-bit / 20-bit address forms (`0x00..0x5F`)
       - length-prefixed invocations (`0xF5`) for the subset needed by conformance/demo macros (single-parameter user macros and system `values`)
     - `mactab` support for the conformance runner and `%x` expansion for simple single-parameter user macros.
+    - Minimal module mutation modeling:
+      - tracks `set_symbols`/`add_symbols` text for optional post-parse SID resolution (via `parseTopLevelWithState(...)`), and
+      - applies `set_macros`/`add_macros` to the active macro table so subsequent e-expressions decode against the updated table.
   - Not implemented:
     - Full Ion 1.1 module/symbol resolution for symbol IDs (symbol IDs are preserved but typically not resolved to text).
       - Optional helpers (intentionally opt-in so tests can keep stable output representations when desired):
