@@ -517,9 +517,13 @@ fn twosComplementIntBytesLe(allocator: std.mem.Allocator, i: value.Int) IonError
 
 fn twosComplementBigIntConstBytesLe(allocator: std.mem.Allocator, c: std.math.big.int.Const) IonError![]u8 {
     if (c.eqlZero()) return allocator.dupe(u8, &.{}) catch return IonError.OutOfMemory;
+    // For positive values whose top byte would have the sign bit set (e.g. 2^127), we need at
+    // least one extra 0x00 sign-extension byte to keep the two's complement encoding positive.
+    // Similarly, for negative values we may need additional 0xFF sign-extension bytes. We
+    // over-allocate by one byte and then trim redundant sign extension.
     const bits_abs = c.bitCountAbs();
-    const bit_count: usize = if (c.positive) bits_abs else bits_abs + 1;
-    const len: usize = (bit_count + 7) / 8;
+    const len_min: usize = (bits_abs + 7) / 8;
+    const len: usize = len_min + 1;
     const buf = allocator.alloc(u8, len) catch return IonError.OutOfMemory;
     @memset(buf, if (c.positive) 0x00 else 0xFF);
     c.writeTwosComplement(buf, .little);
