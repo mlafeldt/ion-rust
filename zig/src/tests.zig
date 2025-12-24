@@ -1392,3 +1392,113 @@ test "ion 1.1 binary writer emits short timestamps" {
     const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
 }
+
+test "ion 1.1 binary writer emits short timestamp variants" {
+    const ms5: ion.value.Decimal = .{ .is_negative = false, .coefficient = .{ .small = 5 }, .exponent = -3 };
+    const us123456: ion.value.Decimal = .{ .is_negative = false, .coefficient = .{ .small = 123456 }, .exponent = -6 };
+    const ns7: ion.value.Decimal = .{ .is_negative = false, .coefficient = .{ .small = 7 }, .exponent = -9 };
+
+    const doc = &[_]ion.value.Element{
+        // UTC/unknown-offset microseconds (0x86)
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = 1,
+            .minute = 2,
+            .second = 3,
+            .fractional = us123456,
+            .offset_minutes = null,
+            .precision = .fractional,
+        } } },
+        // UTC/unknown-offset nanoseconds (0x87)
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = 1,
+            .minute = 2,
+            .second = 3,
+            .fractional = ns7,
+            .offset_minutes = null,
+            .precision = .fractional,
+        } } },
+        // Known offset minute/second/ms (0x88/0x89/0x8A)
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = 1,
+            .minute = 2,
+            .second = null,
+            .fractional = null,
+            .offset_minutes = -480,
+            .precision = .minute,
+        } } },
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = 1,
+            .minute = 2,
+            .second = 3,
+            .fractional = null,
+            .offset_minutes = -480,
+            .precision = .second,
+        } } },
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = 1,
+            .minute = 2,
+            .second = 3,
+            .fractional = ms5,
+            .offset_minutes = -480,
+            .precision = .fractional,
+        } } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11(std.testing.allocator, doc);
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x86) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x87) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x88) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x89) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x8A) != null);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    if (!ion.eq.ionEqElements(doc, parsed)) {
+        const dumpTs = struct {
+            fn run(prefix: []const u8, ts: ion.value.Timestamp) void {
+                std.debug.print(
+                    "{s} y={d} m={any} d={any} hh={any} mm={any} ss={any} off={any} prec={any} frac={any}\n",
+                    .{ prefix, ts.year, ts.month, ts.day, ts.hour, ts.minute, ts.second, ts.offset_minutes, ts.precision, ts.fractional },
+                );
+            }
+        }.run;
+
+        std.debug.print("writer bytes len={d}\n", .{bytes.len});
+        var i: usize = 0;
+        while (i < bytes.len) : (i += 1) {
+            std.debug.print("{X:0>2} ", .{bytes[i]});
+            if ((i + 1) % 16 == 0) std.debug.print("\n", .{});
+        }
+        std.debug.print("\n", .{});
+
+        std.debug.print("doc.len={d} parsed.len={d}\n", .{ doc.len, parsed.len });
+        const n = @min(doc.len, parsed.len);
+        for (0..n) |idx| {
+            if (!ion.eq.ionEqElement(doc[idx], parsed[idx])) {
+                std.debug.print("mismatch at idx={d}\n", .{idx});
+                if (doc[idx].value == .timestamp) dumpTs("expected:", doc[idx].value.timestamp);
+                if (parsed[idx].value == .timestamp) dumpTs("actual:  ", parsed[idx].value.timestamp);
+                break;
+            }
+        }
+        return error.TestUnexpectedResult;
+    }
+}
