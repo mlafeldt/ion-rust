@@ -17,6 +17,23 @@ const symtab = @import("symtab.zig");
 const IonError = ion.IonError;
 const MacroTable = ion.macro.MacroTable;
 
+pub const ModuleState11 = struct {
+    /// Conformance-style Ion 1.1 "default module" user symbols.
+    /// Addresses start at 1; entry `i` corresponds to SID `i + 1`.
+    /// Null represents unknown text at that address.
+    ///
+    /// This state is tracked for conformance-style symbol resolution/debugging and does not affect
+    /// parsed values unless a caller explicitly applies a resolver (for example:
+    /// `value.resolveDefaultModuleSymbols11(...)`).
+    user_symbols: []const ?[]const u8 = &.{},
+    system_loaded: bool = true,
+};
+
+pub const ParseResultWithState = struct {
+    elements: []value.Element,
+    state: ModuleState11,
+};
+
 const ArgBinding = struct {
     name: []const u8,
     values: []value.Element,
@@ -30,10 +47,24 @@ pub fn parseTopLevel(arena: *value.Arena, bytes: []const u8) IonError![]value.El
 }
 
 pub fn parseTopLevelWithMacroTable(arena: *value.Arena, bytes: []const u8, mactab: ?*const MacroTable) IonError![]value.Element {
+    const res = try parseTopLevelWithMacroTableAndState(arena, bytes, mactab);
+    return res.elements;
+}
+
+pub fn parseTopLevelWithState(arena: *value.Arena, bytes: []const u8) IonError!ParseResultWithState {
+    return parseTopLevelWithMacroTableAndState(arena, bytes, null);
+}
+
+pub fn parseTopLevelWithMacroTableAndState(
+    arena: *value.Arena,
+    bytes: []const u8,
+    mactab: ?*const MacroTable,
+) IonError!ParseResultWithState {
     if (bytes.len < 4) return IonError.InvalidIon;
     if (!(bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA)) return IonError.InvalidIon;
     var d = Decoder{ .arena = arena, .input = bytes[4..], .i = 0, .mactab = mactab };
-    return d.parseTopLevel();
+    const elems = try d.parseTopLevel();
+    return .{ .elements = elems, .state = d.module_state };
 }
 
 const Decoder = struct {
@@ -41,6 +72,7 @@ const Decoder = struct {
     input: []const u8,
     i: usize,
     mactab: ?*const MacroTable,
+    module_state: ModuleState11 = .{},
 
     fn parseTopLevel(self: *Decoder) IonError![]value.Element {
         var out = std.ArrayListUnmanaged(value.Element){};
@@ -793,16 +825,75 @@ const Decoder = struct {
                         else => all_text = false,
                     }
                 }
-                if (all_text) break :blk &.{}; // set_symbols produces nothing
+                if (all_text) {
+                    try self.setIon11UserSymbolsFromTextArgs(args);
+                    break :blk &.{}; // set_symbols produces nothing
+                }
                 break :blk try flatten(self.arena, args);
             },
-            20, 21, 22, 23 => blk: {
+            20 => blk: {
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "text", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                try self.addIon11UserSymbolsFromTextArgs(bindings[0].values);
+                break :blk &.{};
+            },
+            21, 22, 23 => blk: {
                 // Directives / module mutations: conformance only checks they parse and do not
                 // contribute application values.
                 break :blk &.{};
             },
             else => IonError.Unsupported,
         };
+    }
+
+    fn setIon11UserSymbolsFromTextArgs(self: *Decoder, args: []const value.Element) IonError!void {
+        const out = self.arena.allocator().alloc(?[]const u8, args.len) catch return IonError.OutOfMemory;
+        for (args, 0..) |e, idx| {
+            if (e.annotations.len != 0) return IonError.InvalidIon;
+            const t: []const u8 = switch (e.value) {
+                .string => |s| s,
+                .symbol => |s| s.text orelse return IonError.InvalidIon,
+                else => return IonError.InvalidIon,
+            };
+            out[idx] = try self.arena.dupe(t);
+        }
+        self.module_state.user_symbols = out;
+        self.module_state.system_loaded = true;
+    }
+
+    fn addIon11UserSymbolsFromTextArgs(self: *Decoder, args: []const value.Element) IonError!void {
+        var added_count: usize = 0;
+        for (args) |e| {
+            if (e.annotations.len != 0) continue;
+            switch (e.value) {
+                .string => added_count += 1,
+                .symbol => |s| {
+                    if (s.text != null) added_count += 1;
+                },
+                else => {},
+            }
+        }
+        if (added_count == 0) return;
+
+        const old = self.module_state.user_symbols;
+        const out = self.arena.allocator().alloc(?[]const u8, old.len + added_count) catch return IonError.OutOfMemory;
+        if (old.len != 0) @memcpy(out[0..old.len], old);
+
+        var idx: usize = old.len;
+        for (args) |e| {
+            if (e.annotations.len != 0) continue;
+            const t: []const u8 = switch (e.value) {
+                .string => |s| s,
+                .symbol => |s| s.text orelse continue,
+                else => continue,
+            };
+            out[idx] = try self.arena.dupe(t);
+            idx += 1;
+        }
+
+        self.module_state.user_symbols = out;
+        self.module_state.system_loaded = true;
     }
 
     fn bitmapSizeInBytesForParams(params: []const ion.macro.Param) usize {
@@ -1530,7 +1621,10 @@ const Decoder = struct {
                 else => all_text = false,
             }
         }
-        if (all_text) return &.{};
+        if (all_text) {
+            try self.setIon11UserSymbolsFromTextArgs(args);
+            return &.{};
+        }
 
         // Otherwise treat as `flatten`.
         var out = std.ArrayListUnmanaged(value.Element){};
@@ -1557,11 +1651,21 @@ const Decoder = struct {
         switch (presence) {
             0 => return &.{},
             1 => {
-                _ = try self.readValue();
+                const v = try self.readValue();
+                if (v == .string) {
+                    const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                    one[0] = .{ .annotations = &.{}, .value = v };
+                    try self.addIon11UserSymbolsFromTextArgs(one);
+                } else if (v == .symbol and v.symbol.text != null) {
+                    const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                    one[0] = .{ .annotations = &.{}, .value = v };
+                    try self.addIon11UserSymbolsFromTextArgs(one);
+                }
                 return &.{};
             },
             2 => {
-                _ = try self.readExpressionGroup(.tagged);
+                const group = try self.readExpressionGroup(.tagged);
+                try self.addIon11UserSymbolsFromTextArgs(group);
                 return &.{};
             },
             else => return IonError.InvalidIon,

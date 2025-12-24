@@ -126,6 +126,69 @@ pub fn resolveSystemSymbols11(arena: *Arena, elems: []Element) IonError!void {
     for (elems) |*e| try resolveElement11(arena, e);
 }
 
+/// Resolves Ion 1.1 symbol IDs in-place using the conformance suite's "default module" model.
+///
+/// In this model, symbol IDs address the default module, which starts with user-defined symbols at
+/// SID 1, followed by the system module's symbols.
+///
+/// This helper is intentionally opt-in so tests can keep stable output representations when desired.
+pub fn resolveDefaultModuleSymbols11(
+    arena: *Arena,
+    elems: []Element,
+    user_symbols: []const ?[]const u8,
+    system_loaded: bool,
+) IonError!void {
+    const ctx: DefaultModuleResolveCtx = .{
+        .user_symbols = user_symbols,
+        .system_loaded = system_loaded,
+    };
+    for (elems) |*e| try resolveElement11WithDefaultModule(arena, e, ctx);
+}
+
+const DefaultModuleResolveCtx = struct {
+    user_symbols: []const ?[]const u8,
+    system_loaded: bool,
+};
+
+fn resolveElement11WithDefaultModule(arena: *Arena, e: *Element, ctx: DefaultModuleResolveCtx) IonError!void {
+    for (e.annotations) |*a| try resolveSymbol11WithDefaultModule(arena, a, ctx);
+    try resolveValue11WithDefaultModule(arena, &e.value, ctx);
+}
+
+fn resolveValue11WithDefaultModule(arena: *Arena, v: *Value, ctx: DefaultModuleResolveCtx) IonError!void {
+    switch (v.*) {
+        .symbol => |*s| try resolveSymbol11WithDefaultModule(arena, s, ctx),
+        .list => |items| for (items) |*e| try resolveElement11WithDefaultModule(arena, e, ctx),
+        .sexp => |items| for (items) |*e| try resolveElement11WithDefaultModule(arena, e, ctx),
+        .@"struct" => |st| {
+            for (st.fields) |*f| {
+                try resolveSymbol11WithDefaultModule(arena, &f.name, ctx);
+                try resolveElement11WithDefaultModule(arena, &f.value, ctx);
+            }
+        },
+        else => {},
+    }
+}
+
+fn resolveSymbol11WithDefaultModule(arena: *Arena, s: *Symbol, ctx: DefaultModuleResolveCtx) IonError!void {
+    if (s.text != null) return;
+    const sid = s.sid orelse return;
+    if (sid == 0) return;
+
+    if (sid <= ctx.user_symbols.len) {
+        if (ctx.user_symbols[@intCast(sid - 1)]) |t| {
+            s.text = try arena.dupe(t);
+        }
+        return;
+    }
+
+    if (!ctx.system_loaded) return;
+    const sys_sid: u32 = sid - @as(u32, @intCast(ctx.user_symbols.len));
+    if (symtab.SystemSymtab11.textForSid(sys_sid)) |t| {
+        s.text = try arena.dupe(t);
+    }
+}
+
 fn resolveElement11(arena: *Arena, e: *Element) IonError!void {
     for (e.annotations) |*a| try resolveSymbol11(arena, a);
     try resolveValue11(arena, &e.value);

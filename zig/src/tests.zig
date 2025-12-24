@@ -1189,6 +1189,33 @@ test "ion 1.1 binary e-expression length-prefixed system make_timestamp supports
     try std.testing.expectEqual(@as(i128, 1), frac.coefficient.small);
 }
 
+test "ion 1.1 binary set_symbols affects symbol ID text (experimental)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // IVM + `(:$ion::set_symbols "foo")` + symbol(SID=1)
+    // EF 13 => system macro address 19 (set_symbols/flatten)
+    // 01    => presence: one tagged value
+    // 93 'foo' => short string len=3
+    // E1 01 => symbol address (len=1), SID=1
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA,
+        0xEF, 0x13, 0x01, 0x93,
+        0x66, 0x6F, 0x6F, 0xE1,
+        0x01,
+    };
+
+    const res = try ion.binary11.parseTopLevelWithState(&arena, bytes);
+    const elems = res.elements;
+    try ion.value.resolveDefaultModuleSymbols11(&arena, elems, res.state.user_symbols, res.state.system_loaded);
+
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .symbol);
+    try std.testing.expectEqual(@as(?u32, 1), elems[0].value.symbol.sid);
+    try std.testing.expect(elems[0].value.symbol.text != null);
+    try std.testing.expectEqualStrings("foo", elems[0].value.symbol.text.?);
+}
+
 test "ion 1.1 binary system sum supports big ints" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
