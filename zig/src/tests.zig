@@ -1141,6 +1141,64 @@ test "ion 1.1 binary system make_timestamp accepts big ints for fields" {
     try std.testing.expectEqual(@as(i16, 0), ts.offset_minutes.?);
 }
 
+test "ion 1.1 binary system make_timestamp supports big decimal seconds coefficient" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Build a decimal seconds value with a huge coefficient:
+    // exponent = -50, coefficient = 3*10^50 + 1 => seconds=3, fractional=1d-50.
+    const coeff = try arena.makeBigInt();
+    coeff.set(@as(u8, 10)) catch return error.OutOfMemory;
+    const pow10 = try arena.makeBigInt();
+    pow10.pow(coeff, 50) catch return error.OutOfMemory;
+    const three = try arena.makeBigInt();
+    three.set(@as(u8, 3)) catch return error.OutOfMemory;
+    const scaled = try arena.makeBigInt();
+    scaled.mul(three, pow10) catch return error.OutOfMemory;
+    scaled.addScalar(scaled, 1) catch return error.OutOfMemory;
+
+    const sec_decimal: ion.value.Decimal = .{
+        .is_negative = false,
+        .coefficient = .{ .big = scaled },
+        .exponent = -50,
+    };
+
+    // Use writer11 to get the Ion 1.1 binary encoding of this decimal, then embed it as the
+    // `seconds` argument to `(:$ion::make_timestamp ...)`.
+    const decimal_doc = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .decimal = sec_decimal } }};
+    const decimal_bytes = try ion.writer11.writeBinary11(std.testing.allocator, decimal_doc);
+    defer std.testing.allocator.free(decimal_bytes);
+    const seconds_value_bytes = decimal_bytes[4..];
+
+    // make_timestamp(year=2025, month=12, day=24, hour=1, minute=2, seconds=<big decimal>, offset absent)
+    //
+    // Presence u16: month/day/hour/minute/seconds present => bits 0..4 = 01 => 0x0155
+    // Little-endian bytes: 55 01
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+
+    bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xEF, 0x0C, 0x55, 0x01 }) catch return error.OutOfMemory;
+    // year=2025 (int len=2, LE 0x07E9)
+    bytes.appendSlice(std.testing.allocator, &.{ 0x62, 0xE9, 0x07 }) catch return error.OutOfMemory;
+    // month/day/hour/minute
+    bytes.appendSlice(std.testing.allocator, &.{ 0x61, 0x0C, 0x61, 0x18, 0x61, 0x01, 0x61, 0x02 }) catch return error.OutOfMemory;
+    // seconds decimal
+    bytes.appendSlice(std.testing.allocator, seconds_value_bytes) catch return error.OutOfMemory;
+
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .timestamp);
+    const ts = elems[0].value.timestamp;
+    try std.testing.expectEqual(@as(u8, 3), ts.second.?);
+    try std.testing.expect(ts.precision == .fractional);
+    try std.testing.expect(ts.fractional != null);
+    const frac = ts.fractional.?;
+    try std.testing.expectEqual(@as(i32, -50), frac.exponent);
+    try std.testing.expect(!frac.is_negative);
+    try std.testing.expect(frac.coefficient == .small);
+    try std.testing.expectEqual(@as(i128, 1), frac.coefficient.small);
+}
+
 test "ion 1.1 binary writer roundtrip (basic)" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

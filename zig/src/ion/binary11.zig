@@ -1971,38 +1971,89 @@ const Decoder = struct {
                         if (d.is_negative and !coeff_is_zero) return IonError.InvalidIon;
 
                         const exp: i32 = d.exponent;
-                        const coeff_u128: u128 = switch (d.coefficient) {
-                            .small => |v| if (v < 0) return IonError.InvalidIon else @intCast(v),
-                            .big => return IonError.Unsupported,
+                        const coeff_u128_opt: ?u128 = switch (d.coefficient) {
+                            .small => |v| blk: {
+                                if (v < 0) return IonError.InvalidIon;
+                                break :blk @intCast(v);
+                            },
+                            .big => null,
                         };
 
                         if (exp >= 0) {
-                            var scaled: u128 = coeff_u128;
-                            var k: u32 = @intCast(exp);
-                            while (k != 0) : (k -= 1) {
-                                scaled = std.math.mul(u128, scaled, 10) catch return IonError.InvalidIon;
+                            if (coeff_u128_opt) |coeff_u128| {
+                                var scaled: u128 = coeff_u128;
+                                var k: u32 = @intCast(exp);
+                                while (k != 0) : (k -= 1) {
+                                    scaled = std.math.mul(u128, scaled, 10) catch return IonError.InvalidIon;
+                                }
+                                if (scaled >= 60) return IonError.InvalidIon;
+                                ts.second = @intCast(scaled);
+                                ts.precision = .second;
+                            } else {
+                                const coeff_big = try self.intToBigInt(d.coefficient);
+                                if (!coeff_big.toConst().positive) return IonError.InvalidIon;
+
+                                const ten = try self.arena.makeBigInt();
+                                ten.set(@as(u8, 10)) catch return IonError.OutOfMemory;
+                                const pow10 = try self.arena.makeBigInt();
+                                pow10.pow(ten, @intCast(exp)) catch return IonError.OutOfMemory;
+
+                                const scaled_big = try self.arena.makeBigInt();
+                                scaled_big.mul(coeff_big, pow10) catch return IonError.OutOfMemory;
+                                const scaled_i128 = scaled_big.toConst().toInt(i128) catch return IonError.InvalidIon;
+                                if (scaled_i128 < 0 or scaled_i128 >= 60) return IonError.InvalidIon;
+                                ts.second = @intCast(scaled_i128);
+                                ts.precision = .second;
                             }
-                            if (scaled >= 60) return IonError.InvalidIon;
-                            ts.second = @intCast(scaled);
-                            ts.precision = .second;
                         } else {
                             const digits: u32 = @intCast(-exp);
-                            var pow10: u128 = 1;
-                            var k: u32 = digits;
-                            while (k != 0) : (k -= 1) {
-                                pow10 = std.math.mul(u128, pow10, 10) catch return IonError.InvalidIon;
-                            }
-                            const sec_u128: u128 = coeff_u128 / pow10;
-                            const frac_u128: u128 = coeff_u128 % pow10;
-                            if (sec_u128 >= 60) return IonError.InvalidIon;
-                            ts.second = @intCast(sec_u128);
-                            ts.precision = .second;
-                            if (frac_u128 != 0) {
-                                const frac_coeff: value.Int = .{ .small = @intCast(frac_u128) };
-                                ts.fractional = .{ .is_negative = false, .coefficient = frac_coeff, .exponent = exp };
-                                ts.precision = .fractional;
-                            } else if (exp < 0 and (coeff_u128 % pow10 == 0) and (coeff_u128 != 0)) {
-                                // Exact integer value but written with fractional digits (e.g. 6.0).
+                            if (coeff_u128_opt) |coeff_u128| {
+                                var pow10: u128 = 1;
+                                var k: u32 = digits;
+                                while (k != 0) : (k -= 1) {
+                                    pow10 = std.math.mul(u128, pow10, 10) catch return IonError.InvalidIon;
+                                }
+                                const sec_u128: u128 = coeff_u128 / pow10;
+                                const frac_u128: u128 = coeff_u128 % pow10;
+                                if (sec_u128 >= 60) return IonError.InvalidIon;
+                                ts.second = @intCast(sec_u128);
+                                ts.precision = .second;
+                                if (frac_u128 != 0) {
+                                    const frac_coeff: value.Int = .{ .small = @intCast(frac_u128) };
+                                    ts.fractional = .{ .is_negative = false, .coefficient = frac_coeff, .exponent = exp };
+                                    ts.precision = .fractional;
+                                } else if (coeff_u128 != 0) {
+                                    // Exact integer value but written with fractional digits (e.g. 6.0).
+                                }
+                            } else {
+                                const coeff_big = try self.intToBigInt(d.coefficient);
+                                if (!coeff_big.toConst().positive) return IonError.InvalidIon;
+
+                                const ten = try self.arena.makeBigInt();
+                                ten.set(@as(u8, 10)) catch return IonError.OutOfMemory;
+                                const pow10 = try self.arena.makeBigInt();
+                                pow10.pow(ten, digits) catch return IonError.OutOfMemory;
+
+                                const q = try self.arena.makeBigInt();
+                                const r = try self.arena.makeBigInt();
+                                q.divTrunc(r, coeff_big, pow10) catch return IonError.OutOfMemory;
+
+                                const sec_i128 = q.toConst().toInt(i128) catch return IonError.InvalidIon;
+                                if (sec_i128 < 0 or sec_i128 >= 60) return IonError.InvalidIon;
+                                ts.second = @intCast(sec_i128);
+                                ts.precision = .second;
+
+                                if (!r.toConst().eqlZero()) {
+                                    const frac_int: value.Int = blk: {
+                                        if (r.toConst().toInt(i128)) |v| {
+                                            break :blk .{ .small = v };
+                                        } else |_| {
+                                            break :blk .{ .big = r };
+                                        }
+                                    };
+                                    ts.fractional = .{ .is_negative = false, .coefficient = frac_int, .exponent = exp };
+                                    ts.precision = .fractional;
+                                }
                             }
                         }
                     },
