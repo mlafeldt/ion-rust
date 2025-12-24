@@ -1181,6 +1181,45 @@ test "ion 1.1 binary writer roundtrip (timestamps long form)" {
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
 }
 
+test "ion 1.1 binary writer roundtrip (timestamp long big fractional coefficient)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const bi = try arena.makeBigInt();
+    try bi.set(@as(u8, 1));
+    try bi.shiftLeft(bi, 200);
+    try std.testing.expectEqual(@as(usize, 201), bi.toConst().bitCountAbs());
+
+    const frac: ion.value.Decimal = .{
+        .is_negative = false,
+        .coefficient = .{ .big = bi },
+        .exponent = -20,
+    };
+
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = 1,
+            .minute = 2,
+            .second = 3,
+            .fractional = frac,
+            .offset_minutes = null,
+            .precision = .fractional,
+        } } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11(std.testing.allocator, doc);
+    defer std.testing.allocator.free(bytes);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
+}
+
 test "ion 1.1 binary writer emits delimited containers" {
     var list_items_arr = [_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },

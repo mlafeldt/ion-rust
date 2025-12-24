@@ -2425,7 +2425,7 @@ const Decoder = struct {
         if (op == 0xF8) {
             const len = try readFlexUInt(self.input, &self.i);
             const payload = try self.readBytes(len);
-            return value.Value{ .timestamp = try decodeTimestampLong11(payload) };
+            return value.Value{ .timestamp = try decodeTimestampLong11(self.arena, payload) };
         }
 
         // Long string: F9 (length follows).
@@ -2791,7 +2791,7 @@ fn decodeTimestampShort11(payload: []const u8, length_code: usize) IonError!valu
     }
 }
 
-fn decodeTimestampLong11(payload: []const u8) IonError!value.Timestamp {
+fn decodeTimestampLong11(arena: *value.Arena, payload: []const u8) IonError!value.Timestamp {
     // Ported from ion-rust's BinaryEncoding_1_1 long timestamp decoding logic.
     if (payload.len < 2 or payload.len == 4 or payload.len == 5) return IonError.InvalidIon;
 
@@ -2845,17 +2845,56 @@ fn decodeTimestampLong11(payload: []const u8) IonError!value.Timestamp {
     var j: usize = 7;
     const scale = try readFlexUInt(payload, &j);
     const coeff_len: usize = payload.len - j;
-    if (coeff_len > 16) return IonError.Unsupported;
     const coeff_bytes = payload[j..];
-    const coeff_u: u128 = blk: {
-        var buf: [16]u8 = [_]u8{0} ** 16;
-        std.mem.copyForwards(u8, buf[0..coeff_bytes.len], coeff_bytes);
-        break :blk std.mem.readInt(u128, @as(*const [16]u8, @ptrCast(buf[0..16].ptr)), .little);
-    };
-    if (coeff_u > std.math.maxInt(i128)) return IonError.Unsupported;
-    ts.fractional = .{ .is_negative = false, .coefficient = .{ .small = @intCast(coeff_u) }, .exponent = -@as(i32, @intCast(scale)) };
+    if (coeff_len == 0) {
+        ts.fractional = .{ .is_negative = false, .coefficient = .{ .small = 0 }, .exponent = -@as(i32, @intCast(scale)) };
+        ts.precision = .fractional;
+        return ts;
+    }
+
+    // Small fast path: decode into u128 then downcast.
+    if (coeff_len <= 16) {
+        const coeff_u: u128 = blk: {
+            var buf: [16]u8 = [_]u8{0} ** 16;
+            std.mem.copyForwards(u8, buf[0..coeff_bytes.len], coeff_bytes);
+            break :blk std.mem.readInt(u128, @as(*const [16]u8, @ptrCast(buf[0..16].ptr)), .little);
+        };
+        if (coeff_u <= std.math.maxInt(i128)) {
+            ts.fractional = .{ .is_negative = false, .coefficient = .{ .small = @intCast(coeff_u) }, .exponent = -@as(i32, @intCast(scale)) };
+            ts.precision = .fractional;
+            return ts;
+        }
+    }
+
+    // Otherwise, represent the coefficient as a BigInt magnitude.
+    const bi = try bigIntFromFixedUIntLeUnsigned(arena, coeff_bytes);
+    ts.fractional = .{ .is_negative = false, .coefficient = .{ .big = bi }, .exponent = -@as(i32, @intCast(scale)) };
     ts.precision = .fractional;
     return ts;
+}
+
+fn bigIntFromFixedUIntLeUnsigned(arena: *value.Arena, magnitude_le: []const u8) IonError!*std.math.big.int.Managed {
+    // The Ion 1.1 long timestamp fractional seconds coefficient is a fixed-width unsigned integer
+    // encoded little-endian. Support arbitrary sizes by importing bytes directly into a BigInt.
+    const bi = try arena.makeBigInt();
+
+    // Trim high-end zeros (little-endian => trailing zeros).
+    var end: usize = magnitude_le.len;
+    while (end > 0 and magnitude_le[end - 1] == 0) : (end -= 1) {}
+    if (end == 0) return bi;
+    const trimmed = magnitude_le[0..end];
+
+    const msb: u8 = trimmed[trimmed.len - 1];
+    const msb_bits: usize = 8 - @clz(msb);
+    const bit_count: usize = (trimmed.len - 1) * 8 + msb_bits;
+    const limb_bits: usize = @bitSizeOf(std.math.big.Limb);
+    const needed_limbs: usize = if (bit_count == 0) 1 else (bit_count + limb_bits - 1) / limb_bits;
+
+    bi.ensureCapacity(needed_limbs) catch return IonError.OutOfMemory;
+    var m = bi.toMutable();
+    m.readTwosComplement(trimmed, bit_count, .little, .unsigned);
+    bi.setMetadata(true, m.len);
+    return bi;
 }
 
 fn isTaglessValuesBody(expr: value.Element, param_name: []const u8) bool {

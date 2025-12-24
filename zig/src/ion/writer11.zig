@@ -453,19 +453,26 @@ fn encodeTimestampLongPayload(out: *std.ArrayListUnmanaged(u8), allocator: std.m
     const scale: usize = @intCast(-frac.exponent);
     try writeFlexUIntShift1(out, allocator, scale);
 
-    const coeff_u128: u128 = switch (frac.coefficient) {
-        .small => |v| blk: {
+    switch (frac.coefficient) {
+        .small => |v| {
             if (v < 0) return IonError.InvalidIon;
-            break :blk @intCast(v);
+            const coeff_u128: u128 = @intCast(v);
+            if (coeff_u128 == 0) return;
+            var coeff_buf: [16]u8 = undefined;
+            std.mem.writeInt(u128, &coeff_buf, coeff_u128, .little);
+            var coeff_len: usize = 16;
+            while (coeff_len > 0 and coeff_buf[coeff_len - 1] == 0) : (coeff_len -= 1) {}
+            try appendSlice(out, allocator, coeff_buf[0..coeff_len]);
         },
-        .big => return IonError.Unsupported,
-    };
-    if (coeff_u128 == 0) return;
-    var coeff_buf: [16]u8 = undefined;
-    std.mem.writeInt(u128, &coeff_buf, coeff_u128, .little);
-    var coeff_len: usize = 16;
-    while (coeff_len > 0 and coeff_buf[coeff_len - 1] == 0) : (coeff_len -= 1) {}
-    try appendSlice(out, allocator, coeff_buf[0..coeff_len]);
+        .big => |p| {
+            // Ion 1.1 long timestamps store fractional seconds coefficient as a fixed-width unsigned
+            // integer byte sequence (little-endian). Support arbitrary-sized coefficients by writing
+            // the BigInt magnitude directly (no string conversions).
+            const c = p.toConst();
+            if (!c.positive) return IonError.InvalidIon;
+            try appendFixedUIntMagnitudeLe(out, allocator, c);
+        },
+    }
 }
 
 fn writeFloat(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), f: f64) IonError!void {
@@ -506,6 +513,21 @@ fn writeFloat(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), f:
     var buf: [8]u8 = undefined;
     std.mem.writeInt(u64, &buf, @bitCast(f), .little);
     try appendSlice(out, allocator, &buf);
+}
+
+fn appendFixedUIntMagnitudeLe(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, c: std.math.big.int.Const) IonError!void {
+    if (!c.positive) return IonError.InvalidIon;
+    const bits = c.bitCountAbs();
+    const byte_len: usize = (bits + 7) / 8;
+    if (byte_len == 0) return;
+
+    const old_len = out.items.len;
+    const dst = out.addManyAsSlice(allocator, byte_len) catch return IonError.OutOfMemory;
+    @memset(dst, 0);
+    c.writeTwosComplement(dst, .little);
+    var used = byte_len;
+    while (used > 0 and dst[used - 1] == 0) : (used -= 1) {}
+    out.items.len = old_len + used;
 }
 
 fn writeDecimal(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), d: value.Decimal) IonError!void {
