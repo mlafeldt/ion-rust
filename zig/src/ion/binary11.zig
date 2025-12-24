@@ -1,18 +1,13 @@
-//! Ion 1.1 binary parser (minimal).
+//! Ion 1.1 binary parser (conformance-driven).
 //!
-//! This is intentionally small and only implements the Ion 1.1 binary opcodes currently exercised
-//! by `ion-tests/conformance/data_model/*`:
-//! - nulls (`EA`, `EB <typecode>`)
-//! - booleans (`6E` true, `6F` false)
-//! - integers (`60..68` fixed-length, `F6 <flexuint len> <payload>`) as little-endian two's complement
-//! - floats (`6A` f0, `6B` f16, `6C` f32, `6D` f64) with little-endian payloads
-//! - decimals (`70..78` fixed-length, `F7 <flexuint len> <payload>`) with payload:
-//!     `[flexint exponent][remaining bytes = coefficient (LE two's complement)]`
-//!   and a conformance-driven rule for negative zero:
-//!     If coefficient bytes are present and all zero, treat as a negative zero coefficient.
+//! This started as a minimal Ion 1.1 binary reader, but has grown to cover the subset exercised by:
+//! - `ion-tests/conformance` (including binary fragments with e-expressions)
+//! - our Zig regression tests in `zig/src/tests.zig`
 //!
-//! Anything outside this subset returns `IonError.Unsupported` so the conformance runner can count
-//! the branch as skipped (until we implement more Ion 1.1 binary features like e-expressions).
+//! It still is not a complete Ion 1.1 binary implementation. In particular, stream/module state
+//! (system directives like `set_symbols`/`add_symbols`/`set_macros`/`add_macros`/`use`) is not modeled
+//! in the binary parser, so decoding arbitrary Ion 1.1 binary streams that rely on in-stream module
+//! mutation is not supported yet.
 
 const std = @import("std");
 const ion = @import("../ion.zig");
@@ -264,16 +259,6 @@ const Decoder = struct {
 
     fn emptyElems() []value.Element {
         return @constCast(@as([]const value.Element, &.{}));
-    }
-
-    fn readEExpBitmap(self: *Decoder, bitmap_size_in_bytes: usize) IonError!u64 {
-        if (bitmap_size_in_bytes == 0) return 0;
-        if (bitmap_size_in_bytes > 8) return IonError.Unsupported;
-        if (self.i + bitmap_size_in_bytes > self.input.len) return IonError.Incomplete;
-        var buf: [8]u8 = .{0} ** 8;
-        std.mem.copyForwards(u8, buf[0..bitmap_size_in_bytes], self.input[self.i .. self.i + bitmap_size_in_bytes]);
-        self.i += bitmap_size_in_bytes;
-        return std.mem.readInt(u64, &buf, .little);
     }
 
     fn readEExpBitmapBytes(self: *Decoder, bitmap_size_in_bytes: usize) IonError![]const u8 {

@@ -755,6 +755,57 @@ test "ion 1.1 binary e-expression bitmap with 2 variadic params" {
     try std.testing.expectEqual(@as(i128, 3), elems[2].value.int.small);
 }
 
+test "ion 1.1 binary e-expression bitmap spans multiple bytes" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Macro at address 64: (tagged::p0* tagged::p1* tagged::p2* tagged::p3* tagged::p4*) => (%p0 %p1 %p2 %p3 %p4)
+    const params = try arena.allocator().alloc(ion.macro.Param, 5);
+    params[0] = .{ .ty = .tagged, .card = .zero_or_many, .name = "p0", .shape = null };
+    params[1] = .{ .ty = .tagged, .card = .zero_or_many, .name = "p1", .shape = null };
+    params[2] = .{ .ty = .tagged, .card = .zero_or_many, .name = "p2", .shape = null };
+    params[3] = .{ .ty = .tagged, .card = .zero_or_many, .name = "p3", .shape = null };
+    params[4] = .{ .ty = .tagged, .card = .zero_or_many, .name = "p4", .shape = null };
+
+    const body = try arena.allocator().alloc(ion.value.Element, 5);
+    body[0] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%p0") } };
+    body[1] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%p1") } };
+    body[2] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%p2") } };
+    body[3] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%p3") } };
+    body[4] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%p4") } };
+
+    const macros = try arena.allocator().alloc(ion.macro.Macro, 65);
+    @memset(macros, ion.macro.Macro{ .name = null, .params = &.{}, .body = &.{} });
+    macros[64] = .{ .name = null, .params = params, .body = body };
+
+    const tab = ion.macro.MacroTable{ .macros = macros };
+
+    // 5 variadic params => bitmap length 2 bytes. Grouping choices:
+    // p0=single (01), p1=empty (00), p2=arg group (10), p3=empty (00), p4=single (01)
+    // => bitmap bits: 01 00 10 00 01 => bytes { 0x21, 0x01 }.
+    //
+    // args payload bytes:
+    // - bitmap (2 bytes)
+    // - p0: int(1)
+    // - p2 group: len=4, int(2) int(3)
+    // - p4: int(4)
+    // Total args_len = 11 => FlexUInt(11)=0x17.
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA,
+        0xF5, 0x81, 0x17,
+        0x21, 0x01,
+        0x61, 0x01,
+        0x09, 0x61, 0x02, 0x61, 0x03,
+        0x61, 0x04,
+    };
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab);
+    try std.testing.expectEqual(@as(usize, 4), elems.len);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+    try std.testing.expectEqual(@as(i128, 2), elems[1].value.int.small);
+    try std.testing.expectEqual(@as(i128, 3), elems[2].value.int.small);
+    try std.testing.expectEqual(@as(i128, 4), elems[3].value.int.small);
+}
+
 test "ion 1.1 binary e-expression length-prefixed (0xF5, minimal)" {
     // Minimal coverage for the length-prefixed e-expression opcode (0xF5).
     // This uses a synthetic user macro at address 64 that expands to its argument group.
