@@ -1176,3 +1176,29 @@ test "ion 1.1 binary writer roundtrip (timestamps long form)" {
     const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
 }
+
+test "ion 1.1 binary writer emits delimited containers" {
+    var list_items_arr = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+    };
+    var sexp_items_arr = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+    };
+    const list_items: []ion.value.Element = list_items_arr[0..];
+    const sexp_items: []ion.value.Element = sexp_items_arr[0..];
+
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .list = list_items } },
+        .{ .annotations = &.{}, .value = .{ .sexp = sexp_items } },
+        .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = &.{} } } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11(std.testing.allocator, doc);
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0xF1) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0xF2) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0xF3) != null);
+    // Struct close marker is FlexInt(0) (0x01) followed by the FlexSym escape byte 0xF0.
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0x01, 0xF0 }) != null);
+}
