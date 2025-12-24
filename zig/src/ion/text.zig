@@ -215,17 +215,17 @@ const Parser = struct {
             if (isSystemValue(elem) and !is_literal) {
                 // Apply symbol table if present, otherwise ignore.
                 if (elem.annotations.len == 0 and elem.value == .symbol) {
-                if (elem.value.symbol.text) |t| {
-                    if (std.mem.eql(u8, t, "$ion_1_1")) {
-                        self.version = .v1_1;
-                        if (self.ion11_module_mode) self.ion11_system_loaded = true;
-                        if (self.parse_ion_mode) self.parse_ion_ivm_consumed = true;
-                    } else if (std.mem.eql(u8, t, "$ion_1_0")) {
-                        self.version = .v1_0;
-                        if (self.parse_ion_mode) self.parse_ion_ivm_consumed = true;
+                    if (elem.value.symbol.text) |t| {
+                        if (std.mem.eql(u8, t, "$ion_1_1")) {
+                            self.version = .v1_1;
+                            if (self.ion11_module_mode) self.ion11_system_loaded = true;
+                            if (self.parse_ion_mode) self.parse_ion_ivm_consumed = true;
+                        } else if (std.mem.eql(u8, t, "$ion_1_0")) {
+                            self.version = .v1_0;
+                            if (self.parse_ion_mode) self.parse_ion_ivm_consumed = true;
+                        }
                     }
                 }
-            }
                 try self.maybeConsumeSymbolTable(elem);
             } else {
                 const stripped = if (is_literal) try stripIonLiteralAnnotation(self.arena, elem) else elem;
@@ -2605,10 +2605,10 @@ const Parser = struct {
                         else => null,
                     };
                 }
-            self.ion11_user_symbols = out;
-        } else {
-            self.ion11_user_symbols = &.{};
-        }
+                self.ion11_user_symbols = out;
+            } else {
+                self.ion11_user_symbols = &.{};
+            }
             self.ion11_system_loaded = true;
             self.ion11_system_preserve_on_set_symbols = true;
             return;

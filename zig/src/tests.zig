@@ -70,14 +70,11 @@ fn walkAndTest(
     }
 }
 
-const global_skip_list = [_][]const u8{
-};
+const global_skip_list = [_][]const u8{};
 
-const round_trip_skip_list = [_][]const u8{
-};
+const round_trip_skip_list = [_][]const u8{};
 
-const equivs_skip_list = [_][]const u8{
-};
+const equivs_skip_list = [_][]const u8{};
 
 fn concatSkipLists(allocator: std.mem.Allocator, lists: []const []const []const u8) ![][]const u8 {
     var total: usize = 0;
@@ -122,7 +119,7 @@ test "ion-tests 1_1 bad files reject" {
     try walkAndTest(
         allocator,
         "ion-tests/iontestdata_1_1/bad",
-        &.{ ".ion" },
+        &.{".ion"},
         &global_skip_list,
         struct {
             fn run(path: []const u8, data: []const u8) !void {
@@ -173,7 +170,7 @@ test "ion-tests 1_1 equiv groups" {
     try walkAndTest(
         allocator,
         "ion-tests/iontestdata_1_1/good/equivs",
-        &.{ ".ion" },
+        &.{".ion"},
         skip,
         struct {
             fn run(path: []const u8, data: []const u8) !void {
@@ -192,7 +189,7 @@ test "ion-tests non-equiv groups" {
     try walkAndTest(
         allocator,
         "ion-tests/iontestdata/good/non-equivs",
-        &.{ ".ion" },
+        &.{".ion"},
         &global_skip_list,
         struct {
             fn run(path: []const u8, data: []const u8) !void {
@@ -211,7 +208,7 @@ test "ion-tests 1_1 non-equiv groups" {
     try walkAndTest(
         allocator,
         "ion-tests/iontestdata_1_1/good/non-equivs",
-        &.{ ".ion" },
+        &.{".ion"},
         &global_skip_list,
         struct {
             fn run(path: []const u8, data: []const u8) !void {
@@ -272,7 +269,7 @@ test "ion-tests 1_1 good roundtrip (text lines)" {
     try walkAndTest(
         allocator,
         "ion-tests/iontestdata_1_1/good",
-        &.{ ".ion" },
+        &.{".ion"},
         skip,
         struct {
             fn run(path: []const u8, data: []const u8) !void {
@@ -303,7 +300,7 @@ test "ion-tests conformance suite (partial)" {
     try walkAndTest(
         allocator,
         "ion-tests/conformance",
-        &.{ ".ion" },
+        &.{".ion"},
         &.{},
         Runner.run,
     );
@@ -543,8 +540,9 @@ test "ion 1.1 binary long string and long symbol" {
     // FlexUInt(5)=0x0B, FlexUInt(3)=0x07.
     const bytes = &[_]u8{
         0xE0, 0x01, 0x01, 0xEA,
-        0xF9, 0x0B, 'h', 'e', 'l', 'l', 'o',
-        0xFA, 0x07, 'f', 'o', 'o',
+        0xF9, 0x0B, 'h',  'e',
+        'l',  'l',  'o',  0xFA,
+        0x07, 'f',  'o',  'o',
     };
     const elems = try ion.binary11.parseTopLevel(&arena, bytes);
     try std.testing.expectEqual(@as(usize, 2), elems.len);
@@ -582,9 +580,11 @@ test "ion 1.1 binary decimals accept large FlexInt encodings" {
     // FlexInt(0) with shift=17: only the tag bit set at bit 16 => byte[2]=0x01, others 0.
     const bytes = &[_]u8{
         0xE0, 0x01, 0x01, 0xEA,
-        0xF7, 0x23,
-        0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xF7, 0x23, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00,
     };
     const elems = try ion.binary11.parseTopLevel(&arena, bytes);
     try std.testing.expectEqual(@as(usize, 1), elems.len);
@@ -678,8 +678,12 @@ test "ion 1.1 binary e-expression FlexSym inline symbols (tagless group)" {
         0x40, 0x00,
         0x02, // bitmap
         0x0D, // FlexUInt(6)
-        0xFD, 'h', 'i',
-        0xFD, 'y', 'o',
+        0xFD,
+        'h',
+        'i',
+        0xFD,
+        'y',
+        'o',
     };
     const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab);
     try std.testing.expectEqual(@as(usize, 2), elems.len);
@@ -792,10 +796,9 @@ test "ion 1.1 binary e-expression bitmap spans multiple bytes" {
     // Total args_len = 11 => FlexUInt(11)=0x17.
     const bytes = &[_]u8{
         0xE0, 0x01, 0x01, 0xEA,
-        0xF5, 0x81, 0x17,
-        0x21, 0x01,
-        0x61, 0x01,
-        0x09, 0x61, 0x02, 0x61, 0x03,
+        0xF5, 0x81, 0x17, 0x21,
+        0x01, 0x61, 0x01, 0x09,
+        0x61, 0x02, 0x61, 0x03,
         0x61, 0x04,
     };
     const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab);
@@ -963,11 +966,12 @@ test "ion 1.1 binary e-expression length-prefixed system make_decimal (big coeff
     //   <F6> <flexuint 17> <17 bytes payload> <0x60>
     const bytes = &[_]u8{
         0xE0, 0x01, 0x01, 0xEA,
-        0xF5, 0x17, 0x29,
-        0xF6, 0x23,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-        0x60,
+        0xF5, 0x17, 0x29, 0xF6,
+        0x23, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0x60,
     };
     const elems = try ion.binary11.parseTopLevel(&arena, bytes);
     try std.testing.expectEqual(@as(usize, 1), elems.len);
