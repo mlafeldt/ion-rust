@@ -132,7 +132,7 @@ Key properties:
 - `zig/src/ion/writer11.zig` (experimental / partial)
   - Emits Ion 1.1 IVM and a subset of Ion 1.1 binary value opcodes.
   - Intended for regression tests/ad-hoc tooling; not used by the main corpus/conformance harness yet.
-  - Limitations: no timestamps, no macro/e-expression emission, no module mutation modeling, and symbols must have inline text (no SID-only output).
+  - Limitations: no timestamps, no macro/e-expression emission, and no module mutation modeling.
 
 ### Equality semantics
 

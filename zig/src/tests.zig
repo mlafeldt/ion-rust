@@ -1009,7 +1009,7 @@ test "ion 1.1 binary writer roundtrip (basic)" {
     list_items[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
     list_items[1] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } };
 
-    const struct_fields = try arena.allocator().alloc(ion.value.StructField, 2);
+    const struct_fields = try arena.allocator().alloc(ion.value.StructField, 3);
     struct_fields[0] = .{
         .name = .{ .sid = null, .text = "foo" },
         .value = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
@@ -1018,11 +1018,16 @@ test "ion 1.1 binary writer roundtrip (basic)" {
         .name = .{ .sid = null, .text = "bar" },
         .value = .{ .annotations = &.{}, .value = .{ .string = "x" } },
     };
+    struct_fields[2] = .{
+        .name = .{ .sid = 10, .text = null },
+        .value = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 9 } } },
+    };
 
     const doc = &[_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
         .{ .annotations = &.{}, .value = .{ .string = "hello" } },
         .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = null, .text = "sym" } } },
+        .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 10, .text = null } } },
         .{ .annotations = &.{}, .value = .{ .decimal = .{ .is_negative = false, .coefficient = .{ .small = 12345 }, .exponent = -2 } } },
         .{ .annotations = &.{}, .value = .{ .blob = &.{ 0x00, 0xFF, 0x01 } } },
         .{ .annotations = &.{}, .value = .{ .list = list_items } },
