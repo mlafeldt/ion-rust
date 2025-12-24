@@ -22,8 +22,9 @@ pub fn writeBinary11(allocator: std.mem.Allocator, doc: []const value.Element) I
 }
 
 fn writeElement(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), e: value.Element) IonError!void {
-    // Keep this writer simple for now: only unannotated elements.
-    if (e.annotations.len != 0) return IonError.Unsupported;
+    if (e.annotations.len != 0) {
+        try writeAnnotationsSequence(allocator, out, e.annotations);
+    }
     try writeValue(allocator, out, e.value);
 }
 
@@ -176,9 +177,7 @@ fn writeStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s
     for (st.fields) |f| {
         const name = f.name.text orelse return IonError.Unsupported;
         if (!std.unicode.utf8ValidateSlice(name)) return IonError.InvalidIon;
-        // FlexSym inline text: FlexInt(-len) then bytes.
-        try writeFlexIntShift1(&body, allocator, -@as(i64, @intCast(name.len)));
-        try appendSlice(&body, allocator, name);
+        try writeFlexSymSymbol(&body, allocator, f.name);
         try writeElement(allocator, &body, f.value);
     }
 
@@ -191,6 +190,86 @@ fn writeStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s
     try appendByte(out, allocator, 0xFD);
     try writeFlexUIntShift1(out, allocator, body.items.len);
     try appendSlice(out, allocator, body.items);
+}
+
+fn writeAnnotationsSequence(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), anns: []const value.Symbol) IonError!void {
+    if (anns.len == 0) return;
+
+    var all_sid_only = true;
+    for (anns) |a| {
+        if (a.text != null or a.sid == null) {
+            all_sid_only = false;
+            break;
+        }
+    }
+
+    if (all_sid_only) {
+        switch (anns.len) {
+            1 => {
+                try appendByte(out, allocator, 0xE4);
+                try writeFlexUIntShift1(out, allocator, anns[0].sid.?);
+            },
+            2 => {
+                try appendByte(out, allocator, 0xE5);
+                try writeFlexUIntShift1(out, allocator, anns[0].sid.?);
+                try writeFlexUIntShift1(out, allocator, anns[1].sid.?);
+            },
+            else => {
+                var seq = std.ArrayListUnmanaged(u8){};
+                defer seq.deinit(allocator);
+                for (anns) |a| {
+                    try writeFlexUIntShift1(&seq, allocator, a.sid.?);
+                }
+                try appendByte(out, allocator, 0xE6);
+                try writeFlexUIntShift1(out, allocator, seq.items.len);
+                try appendSlice(out, allocator, seq.items);
+            },
+        }
+        return;
+    }
+
+    switch (anns.len) {
+        1 => {
+            try appendByte(out, allocator, 0xE7);
+            try writeFlexSymSymbol(out, allocator, anns[0]);
+        },
+        2 => {
+            try appendByte(out, allocator, 0xE8);
+            try writeFlexSymSymbol(out, allocator, anns[0]);
+            try writeFlexSymSymbol(out, allocator, anns[1]);
+        },
+        else => {
+            var seq = std.ArrayListUnmanaged(u8){};
+            defer seq.deinit(allocator);
+            for (anns) |a| {
+                try writeFlexSymSymbol(&seq, allocator, a);
+            }
+            try appendByte(out, allocator, 0xE9);
+            try writeFlexUIntShift1(out, allocator, seq.items.len);
+            try appendSlice(out, allocator, seq.items);
+        },
+    }
+}
+
+fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, sym: value.Symbol) IonError!void {
+    if (sym.text) |t| {
+        if (!std.unicode.utf8ValidateSlice(t)) return IonError.InvalidIon;
+        // FlexSym inline text: FlexInt(-len) then bytes.
+        try writeFlexIntShift1(out, allocator, -@as(i64, @intCast(t.len)));
+        try appendSlice(out, allocator, t);
+        return;
+    }
+    if (sym.sid) |sid| {
+        if (sid == 0) {
+            // FlexSym escape: FlexInt(0) then 0x60 => symbol 0.
+            try writeFlexIntShift1(out, allocator, 0);
+            try appendByte(out, allocator, 0x60);
+            return;
+        }
+        try writeFlexIntShift1(out, allocator, @intCast(sid));
+        return;
+    }
+    return IonError.Unsupported;
 }
 
 fn twosComplementIntBytesLe(allocator: std.mem.Allocator, i: value.Int) IonError![]u8 {
