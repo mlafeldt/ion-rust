@@ -1005,6 +1005,67 @@ test "ion 1.1 binary e-expression length-prefixed system make_string (0xF5)" {
     try std.testing.expectEqualStrings("hello", elems[0].value.string);
 }
 
+test "ion 1.1 binary system sum supports big ints" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // E0 01 01 EA (IVM)
+    // EF 07       (system sum)
+    // F6 <len=26> <26-byte LE payload> (2^200)
+    // 61 01       (int(1))
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+
+    bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xEF, 0x07, 0xF6, 0x35 }) catch return error.OutOfMemory;
+    var pow2_200 = [_]u8{0} ** 26;
+    pow2_200[25] = 0x01;
+    bytes.appendSlice(std.testing.allocator, &pow2_200) catch return error.OutOfMemory;
+    bytes.appendSlice(std.testing.allocator, &.{ 0x61, 0x01 }) catch return error.OutOfMemory;
+
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expect(elems[0].value.int == .big);
+    try std.testing.expectEqual(@as(usize, 201), elems[0].value.int.big.toConst().bitCountAbs());
+}
+
+test "ion 1.1 binary system delta supports big ints" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // E0 01 01 EA (IVM)
+    // EF 06       (system delta)
+    // 02          (presence: arg group)
+    // 01          (FlexUInt(0): delimited tagged group)
+    // <values...> F0 (group terminator)
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+
+    bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xEF, 0x06, 0x02, 0x01, 0xF6, 0x35 }) catch return error.OutOfMemory;
+    var pow2_200 = [_]u8{0} ** 26;
+    pow2_200[25] = 0x01;
+    bytes.appendSlice(std.testing.allocator, &pow2_200) catch return error.OutOfMemory;
+    bytes.appendSlice(std.testing.allocator, &.{ 0x61, 0x01, 0xF0 }) catch return error.OutOfMemory;
+
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
+    try std.testing.expectEqual(@as(usize, 2), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expect(elems[1].value == .int);
+    try std.testing.expect(elems[0].value.int == .big);
+    try std.testing.expect(elems[1].value.int == .big);
+
+    var expected1 = try std.math.big.int.Managed.initSet(std.testing.allocator, 1);
+    defer expected1.deinit();
+    try expected1.shiftLeft(&expected1, 200);
+
+    var expected2 = try std.math.big.int.Managed.init(std.testing.allocator);
+    defer expected2.deinit();
+    try expected2.addScalar(&expected1, 1);
+
+    try std.testing.expect(std.math.big.int.Const.order(elems[0].value.int.big.toConst(), expected1.toConst()) == .eq);
+    try std.testing.expect(std.math.big.int.Const.order(elems[1].value.int.big.toConst(), expected2.toConst()) == .eq);
+}
+
 test "ion 1.1 binary writer roundtrip (basic)" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

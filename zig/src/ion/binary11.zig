@@ -1176,12 +1176,9 @@ const Decoder = struct {
         if (count_vals.len != 1) return IonError.InvalidIon;
         if (count_vals[0].value != .int) return IonError.InvalidIon;
 
-        const count_i128: i128 = switch (count_vals[0].value.int) {
-            .small => |v| v,
-            .big => return IonError.Unsupported,
-        };
+        const count_i128 = try self.intToI128(count_vals[0].value.int);
         if (count_i128 < 0) return IonError.InvalidIon;
-        const count: usize = @intCast(count_i128);
+        const count = std.math.cast(usize, count_i128) orelse return IonError.Unsupported;
 
         if (self.i >= self.input.len) return IonError.Incomplete;
         const vals: []const value.Element = blk: {
@@ -1226,18 +1223,30 @@ const Decoder = struct {
         const a_v = try self.readValue();
         const b_v = try self.readValue();
         if (a_v != .int or b_v != .int) return IonError.InvalidIon;
-        const a_i: i128 = switch (a_v.int) {
-            .small => |v| v,
-            .big => return IonError.Unsupported,
-        };
-        const b_i: i128 = switch (b_v.int) {
-            .small => |v| v,
-            .big => return IonError.Unsupported,
-        };
-        const s = std.math.add(i128, a_i, b_i) catch return IonError.InvalidIon;
         const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
-        out[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = s } } };
-        return out;
+
+        if (a_v.int == .small and b_v.int == .small) {
+            if (std.math.add(i128, a_v.int.small, b_v.int.small)) |s| {
+                out[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = s } } };
+                return out;
+            } else |_| {
+                // Fall back to BigInt addition on overflow.
+            }
+        }
+
+        const a_big = try self.intToBigInt(a_v.int);
+        const b_big = try self.intToBigInt(b_v.int);
+        const sum = try self.arena.makeBigInt();
+        sum.add(a_big, b_big) catch return IonError.OutOfMemory;
+
+        // Prefer small ints when representable.
+        if (sum.toConst().toInt(i128)) |s_i128| {
+            out[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = s_i128 } } };
+            return out;
+        } else |_| {
+            out[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .big = sum } } };
+            return out;
+        }
     }
 
     fn expandMakeString(self: *Decoder) IonError![]value.Element {
@@ -1777,17 +1786,74 @@ const Decoder = struct {
         if (args.items.len == 0) return &.{};
 
         const out = self.arena.allocator().alloc(value.Element, args.items.len) catch return IonError.OutOfMemory;
-        var acc: i128 = 0;
+
+        var acc_small: i128 = 0;
+        var acc_big: ?*std.math.big.int.Managed = null;
+
         for (args.items, 0..) |e, idx| {
             if (e.value != .int) return IonError.InvalidIon;
-            const d: i128 = switch (e.value.int) {
-                .small => |v| v,
-                .big => return IonError.Unsupported,
-            };
-            if (idx == 0) acc = d else acc = std.math.add(i128, acc, d) catch return IonError.InvalidIon;
-            out[idx] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = acc } } };
+            const d_int = e.value.int;
+
+            if (acc_big == null and d_int == .small) small: {
+                if (idx == 0) {
+                    acc_small = d_int.small;
+                    out[idx] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = acc_small } } };
+                    continue;
+                }
+                const added = std.math.add(i128, acc_small, d_int.small) catch break :small;
+                acc_small = added;
+                out[idx] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = acc_small } } };
+                continue;
+            }
+
+            // BigInt path: maintain an accumulator and snapshot it for each output element.
+            if (acc_big == null) {
+                const tmp = try self.arena.makeBigInt();
+                tmp.set(acc_small) catch return IonError.OutOfMemory;
+                acc_big = tmp;
+            }
+            const accp = acc_big.?;
+
+            if (idx == 0) {
+                // First element: acc = d
+                if (d_int == .small) {
+                    accp.set(d_int.small) catch return IonError.OutOfMemory;
+                } else {
+                    accp.copy(d_int.big.toConst()) catch return IonError.OutOfMemory;
+                }
+            } else {
+                if (d_int == .small) {
+                    accp.addScalar(accp, d_int.small) catch return IonError.OutOfMemory;
+                } else {
+                    accp.add(accp, d_int.big) catch return IonError.OutOfMemory;
+                }
+            }
+
+            const snap = try self.arena.makeBigInt();
+            snap.copy(accp.toConst()) catch return IonError.OutOfMemory;
+            out[idx] = .{ .annotations = &.{}, .value = .{ .int = .{ .big = snap } } };
         }
+
         return out;
+    }
+
+    fn intToI128(self: *Decoder, i: value.Int) IonError!i128 {
+        _ = self;
+        return switch (i) {
+            .small => |v| v,
+            .big => |p| p.toConst().toInt(i128) catch return IonError.Unsupported,
+        };
+    }
+
+    fn intToBigInt(self: *Decoder, i: value.Int) IonError!*std.math.big.int.Managed {
+        return switch (i) {
+            .big => |p| p,
+            .small => |v| blk: {
+                const bi = try self.arena.makeBigInt();
+                bi.set(v) catch return IonError.OutOfMemory;
+                break :blk bi;
+            },
+        };
     }
 
     fn expandMakeTimestamp(self: *Decoder) IonError![]value.Element {
