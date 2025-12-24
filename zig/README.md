@@ -129,6 +129,11 @@ Key properties:
     - Uses `\\xNN` escapes for non-ASCII bytes in clobs.
     - Avoids accidental string literal concatenation by alternating short (`"..."`) and long (`'''...'''`) forms for adjacent string values at top-level and in sexps.
 
+- `zig/src/ion/writer11.zig` (experimental / partial)
+  - Emits Ion 1.1 IVM and a subset of Ion 1.1 binary value opcodes.
+  - Intended for regression tests/ad-hoc tooling; not used by the main corpus/conformance harness yet.
+  - Limitations: no annotations, no timestamps, no macro/e-expression emission, no module mutation modeling, and symbols must have inline text (no SID-only output).
+
 ### Equality semantics
 
 - `zig/src/ion/eq.zig`
@@ -146,7 +151,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
-  - As of 2025-12-23, `cd zig && zig build test --summary all` runs 28 Zig tests; all pass.
+  - As of 2025-12-24, `cd zig && zig build test --summary all` runs 29 Zig tests; all pass.
 
 ### Skip list (currently empty)
 
@@ -212,7 +217,7 @@ This port is "tests green" for `ion-tests/`, but it is not feature-complete vs t
 Major gaps (not exhaustive):
 
 1) Ion 1.1 binary: many core value opcodes are implemented (containers, strings/symbols, blobs/clobs, annotations, timestamps, and `0xF5`-style macro invocations needed by conformance), but it is still not a full Ion 1.1 binary implementation. The largest missing piece is stream/module state: `set_symbols`/`add_symbols`/`set_macros`/`add_macros`/`use`/`meta` side-effects are not modeled in the binary parser, so parsing arbitrary Ion 1.1 binary streams that rely on in-stream module mutation is not supported.
-2) Ion 1.1 writing: no Ion 1.1 binary writer, and the text writer does not emit Ion 1.1 e-expressions/macros.
+2) Ion 1.1 writing: there is an experimental partial Ion 1.1 binary writer (`zig/src/ion/writer11.zig`) used for regression tests/ad-hoc tooling, but it does not emit macros/e-expressions, does not model module mutation directives, and does not yet cover all value forms. The text writer does not emit Ion 1.1 e-expressions/macros.
 3) System macros: the subset exercised by `ion-tests/conformance` is implemented for Ion 1.1 text + binary expansion, but the full system macro/module surface (including mutation semantics) is not.
 4) TDL / macro system: enough to satisfy `ion-tests/conformance`, not a full TDL compiler/evaluator.
 5) Streaming/lazy reading: Zig implementation is DOM-only; it parses the whole document into memory.

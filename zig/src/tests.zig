@@ -1000,3 +1000,41 @@ test "ion 1.1 binary e-expression length-prefixed system make_string (0xF5)" {
     try std.testing.expect(elems[0].value == .string);
     try std.testing.expectEqualStrings("hello", elems[0].value.string);
 }
+
+test "ion 1.1 binary writer roundtrip (basic)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const list_items = try arena.allocator().alloc(ion.value.Element, 2);
+    list_items[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
+    list_items[1] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } };
+
+    const struct_fields = try arena.allocator().alloc(ion.value.StructField, 2);
+    struct_fields[0] = .{
+        .name = .{ .sid = null, .text = "foo" },
+        .value = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+    };
+    struct_fields[1] = .{
+        .name = .{ .sid = null, .text = "bar" },
+        .value = .{ .annotations = &.{}, .value = .{ .string = "x" } },
+    };
+
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .string = "hello" } },
+        .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = null, .text = "sym" } } },
+        .{ .annotations = &.{}, .value = .{ .decimal = .{ .is_negative = false, .coefficient = .{ .small = 12345 }, .exponent = -2 } } },
+        .{ .annotations = &.{}, .value = .{ .blob = &.{ 0x00, 0xFF, 0x01 } } },
+        .{ .annotations = &.{}, .value = .{ .list = list_items } },
+        .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = struct_fields } } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11(std.testing.allocator, doc);
+    defer std.testing.allocator.free(bytes);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
+}
