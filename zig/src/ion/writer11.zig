@@ -2,7 +2,7 @@
 //!
 //! This currently targets only the subset needed for regression tests and ad-hoc tooling.
 //! It does NOT emit Ion 1.1 e-expressions/macros and does not model module mutation directives.
-//! When writing symbols, it only supports inline-text symbols (no SID-only output).
+//! Symbol values can be written as either inline text (A0..AF/FA) or as symbol addresses (E1..E3).
 
 const std = @import("std");
 const ion = @import("../ion.zig");
@@ -133,16 +133,44 @@ fn writeString(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s
 }
 
 fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: value.Symbol) IonError!void {
-    const t = s.text orelse return IonError.Unsupported;
-    if (!std.unicode.utf8ValidateSlice(t)) return IonError.InvalidIon;
-    if (t.len <= 15) {
-        try appendByte(out, allocator, 0xA0 + @as(u8, @intCast(t.len)));
+    if (s.text) |t| {
+        if (!std.unicode.utf8ValidateSlice(t)) return IonError.InvalidIon;
+        if (t.len <= 15) {
+            try appendByte(out, allocator, 0xA0 + @as(u8, @intCast(t.len)));
+            try appendSlice(out, allocator, t);
+            return;
+        }
+        try appendByte(out, allocator, 0xFA);
+        try writeFlexUIntShift1(out, allocator, t.len);
         try appendSlice(out, allocator, t);
         return;
     }
-    try appendByte(out, allocator, 0xFA);
-    try writeFlexUIntShift1(out, allocator, t.len);
-    try appendSlice(out, allocator, t);
+    if (s.sid) |sid| {
+        // Symbol address: E1..E3 (fixed uint with bias).
+        if (sid <= 0xFF) {
+            try appendByte(out, allocator, 0xE1);
+            try appendByte(out, allocator, @intCast(sid));
+            return;
+        }
+        if (sid <= 0xFFFF + 256) {
+            try appendByte(out, allocator, 0xE2);
+            const raw: u16 = @intCast(sid - 256);
+            var buf: [2]u8 = undefined;
+            std.mem.writeInt(u16, &buf, raw, .little);
+            try appendSlice(out, allocator, &buf);
+            return;
+        }
+        if (sid <= 0xFFFFFF + 65792) {
+            try appendByte(out, allocator, 0xE3);
+            const raw: u32 = sid - 65792;
+            try appendByte(out, allocator, @intCast(raw & 0xFF));
+            try appendByte(out, allocator, @intCast((raw >> 8) & 0xFF));
+            try appendByte(out, allocator, @intCast((raw >> 16) & 0xFF));
+            return;
+        }
+        return IonError.Unsupported;
+    }
+    return IonError.Unsupported;
 }
 
 fn writeLob(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), op: u8, bytes: []const u8) IonError!void {
@@ -175,8 +203,6 @@ fn writeStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s
 
     try writeFlexUIntShift1(&body, allocator, 0);
     for (st.fields) |f| {
-        const name = f.name.text orelse return IonError.Unsupported;
-        if (!std.unicode.utf8ValidateSlice(name)) return IonError.InvalidIon;
         try writeFlexSymSymbol(&body, allocator, f.name);
         try writeElement(allocator, &body, f.value);
     }
