@@ -1302,3 +1302,93 @@ test "ion 1.1 binary writer encodes negative big int with sign extension" {
     const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
 }
+
+test "ion 1.1 binary writer emits short timestamps" {
+    const ms: ion.value.Decimal = .{ .is_negative = false, .coefficient = .{ .small = 5 }, .exponent = -3 };
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = null,
+            .day = null,
+            .hour = null,
+            .minute = null,
+            .second = null,
+            .fractional = null,
+            .offset_minutes = null,
+            .precision = .year,
+        } } },
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = null,
+            .hour = null,
+            .minute = null,
+            .second = null,
+            .fractional = null,
+            .offset_minutes = null,
+            .precision = .month,
+        } } },
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = null,
+            .minute = null,
+            .second = null,
+            .fractional = null,
+            .offset_minutes = null,
+            .precision = .day,
+        } } },
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = 1,
+            .minute = 2,
+            .second = null,
+            .fractional = null,
+            .offset_minutes = null,
+            .precision = .minute,
+        } } },
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = 1,
+            .minute = 2,
+            .second = 3,
+            .fractional = null,
+            .offset_minutes = 0,
+            .precision = .second,
+        } } },
+        .{ .annotations = &.{}, .value = .{ .timestamp = .{
+            .year = 2025,
+            .month = 12,
+            .day = 24,
+            .hour = 1,
+            .minute = 2,
+            .second = 3,
+            .fractional = ms,
+            .offset_minutes = 0,
+            .precision = .fractional,
+        } } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11(std.testing.allocator, doc);
+    defer std.testing.allocator.free(bytes);
+
+    // Expect at least one short timestamp opcode in 0x80..0x8F.
+    var saw_short = false;
+    for (bytes) |b| {
+        if (b >= 0x80 and b <= 0x8F) {
+            saw_short = true;
+            break;
+        }
+    }
+    try std.testing.expect(saw_short);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
+}
