@@ -1724,10 +1724,7 @@ const Decoder = struct {
         const exp_v = try self.readValue();
         if (exp_v != .int) return IonError.InvalidIon;
 
-        const exp_i128: i128 = switch (exp_v.int) {
-            .small => |v| v,
-            .big => return IonError.Unsupported,
-        };
+        const exp_i128 = try self.intToI128(exp_v.int);
         if (exp_i128 < std.math.minInt(i32) or exp_i128 > std.math.maxInt(i32)) return IonError.InvalidIon;
 
         var is_negative = false;
@@ -1742,7 +1739,17 @@ const Decoder = struct {
                     magnitude = .{ .small = v };
                 }
             },
-            .big => return IonError.Unsupported,
+            .big => |p| {
+                const src = p.toConst();
+                // Decimal coefficient is stored as magnitude + sign bit in the Decimal struct.
+                const mag = try self.arena.makeBigInt();
+                mag.copy(src) catch return IonError.OutOfMemory;
+                if (!mag.toConst().positive) {
+                    is_negative = true;
+                    mag.abs();
+                }
+                magnitude = .{ .big = mag };
+            },
         }
 
         // Negative zero is not representable as an int; ensure we don't emit it.
@@ -1871,10 +1878,7 @@ const Decoder = struct {
 
         const year_v = try self.readValue();
         if (year_v != .int) return IonError.InvalidIon;
-        const year_i128: i128 = switch (year_v.int) {
-            .small => |v| v,
-            .big => return IonError.Unsupported,
-        };
+        const year_i128 = try self.intToI128(year_v.int);
         if (year_i128 < 1 or year_i128 > 9999) return IonError.InvalidIon;
         const year: i32 = @intCast(year_i128);
 
@@ -1921,10 +1925,7 @@ const Decoder = struct {
 
         if (month_v) |mv| {
             if (mv != .int) return IonError.InvalidIon;
-            const m_i128: i128 = switch (mv.int) {
-                .small => |v| v,
-                .big => return IonError.Unsupported,
-            };
+            const m_i128 = try self.intToI128(mv.int);
             if (m_i128 < 1 or m_i128 > 12) return IonError.InvalidIon;
             ts.month = @intCast(m_i128);
             ts.precision = .month;
@@ -1932,10 +1933,7 @@ const Decoder = struct {
 
         if (day_v) |dv| {
             if (dv != .int) return IonError.InvalidIon;
-            const d_i128: i128 = switch (dv.int) {
-                .small => |v| v,
-                .big => return IonError.Unsupported,
-            };
+            const d_i128 = try self.intToI128(dv.int);
             if (d_i128 < 1) return IonError.InvalidIon;
             const max_day: i128 = @intCast(daysInMonth(year, ts.month orelse return IonError.InvalidIon));
             if (d_i128 > max_day) return IonError.InvalidIon;
@@ -1946,19 +1944,13 @@ const Decoder = struct {
         if (hour_v) |hv| {
             if (minute_v == null) return IonError.InvalidIon;
             if (hv != .int) return IonError.InvalidIon;
-            const h_i128: i128 = switch (hv.int) {
-                .small => |v| v,
-                .big => return IonError.Unsupported,
-            };
+            const h_i128 = try self.intToI128(hv.int);
             if (h_i128 < 0 or h_i128 >= 24) return IonError.InvalidIon;
             ts.hour = @intCast(h_i128);
 
             const mv = minute_v.?;
             if (mv != .int) return IonError.InvalidIon;
-            const min_i128: i128 = switch (mv.int) {
-                .small => |v| v,
-                .big => return IonError.Unsupported,
-            };
+            const min_i128 = try self.intToI128(mv.int);
             if (min_i128 < 0 or min_i128 >= 60) return IonError.InvalidIon;
             ts.minute = @intCast(min_i128);
             ts.precision = .minute;
@@ -1966,10 +1958,7 @@ const Decoder = struct {
             if (seconds_v) |sv| {
                 switch (sv) {
                     .int => |ii| {
-                        const s_i128: i128 = switch (ii) {
-                            .small => |v| v,
-                            .big => return IonError.Unsupported,
-                        };
+                        const s_i128 = try self.intToI128(ii);
                         if (s_i128 < 0 or s_i128 >= 60) return IonError.InvalidIon;
                         ts.second = @intCast(s_i128);
                         ts.precision = .second;
@@ -2023,10 +2012,7 @@ const Decoder = struct {
 
             if (offset_v) |ov| {
                 if (ov != .int) return IonError.InvalidIon;
-                const off_i128: i128 = switch (ov.int) {
-                    .small => |v| v,
-                    .big => return IonError.Unsupported,
-                };
+                const off_i128 = try self.intToI128(ov.int);
                 if (off_i128 <= -1440 or off_i128 >= 1440) return IonError.InvalidIon;
                 const off_i16: i16 = @intCast(off_i128);
                 ts.offset_minutes = off_i16;

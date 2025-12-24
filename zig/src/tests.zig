@@ -1066,6 +1066,81 @@ test "ion 1.1 binary system delta supports big ints" {
     try std.testing.expect(std.math.big.int.Const.order(elems[1].value.int.big.toConst(), expected2.toConst()) == .eq);
 }
 
+test "ion 1.1 binary system make_decimal supports big exponent and coefficient" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // E0 01 01 EA (IVM)
+    // EF 0B       (system make_decimal)
+    // coeff: F6 <len=17> <17-byte LE payload> (2^128)
+    // exp:   F6 <len=17> <17-byte LE payload> (3)
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+
+    bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xEF, 0x0B, 0xF6, 0x23 }) catch return error.OutOfMemory;
+    var coeff = [_]u8{0} ** 17;
+    coeff[16] = 0x01;
+    bytes.appendSlice(std.testing.allocator, &coeff) catch return error.OutOfMemory;
+
+    bytes.appendSlice(std.testing.allocator, &.{ 0xF6, 0x23 }) catch return error.OutOfMemory;
+    var exp = [_]u8{0} ** 17;
+    exp[0] = 0x03;
+    bytes.appendSlice(std.testing.allocator, &exp) catch return error.OutOfMemory;
+
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .decimal);
+    try std.testing.expectEqual(@as(i32, 3), elems[0].value.decimal.exponent);
+    try std.testing.expect(!elems[0].value.decimal.is_negative);
+    try std.testing.expect(elems[0].value.decimal.coefficient == .big);
+    try std.testing.expectEqual(@as(usize, 129), elems[0].value.decimal.coefficient.big.toConst().bitCountAbs());
+}
+
+test "ion 1.1 binary system make_timestamp accepts big ints for fields" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // make_timestamp(year=2025, month=12, day=24, hour=1, minute=2, seconds=3, offset=0)
+    // with all numeric fields encoded as 17-byte ints (F6) so they parse as `.big`.
+    //
+    // Presence u16: month/day/hour/minute/seconds/offset present => bits 0..5 = 01 => 0x0555
+    // Little-endian bytes: 55 05
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+
+    bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xEF, 0x0C, 0x55, 0x05 }) catch return error.OutOfMemory;
+
+    const appendBig = struct {
+        fn run(list: *std.ArrayListUnmanaged(u8), v: u16) !void {
+            try list.appendSlice(std.testing.allocator, &.{ 0xF6, 0x23 });
+            var buf = [_]u8{0} ** 17;
+            buf[0] = @intCast(v & 0xFF);
+            buf[1] = @intCast((v >> 8) & 0xFF);
+            try list.appendSlice(std.testing.allocator, &buf);
+        }
+    }.run;
+
+    try appendBig(&bytes, 2025);
+    try appendBig(&bytes, 12);
+    try appendBig(&bytes, 24);
+    try appendBig(&bytes, 1);
+    try appendBig(&bytes, 2);
+    try appendBig(&bytes, 3);
+    try appendBig(&bytes, 0);
+
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .timestamp);
+    const ts = elems[0].value.timestamp;
+    try std.testing.expectEqual(@as(i32, 2025), ts.year);
+    try std.testing.expectEqual(@as(u8, 12), ts.month.?);
+    try std.testing.expectEqual(@as(u8, 24), ts.day.?);
+    try std.testing.expectEqual(@as(u8, 1), ts.hour.?);
+    try std.testing.expectEqual(@as(u8, 2), ts.minute.?);
+    try std.testing.expectEqual(@as(u8, 3), ts.second.?);
+    try std.testing.expectEqual(@as(i16, 0), ts.offset_minutes.?);
+}
+
 test "ion 1.1 binary writer roundtrip (basic)" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
