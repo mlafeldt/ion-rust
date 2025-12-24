@@ -1214,3 +1214,27 @@ test "ion 1.1 binary writer uses EE for system symbols" {
     // 0xEE <addr>
     try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x01 }) != null);
 }
+
+test "ion 1.1 binary writer emits float widths" {
+    // 1.5 is exactly representable as f16 -> should be encoded as 0x6B (f16).
+    // 1 + 2^-23 is exactly representable as f32 but not f16 -> should be encoded as 0x6C (f32).
+    // 1 + 2^-52 is only exactly representable as f64 -> should be encoded as 0x6D (f64).
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .float = 1.5 } },
+        .{ .annotations = &.{}, .value = .{ .float = 1.00000011920928955078125 } },
+        .{ .annotations = &.{}, .value = .{ .float = 1.0000000000000002220446049250313080847263336181640625 } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11(std.testing.allocator, doc);
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x6B) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x6C) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x6D) != null);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
+}
