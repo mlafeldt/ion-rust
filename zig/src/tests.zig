@@ -1202,3 +1202,15 @@ test "ion 1.1 binary writer emits delimited containers" {
     // Struct close marker is FlexInt(0) (0x01) followed by the FlexSym escape byte 0xF0.
     try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0x01, 0xF0 }) != null);
 }
+
+test "ion 1.1 binary writer uses EE for system symbols" {
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11(std.testing.allocator, doc);
+    defer std.testing.allocator.free(bytes);
+
+    // 0xEE <addr>
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x01 }) != null);
+}
