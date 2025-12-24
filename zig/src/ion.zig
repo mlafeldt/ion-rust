@@ -13,6 +13,7 @@ pub const text = @import("ion/text.zig");
 pub const binary = @import("ion/binary.zig");
 pub const binary11 = @import("ion/binary11.zig");
 pub const writer = @import("ion/writer.zig");
+pub const writer11 = @import("ion/writer11.zig");
 pub const eq = @import("ion/eq.zig");
 
 pub const IonError = error{
