@@ -7,6 +7,7 @@
 const std = @import("std");
 const ion = @import("../ion.zig");
 const value = @import("value.zig");
+const symtab = @import("symtab.zig");
 
 const IonError = ion.IonError;
 
@@ -293,6 +294,14 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s
         return;
     }
     if (s.sid) |sid| {
+        // System symbol address: EE (1-byte fixed uint address). Only use this for known Ion 1.1
+        // system symbols so we don't conflate user SIDs with system symbol addresses.
+        if (sid <= 0xFF and symtab.SystemSymtab11.textForSid(@intCast(sid)) != null) {
+            try appendByte(out, allocator, 0xEE);
+            try appendByte(out, allocator, @intCast(sid));
+            return;
+        }
+
         // Symbol address: E1..E3 (fixed uint with bias).
         if (sid <= 0xFF) {
             try appendByte(out, allocator, 0xE1);
