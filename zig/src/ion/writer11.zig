@@ -91,11 +91,12 @@ fn writeInt(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), i: v
 }
 
 fn writeTimestamp(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), ts: value.Timestamp) IonError!void {
-    // Keep this encoding simple: always use the long timestamp opcode (0xF8) and emit the
-    // bit-field payload format that `binary11.decodeTimestampLong11()` expects.
-    //
-    // This is not intended to be a canonical/minimal encoder; it's a regression-test/tooling
-    // writer for the existing decoder.
+    // Prefer the short timestamp opcode table when possible. Fall back to long timestamps for
+    // unsupported precisions/ranges/offsets.
+    if (try writeTimestampShort(allocator, out, ts)) return;
+
+    // Otherwise, use the long timestamp opcode (0xF8) and emit the bit-field payload format that
+    // `binary11.decodeTimestampLong11()` expects.
     var payload = std.ArrayListUnmanaged(u8){};
     defer payload.deinit(allocator);
     try encodeTimestampLongPayload(&payload, allocator, ts);
@@ -103,6 +104,131 @@ fn writeTimestamp(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
     try appendByte(out, allocator, 0xF8);
     try writeFlexUIntShift1(out, allocator, payload.items.len);
     try appendSlice(out, allocator, payload.items);
+}
+
+fn writeTimestampShort(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), ts: value.Timestamp) IonError!bool {
+    // Supports short timestamp codes 0..5:
+    // - 0: year
+    // - 1: month
+    // - 2: day
+    // - 3: minute (UTC or unknown offset)
+    // - 4: second (UTC or unknown offset)
+    // - 5: milliseconds (UTC or unknown offset)
+    //
+    // For other precisions/offsets, return false and let the caller use the long form.
+    if (ts.year < 1970 or ts.year > 2097) return false;
+
+    const year_diff: u8 = @intCast(ts.year - 1970);
+
+    switch (ts.precision) {
+        .year => {
+            // 80 + 0, payload size 1.
+            try appendByte(out, allocator, 0x80);
+            try appendByte(out, allocator, year_diff & 0x7F);
+            return true;
+        },
+        .month => {
+            const month = ts.month orelse return IonError.InvalidIon;
+            if (month < 1 or month > 12) return IonError.InvalidIon;
+            // 80 + 1, payload size 2.
+            try appendByte(out, allocator, 0x81);
+            try appendByte(out, allocator, (year_diff & 0x7F) | ((month & 0x01) << 7));
+            try appendByte(out, allocator, @intCast((month >> 1) & 0x07));
+            return true;
+        },
+        .day => {
+            const month = ts.month orelse return IonError.InvalidIon;
+            const day = ts.day orelse return IonError.InvalidIon;
+            if (month < 1 or month > 12) return IonError.InvalidIon;
+            if (day < 1 or day > 31) return IonError.InvalidIon;
+            // 80 + 2, payload size 2.
+            try appendByte(out, allocator, 0x82);
+            try appendByte(out, allocator, (year_diff & 0x7F) | ((month & 0x01) << 7));
+            try appendByte(out, allocator, @as(u8, @intCast((month >> 1) & 0x07)) | ((day & 0x1F) << 3));
+            return true;
+        },
+        .minute, .second, .fractional => {
+            const month = ts.month orelse return IonError.InvalidIon;
+            const day = ts.day orelse return IonError.InvalidIon;
+            const hour = ts.hour orelse return IonError.InvalidIon;
+            const minute = ts.minute orelse return IonError.InvalidIon;
+            if (month < 1 or month > 12) return IonError.InvalidIon;
+            if (day < 1 or day > 31) return IonError.InvalidIon;
+            if (hour > 23 or minute > 59) return IonError.InvalidIon;
+
+            const is_utc: bool = if (ts.offset_minutes) |off| blk: {
+                if (off != 0) return false; // short codes 3..5 cannot represent non-zero offsets
+                break :blk true;
+            } else false;
+
+            // Base 2 bytes: year/month/day
+            const b0: u8 = (year_diff & 0x7F) | ((month & 0x01) << 7);
+            const b1: u8 = @as(u8, @intCast((month >> 1) & 0x07)) | ((day & 0x1F) << 3);
+
+            // Next 2 bytes: hour/minute + is_utc in payload[3] bit3.
+            const b2: u8 = (hour & 0x1F) | ((minute & 0x07) << 5);
+            var b3: u8 = @intCast((minute >> 3) & 0x07);
+            if (is_utc) b3 |= 0x08;
+
+            if (ts.precision == .minute) {
+                // 80 + 3, payload size 4.
+                try appendByte(out, allocator, 0x83);
+                try appendByte(out, allocator, b0);
+                try appendByte(out, allocator, b1);
+                try appendByte(out, allocator, b2);
+                try appendByte(out, allocator, b3);
+                return true;
+            }
+
+            const sec = ts.second orelse return IonError.InvalidIon;
+            if (sec > 59) return IonError.InvalidIon;
+            // Seconds occupy bits 4..9 of u16 at payload[3..5]:
+            // - low 4 bits in payload[3] bits 4..7
+            // - high 2 bits in payload[4] bits 0..1
+            b3 |= (sec & 0x0F) << 4;
+            var b4: u8 = @intCast((sec >> 4) & 0x03);
+
+            if (ts.precision == .second) {
+                // 80 + 4, payload size 5.
+                try appendByte(out, allocator, 0x84);
+                try appendByte(out, allocator, b0);
+                try appendByte(out, allocator, b1);
+                try appendByte(out, allocator, b2);
+                try appendByte(out, allocator, b3);
+                try appendByte(out, allocator, b4);
+                return true;
+            }
+
+            // Milliseconds only: exponent -3 and coefficient fits in the short table (0..1023).
+            const frac = ts.fractional orelse return IonError.InvalidIon;
+            if (frac.is_negative) return IonError.InvalidIon;
+            if (frac.exponent != -3) return false;
+            const ms_u16: u16 = switch (frac.coefficient) {
+                .small => |v| blk: {
+                    if (v < 0) return IonError.InvalidIon;
+                    if (v > 1023) return false;
+                    break :blk @intCast(v);
+                },
+                .big => return false,
+            };
+
+            // Milliseconds occupy bits 2..11 of u16 at payload[4..6]:
+            // - payload[4] bits 2..7 = low 6 bits
+            // - payload[5] bits 0..3 = high 4 bits
+            b4 |= @as(u8, @intCast((ms_u16 & 0x3F) << 2));
+            const b5: u8 = @intCast((ms_u16 >> 6) & 0x0F);
+
+            // 80 + 5, payload size 6.
+            try appendByte(out, allocator, 0x85);
+            try appendByte(out, allocator, b0);
+            try appendByte(out, allocator, b1);
+            try appendByte(out, allocator, b2);
+            try appendByte(out, allocator, b3);
+            try appendByte(out, allocator, b4);
+            try appendByte(out, allocator, b5);
+            return true;
+        },
+    }
 }
 
 fn encodeTimestampLongPayload(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, ts: value.Timestamp) IonError!void {
