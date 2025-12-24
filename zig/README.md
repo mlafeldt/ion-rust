@@ -155,7 +155,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
-- As of 2025-12-24, `cd zig && zig build test --summary all` runs 53 Zig tests; all pass.
+- As of 2025-12-24, `cd zig && zig build test --summary all` runs 54 Zig tests; all pass.
 
 ### Skip list (currently empty)
 
@@ -220,7 +220,7 @@ This port is "tests green" for `ion-tests/`, but it is not feature-complete vs t
 
 Major gaps (not exhaustive):
 
-1) Ion 1.1 binary: many core value opcodes are implemented (containers, strings/symbols, blobs/clobs, annotations, timestamps, and `0xF5`-style macro invocations needed by conformance), but it is still not a full Ion 1.1 binary implementation. Stream/module state is only modeled in a minimal, conformance-driven way (e.g. tracking `set_symbols`/`add_symbols` text for later SID resolution); full module mutation semantics (`set_macros`/`add_macros`/`use`/`meta`) are not implemented.
+1) Ion 1.1 binary: many core value opcodes are implemented (containers, strings/symbols, blobs/clobs, annotations, timestamps, and `0xF5`-style macro invocations needed by conformance), but it is still not a full Ion 1.1 binary implementation. Stream/module state is only modeled in a minimal, conformance-driven way (e.g. tracking `set_symbols`/`add_symbols` text for later SID resolution, and applying `set_macros`/`add_macros` for subsequent e-expression decoding); full module mutation semantics (especially `use`) are not implemented.
 2) Ion 1.1 writing: there is an experimental partial Ion 1.1 binary writer (`zig/src/ion/writer11.zig`) used for regression tests/ad-hoc tooling, but it does not emit macros/e-expressions, does not model module mutation directives, and does not yet cover all value forms. The text writer does not emit Ion 1.1 e-expressions/macros.
 3) System macros: the subset exercised by `ion-tests/conformance` is implemented for Ion 1.1 text + binary expansion, but the full system macro/module surface (including mutation semantics) is not.
 4) TDL / macro system: enough to satisfy `ion-tests/conformance`, not a full TDL compiler/evaluator.

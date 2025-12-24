@@ -1216,6 +1216,54 @@ test "ion 1.1 binary set_symbols affects symbol ID text (experimental)" {
     try std.testing.expectEqualStrings("foo", elems[0].value.symbol.text.?);
 }
 
+test "ion 1.1 binary set_macros updates macro table (experimental)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const sym_macro = try ion.value.makeSymbol(&arena, "macro");
+    const sym_foo = try ion.value.makeSymbol(&arena, "foo");
+    const sym_x = try ion.value.makeSymbol(&arena, "x");
+    const sym_percent = try ion.value.makeSymbol(&arena, "%");
+
+    // (macro foo (x) (% x))
+    const params_items = try arena.allocator().alloc(ion.value.Element, 1);
+    params_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = sym_x } };
+    const params = ion.value.Element{ .annotations = &.{}, .value = .{ .sexp = params_items } };
+
+    const body_items = try arena.allocator().alloc(ion.value.Element, 2);
+    body_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = sym_percent } };
+    body_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = sym_x } };
+    const body = ion.value.Element{ .annotations = &.{}, .value = .{ .sexp = body_items } };
+
+    const def_items = try arena.allocator().alloc(ion.value.Element, 4);
+    def_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = sym_macro } };
+    def_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = sym_foo } };
+    def_items[2] = params;
+    def_items[3] = body;
+    const macro_def = ion.value.Element{ .annotations = &.{}, .value = .{ .sexp = def_items } };
+
+    const macro_doc_bytes = try ion.writer11.writeBinary11(std.testing.allocator, &.{macro_def});
+    defer std.testing.allocator.free(macro_doc_bytes);
+    const macro_value_bytes = macro_doc_bytes[4..];
+
+    // IVM + `(:$ion::set_macros <macro_def>)` + user macro invocation at address 0 with arg 7
+    // EF 15 => system macro address 21 (meta/set_macros)
+    // 01    => presence: one tagged value (the macro def)
+    // 00    => user macro address 0
+    // 61 07 => int(7)
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+    try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xEF, 0x15, 0x01 });
+    try bytes.appendSlice(std.testing.allocator, macro_value_bytes);
+    try bytes.appendSlice(std.testing.allocator, &.{ 0x00, 0x61, 0x07 });
+
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expect(elems[0].value.int == .small);
+    try std.testing.expectEqual(@as(i128, 7), elems[0].value.int.small);
+}
+
 test "ion 1.1 binary system sum supports big ints" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
