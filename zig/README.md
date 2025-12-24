@@ -222,7 +222,7 @@ Major gaps (not exhaustive):
 3) System macros: the subset exercised by `ion-tests/conformance` is implemented for Ion 1.1 text + binary expansion, but the full system macro/module surface (including mutation semantics) is not.
 4) TDL / macro system: enough to satisfy `ion-tests/conformance`, not a full TDL compiler/evaluator.
 5) Streaming/lazy reading: Zig implementation is DOM-only; it parses the whole document into memory.
-6) BigInt in Ion 1.1 paths: several Ion 1.1 evaluation/encoding helpers return `IonError.Unsupported` on big ints (Ion 1.0 corpus still passes, including big ints).
+6) BigInt in Ion 1.1: the conformance-driven system macro + TDL paths support BigInt values, but some surfaces are still bounded by the in-memory model (for example: decimal exponent is an `i32` and `repeat` counts must fit `usize`).
 
 Minor gaps (not exhaustive):
 
