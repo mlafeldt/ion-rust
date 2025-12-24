@@ -87,6 +87,24 @@ fn concatValueSlices(arena: *value.Arena, parts: []const []const value.Element) 
     return out;
 }
 
+fn intToI128OrInvalid(i: value.Int) IonError!i128 {
+    return switch (i) {
+        .small => |v| v,
+        .big => |p| p.toConst().toInt(i128) catch return IonError.InvalidIon,
+    };
+}
+
+fn intToBigInt(arena: *value.Arena, i: value.Int) IonError!*std.math.big.int.Managed {
+    return switch (i) {
+        .big => |p| p,
+        .small => |v| blk: {
+            const bi = try arena.makeBigInt();
+            bi.set(v) catch return IonError.OutOfMemory;
+            break :blk bi;
+        },
+    };
+}
+
 fn bindParams(
     arena: *value.Arena,
     tab: *const ion.macro.MacroTable,
@@ -467,10 +485,7 @@ fn evalMacroInvocation(
         if (coeff_vals.len != 1 or exp_vals.len != 1) return IonError.InvalidIon;
         if (coeff_vals[0].value != .int or exp_vals[0].value != .int) return IonError.InvalidIon;
 
-        const exp_i128: i128 = switch (exp_vals[0].value.int) {
-            .small => |v| v,
-            .big => return IonError.Unsupported,
-        };
+        const exp_i128 = try intToI128OrInvalid(exp_vals[0].value.int);
         if (exp_i128 < std.math.minInt(i32) or exp_i128 > std.math.maxInt(i32)) return IonError.InvalidIon;
 
         var is_negative = false;
@@ -485,7 +500,15 @@ fn evalMacroInvocation(
                     magnitude = .{ .small = v };
                 }
             },
-            .big => return IonError.Unsupported,
+            .big => |src| {
+                const mag = try arena.makeBigInt();
+                mag.copy(src.toConst()) catch return IonError.OutOfMemory;
+                if (!mag.toConst().positive) {
+                    is_negative = true;
+                    mag.abs();
+                }
+                magnitude = .{ .big = mag };
+            },
         }
 
         // Negative zero is not representable as an int; ensure we don't emit it.
@@ -518,10 +541,7 @@ fn evalMacroInvocation(
 
         const year_elem = (try getOptSingle(arena, tab, env, args[0])) orelse return IonError.InvalidIon;
         if (year_elem.value != .int) return IonError.InvalidIon;
-        const year_i128: i128 = switch (year_elem.value.int) {
-            .small => |v| v,
-            .big => return IonError.Unsupported,
-        };
+        const year_i128 = try intToI128OrInvalid(year_elem.value.int);
         if (year_i128 < 1 or year_i128 > 9999) return IonError.InvalidIon;
         const year: i32 = @intCast(year_i128);
 
@@ -552,10 +572,7 @@ fn evalMacroInvocation(
 
         if (month_elem) |me| {
             if (me.value != .int) return IonError.InvalidIon;
-            const m_i128: i128 = switch (me.value.int) {
-                .small => |v| v,
-                .big => return IonError.Unsupported,
-            };
+            const m_i128 = try intToI128OrInvalid(me.value.int);
             if (m_i128 < 1 or m_i128 > 12) return IonError.InvalidIon;
             ts.month = @intCast(m_i128);
             ts.precision = .month;
@@ -563,10 +580,7 @@ fn evalMacroInvocation(
 
         if (day_elem) |de| {
             if (de.value != .int) return IonError.InvalidIon;
-            const d_i128: i128 = switch (de.value.int) {
-                .small => |v| v,
-                .big => return IonError.Unsupported,
-            };
+            const d_i128 = try intToI128OrInvalid(de.value.int);
             if (d_i128 < 1) return IonError.InvalidIon;
             const max_day: i128 = @intCast(daysInMonth(year, ts.month orelse return IonError.InvalidIon));
             if (d_i128 > max_day) return IonError.InvalidIon;
@@ -577,19 +591,13 @@ fn evalMacroInvocation(
         if (hour_elem) |he| {
             if (minute_elem == null) return IonError.InvalidIon;
             if (he.value != .int) return IonError.InvalidIon;
-            const h_i128: i128 = switch (he.value.int) {
-                .small => |v| v,
-                .big => return IonError.Unsupported,
-            };
+            const h_i128 = try intToI128OrInvalid(he.value.int);
             if (h_i128 < 0 or h_i128 >= 24) return IonError.InvalidIon;
             ts.hour = @intCast(h_i128);
 
             const mn = minute_elem.?;
             if (mn.value != .int) return IonError.InvalidIon;
-            const min_i128: i128 = switch (mn.value.int) {
-                .small => |v| v,
-                .big => return IonError.Unsupported,
-            };
+            const min_i128 = try intToI128OrInvalid(mn.value.int);
             if (min_i128 < 0 or min_i128 >= 60) return IonError.InvalidIon;
             ts.minute = @intCast(min_i128);
             ts.precision = .minute;
@@ -597,10 +605,7 @@ fn evalMacroInvocation(
             if (seconds_elem) |se| {
                 switch (se.value) {
                     .int => |ii| {
-                        const s_i128: i128 = switch (ii) {
-                            .small => |v| v,
-                            .big => return IonError.Unsupported,
-                        };
+                        const s_i128 = try intToI128OrInvalid(ii);
                         if (s_i128 < 0 or s_i128 >= 60) return IonError.InvalidIon;
                         ts.second = @intCast(s_i128);
                         ts.precision = .second;
@@ -613,38 +618,83 @@ fn evalMacroInvocation(
                         if (d.is_negative and !coeff_is_zero) return IonError.InvalidIon;
 
                         const exp: i32 = d.exponent;
-                        const coeff_u128: u128 = switch (d.coefficient) {
+                        const coeff_u128_opt: ?u128 = switch (d.coefficient) {
                             .small => |v| if (v < 0) return IonError.InvalidIon else @intCast(v),
-                            .big => return IonError.Unsupported,
+                            .big => null,
                         };
 
                         if (exp >= 0) {
-                            var scaled: u128 = coeff_u128;
-                            var k: u32 = @intCast(exp);
-                            while (k != 0) : (k -= 1) {
-                                scaled = std.math.mul(u128, scaled, 10) catch return IonError.InvalidIon;
+                            if (coeff_u128_opt) |coeff_u128| {
+                                var scaled: u128 = coeff_u128;
+                                var k: u32 = @intCast(exp);
+                                while (k != 0) : (k -= 1) {
+                                    scaled = std.math.mul(u128, scaled, 10) catch return IonError.InvalidIon;
+                                }
+                                if (scaled >= 60) return IonError.InvalidIon;
+                                ts.second = @intCast(scaled);
+                                ts.precision = .second;
+                            } else {
+                                const coeff_big = try intToBigInt(arena, d.coefficient);
+                                if (!coeff_big.toConst().positive) return IonError.InvalidIon;
+
+                                const ten = try arena.makeBigInt();
+                                ten.set(@as(u8, 10)) catch return IonError.OutOfMemory;
+                                const pow10 = try arena.makeBigInt();
+                                pow10.pow(ten, @intCast(exp)) catch return IonError.OutOfMemory;
+
+                                const scaled_big = try arena.makeBigInt();
+                                scaled_big.mul(coeff_big, pow10) catch return IonError.OutOfMemory;
+                                const scaled_i128 = scaled_big.toConst().toInt(i128) catch return IonError.InvalidIon;
+                                if (scaled_i128 < 0 or scaled_i128 >= 60) return IonError.InvalidIon;
+                                ts.second = @intCast(scaled_i128);
+                                ts.precision = .second;
                             }
-                            if (scaled >= 60) return IonError.InvalidIon;
-                            ts.second = @intCast(scaled);
-                            ts.precision = .second;
                         } else {
                             const digits: u32 = @intCast(-exp);
-                            var pow10: u128 = 1;
-                            var k: u32 = digits;
-                            while (k != 0) : (k -= 1) {
-                                pow10 = std.math.mul(u128, pow10, 10) catch return IonError.InvalidIon;
-                            }
-                            const sec_u128: u128 = coeff_u128 / pow10;
-                            const frac_u128: u128 = coeff_u128 % pow10;
-                            if (sec_u128 >= 60) return IonError.InvalidIon;
-                            ts.second = @intCast(sec_u128);
-                            ts.precision = .second;
-                            if (frac_u128 != 0) {
-                                const frac_coeff: value.Int = .{ .small = @intCast(frac_u128) };
-                                ts.fractional = .{ .is_negative = false, .coefficient = frac_coeff, .exponent = exp };
-                                ts.precision = .fractional;
-                            } else if (exp < 0 and (coeff_u128 % pow10 == 0) and (coeff_u128 != 0)) {
-                                // Exact integer value but written with fractional digits (e.g. 6.0).
+                            if (coeff_u128_opt) |coeff_u128| {
+                                var pow10: u128 = 1;
+                                var k: u32 = digits;
+                                while (k != 0) : (k -= 1) {
+                                    pow10 = std.math.mul(u128, pow10, 10) catch return IonError.InvalidIon;
+                                }
+                                const sec_u128: u128 = coeff_u128 / pow10;
+                                const frac_u128: u128 = coeff_u128 % pow10;
+                                if (sec_u128 >= 60) return IonError.InvalidIon;
+                                ts.second = @intCast(sec_u128);
+                                ts.precision = .second;
+                                if (frac_u128 != 0) {
+                                    const frac_coeff: value.Int = .{ .small = @intCast(frac_u128) };
+                                    ts.fractional = .{ .is_negative = false, .coefficient = frac_coeff, .exponent = exp };
+                                    ts.precision = .fractional;
+                                } else if (exp < 0 and (coeff_u128 % pow10 == 0) and (coeff_u128 != 0)) {
+                                    // Exact integer value but written with fractional digits (e.g. 6.0).
+                                }
+                            } else {
+                                const coeff_big = try intToBigInt(arena, d.coefficient);
+                                if (!coeff_big.toConst().positive) return IonError.InvalidIon;
+
+                                const ten = try arena.makeBigInt();
+                                ten.set(@as(u8, 10)) catch return IonError.OutOfMemory;
+                                const pow10 = try arena.makeBigInt();
+                                pow10.pow(ten, digits) catch return IonError.OutOfMemory;
+
+                                const q = try arena.makeBigInt();
+                                const r = try arena.makeBigInt();
+                                q.divTrunc(r, coeff_big, pow10) catch return IonError.OutOfMemory;
+
+                                const sec_i128 = q.toConst().toInt(i128) catch return IonError.InvalidIon;
+                                if (sec_i128 < 0 or sec_i128 >= 60) return IonError.InvalidIon;
+                                ts.second = @intCast(sec_i128);
+                                ts.precision = .second;
+
+                                if (!r.toConst().eqlZero()) {
+                                    const frac_int: value.Int = if (r.toConst().toInt(i128)) |v|
+                                        .{ .small = v }
+                                    else |_|
+                                        .{ .big = r };
+                                    ts.fractional = .{ .is_negative = false, .coefficient = frac_int, .exponent = exp };
+                                    ts.precision = .fractional;
+                                }
                             }
                         }
                     },
@@ -654,10 +704,7 @@ fn evalMacroInvocation(
 
             if (offset_elem) |oe| {
                 if (oe.value != .int) return IonError.InvalidIon;
-                const off_i128: i128 = switch (oe.value.int) {
-                    .small => |v| v,
-                    .big => return IonError.Unsupported,
-                };
+                const off_i128 = try intToI128OrInvalid(oe.value.int);
                 if (off_i128 <= -1440 or off_i128 >= 1440) return IonError.InvalidIon;
                 const off_i16: i16 = @intCast(off_i128);
                 ts.offset_minutes = off_i16;
@@ -691,12 +738,9 @@ fn evalMacroInvocation(
         const count_vals = try evalExpr(arena, tab, env, args[0]);
         if (count_vals.len != 1) return IonError.InvalidIon;
         if (count_vals[0].value != .int) return IonError.InvalidIon;
-        const count_i128: i128 = switch (count_vals[0].value.int) {
-            .small => |v| v,
-            .big => return IonError.Unsupported,
-        };
+        const count_i128 = try intToI128OrInvalid(count_vals[0].value.int);
         if (count_i128 < 0) return IonError.InvalidIon;
-        const count: usize = @intCast(count_i128);
+        const count = std.math.cast(usize, count_i128) orelse return IonError.Unsupported;
 
         const vals = try evalExpr(arena, tab, env, args[1]);
         if (count == 0 or vals.len == 0) return &.{};
@@ -719,43 +763,87 @@ fn evalMacroInvocation(
         const a = a_vals[0];
         const b = b_vals[0];
         if (a.value != .int or b.value != .int) return IonError.InvalidIon;
-        const ai: i128 = switch (a.value.int) {
-            .small => |v| v,
-            .big => return IonError.Unsupported,
+
+        const out_elem: value.Element = blk_sum: {
+            if (a.value.int == .small and b.value.int == .small) {
+                if (std.math.add(i128, a.value.int.small, b.value.int.small)) |s| {
+                    break :blk_sum .{ .annotations = &.{}, .value = .{ .int = .{ .small = s } } };
+                } else |_| {
+                    // Overflow: fall back to BigInt.
+                }
+            }
+
+            const a_big = try intToBigInt(arena, a.value.int);
+            const b_big = try intToBigInt(arena, b.value.int);
+            const sum_big = try arena.makeBigInt();
+            sum_big.add(a_big, b_big) catch return IonError.OutOfMemory;
+
+            if (sum_big.toConst().toInt(i128)) |s_i128| {
+                break :blk_sum .{ .annotations = &.{}, .value = .{ .int = .{ .small = s_i128 } } };
+            } else |_| {
+                break :blk_sum .{ .annotations = &.{}, .value = .{ .int = .{ .big = sum_big } } };
+            }
         };
-        const bi: i128 = switch (b.value.int) {
-            .small => |v| v,
-            .big => return IonError.Unsupported,
-        };
-        const s = std.math.add(i128, ai, bi) catch return IonError.InvalidIon;
-        const out_elem = value.Element{ .annotations = &.{}, .value = .{ .int = .{ .small = s } } };
         const out = arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
         out[0] = out_elem;
         return out;
     }
     if (std.mem.eql(u8, name, "delta")) {
-        var deltas = std.ArrayListUnmanaged(i128){};
-        defer deltas.deinit(arena.allocator());
+        var out = std.ArrayListUnmanaged(value.Element){};
+        errdefer out.deinit(arena.allocator());
+
+        var acc_small: i128 = 0;
+        var acc_big: ?*std.math.big.int.Managed = null;
+        var idx: usize = 0;
         for (args) |a| {
             const vals = try evalExpr(arena, tab, env, a);
             for (vals) |e| {
                 if (e.value != .int) return IonError.InvalidIon;
-                const v: i128 = switch (e.value.int) {
-                    .small => |vv| vv,
-                    .big => return IonError.Unsupported,
-                };
-                deltas.append(arena.allocator(), v) catch return IonError.OutOfMemory;
+                const d_int = e.value.int;
+
+                if (acc_big == null and d_int == .small) small: {
+                    if (idx == 0) {
+                        acc_small = d_int.small;
+                        out.append(arena.allocator(), .{ .annotations = &.{}, .value = .{ .int = .{ .small = acc_small } } }) catch return IonError.OutOfMemory;
+                        idx += 1;
+                        continue;
+                    }
+                    const added = std.math.add(i128, acc_small, d_int.small) catch break :small;
+                    acc_small = added;
+                    out.append(arena.allocator(), .{ .annotations = &.{}, .value = .{ .int = .{ .small = acc_small } } }) catch return IonError.OutOfMemory;
+                    idx += 1;
+                    continue;
+                }
+
+                if (acc_big == null) {
+                    const tmp = try arena.makeBigInt();
+                    tmp.set(acc_small) catch return IonError.OutOfMemory;
+                    acc_big = tmp;
+                }
+                const accp = acc_big.?;
+
+                if (idx == 0) {
+                    if (d_int == .small) {
+                        accp.set(d_int.small) catch return IonError.OutOfMemory;
+                    } else {
+                        accp.copy(d_int.big.toConst()) catch return IonError.OutOfMemory;
+                    }
+                } else {
+                    if (d_int == .small) {
+                        accp.addScalar(accp, d_int.small) catch return IonError.OutOfMemory;
+                    } else {
+                        accp.add(accp, d_int.big) catch return IonError.OutOfMemory;
+                    }
+                }
+
+                const snap = try arena.makeBigInt();
+                snap.copy(accp.toConst()) catch return IonError.OutOfMemory;
+                out.append(arena.allocator(), .{ .annotations = &.{}, .value = .{ .int = .{ .big = snap } } }) catch return IonError.OutOfMemory;
+                idx += 1;
             }
         }
-        if (deltas.items.len == 0) return &.{};
-
-        const out = arena.allocator().alloc(value.Element, deltas.items.len) catch return IonError.OutOfMemory;
-        var acc: i128 = 0;
-        for (deltas.items, 0..) |d, i| {
-            if (i == 0) acc = d else acc = std.math.add(i128, acc, d) catch return IonError.InvalidIon;
-            out[i] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = acc } } };
-        }
-        return out;
+        if (out.items.len == 0) return &.{};
+        return out.toOwnedSlice(arena.allocator()) catch return IonError.OutOfMemory;
     }
     if (std.mem.eql(u8, name, "parse_ion")) {
         if (args.len != 1) return IonError.InvalidIon;
