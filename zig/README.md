@@ -231,7 +231,7 @@ Minor gaps (not exhaustive):
 
 ### Parity checklist (vs ion-rust)
 
-This is a rough “where to look next” map. Passing `ion-tests/` does not imply feature parity with ion-rust.
+This is a rough "where to look next" map. Passing `ion-tests/` does not imply feature parity with ion-rust.
 
 | Area | Zig | ion-rust reference |
 |------|-----|--------------------|
@@ -240,7 +240,7 @@ This is a rough “where to look next” map. Passing `ion-tests/` does not impl
 | Ion 1.1 text read (macros/e-expressions) | partial (`zig/src/ion/text.zig`, `zig/src/ion/tdl_eval.zig`) | `src/lazy/text/raw/v1_1/reader.rs`, `src/lazy/text/raw/v1_1/arg_group.rs` |
 | Ion 1.1 binary read | partial (`zig/src/ion/binary11.zig`) | `src/lazy/binary/raw/v1_1/reader.rs`, `src/lazy/binary/raw/v1_1/e_expression.rs` |
 | Ion 1.1 text write | not implemented | `src/lazy/encoder/text/v1_1/writer.rs` |
-| Ion 1.1 binary write | not implemented | `src/lazy/encoder/binary/v1_1/writer.rs` (FlexInt/FlexUInt/FlexSym, containers) |
+| Ion 1.1 binary write | experimental subset (`zig/src/ion/writer11.zig`) | `src/lazy/encoder/binary/v1_1/writer.rs` (FlexInt/FlexUInt/FlexSym, containers) |
 | Streaming/lazy reader | not implemented (DOM-only) | `src/lazy/reader.rs`, `src/lazy/system_reader.rs` |
 | Ion hash / ordering | not implemented | `src/ion_hash/`, `src/ion_data/ion_ord.rs` |
 | Catalog API | not implemented | `src/catalog.rs` |
@@ -257,7 +257,7 @@ Large integer/decimal fixtures can be dominated by BigInt string formatting/pars
 - `zig/src/ion/writer.zig` emits BigInt *ints* as hex text literals (`0x...`) to avoid allocating base-10 strings during roundtrips (and uses a stack buffer for common sizes).
 - `zig/src/ion/text.zig` parses large hex/binary BigInt literals without calling `BigInt.setString()` (imports digits directly as magnitude bytes; uses a stack buffer for moderate literals).
 - `zig/src/ion/text.zig` blob parsing includes a fast path for base64 with no whitespace and correct padding (skips building a filtered buffer in that common case).
-- Note: BigInt *decimal* printing in the text writer still uses base-10 formatting (required by Ion text syntax), and is a remaining hotspot for huge decimal coefficients.
+- Note: BigInt *decimal* printing in the text writer still does base-10 work (required by Ion text syntax), but avoids allocating a temporary string by writing into the output buffer directly.
 
 ## Gotchas encountered (and fixes)
 

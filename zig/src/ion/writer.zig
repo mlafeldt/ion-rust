@@ -866,9 +866,10 @@ fn writeValueText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)
                     try appendSlice(out, allocator, coeff_s);
                 },
                 .big => |c| {
-                    const coeff_s = c.*.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
-                    defer allocator.free(coeff_s);
-                    try appendSlice(out, allocator, coeff_s);
+                    // Performance: avoid allocating a temporary base-10 string for BigInts.
+                    // `ion-tests` exercises a lot of large decimals and repeated `toString()` becomes
+                    // a dominant allocation + CPU cost during text roundtrips.
+                    try writeBigIntDecimalText(allocator, out, c.*.toConst());
                 },
             }
             try appendByte(out, allocator, 'd');
@@ -956,13 +957,10 @@ fn writeTimestampText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged
             const digits: usize = @intCast(-frac.exponent);
             try appendByte(out, allocator, '.');
             // Print coefficient with leading zeros to width.
-            var coeff_owned: ?[]u8 = null;
-            defer if (coeff_owned) |b| allocator.free(b);
-            var coeff_s: []const u8 = undefined;
             switch (frac.coefficient) {
                 .small => |c| {
                     var tmp: [256]u8 = undefined;
-                    coeff_s = std.fmt.bufPrint(&tmp, "{}", .{c}) catch return IonError.InvalidIon;
+                    const coeff_s = std.fmt.bufPrint(&tmp, "{}", .{c}) catch return IonError.InvalidIon;
                     if (coeff_s.len < digits) {
                         var pad: usize = digits - coeff_s.len;
                         while (pad != 0) : (pad -= 1) try appendByte(out, allocator, '0');
@@ -970,14 +968,16 @@ fn writeTimestampText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged
                     try appendSlice(out, allocator, coeff_s);
                 },
                 .big => |c| {
-                    const s = c.*.toString(allocator, 10, .lower) catch return IonError.OutOfMemory;
-                    coeff_owned = s;
-                    coeff_s = s;
-                    if (coeff_s.len < digits) {
-                        var pad: usize = digits - coeff_s.len;
+                    // Avoid allocating a base-10 string for BigInts. We still need the digit count
+                    // to emit leading zeros (fractional width), so compute it by comparing against
+                    // powers of 10.
+                    const mag = c.*.toConst();
+                    const dcount = try bigIntDecimalDigitCount(allocator, mag);
+                    if (dcount < digits) {
+                        var pad: usize = digits - dcount;
                         while (pad != 0) : (pad -= 1) try appendByte(out, allocator, '0');
                     }
-                    try appendSlice(out, allocator, coeff_s);
+                    try writeBigIntDecimalText(allocator, out, mag);
                 },
             }
         }
@@ -1003,6 +1003,78 @@ fn writeTimestampText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged
         // Unknown offset: encode as -00:00
         try appendSlice(out, allocator, "-00:00");
     }
+}
+
+const BigIntConst = std.math.big.int.Const;
+
+fn writeBigIntDecimalText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), mag: BigIntConst) IonError!void {
+    if (!mag.positive) return IonError.InvalidIon;
+    // `std.math.big.int.Const.formatNumber()` will emit "(BigInt)" above a small limb limit, which
+    // breaks roundtrip tests. Instead, reserve space in `out` and write into it directly.
+    const base: u8 = 10;
+    const old_len = out.items.len;
+    const upper = mag.sizeInBaseUpperBound(base);
+    const dst = try appendUninit(out, allocator, upper);
+
+    const Limb = std.math.big.Limb;
+    const limbs_buffer = allocator.alloc(Limb, std.math.big.int.calcToStringLimbsBufferLen(mag.limbs.len, base)) catch return IonError.OutOfMemory;
+    defer allocator.free(limbs_buffer);
+
+    const used = mag.toString(dst, base, .lower, limbs_buffer);
+    out.items.len = old_len + used;
+}
+
+fn bigIntDecimalDigitCount(allocator: std.mem.Allocator, mag: BigIntConst) IonError!usize {
+    if (!mag.positive) return IonError.InvalidIon;
+    if (mag.eqlZero()) return 1;
+
+    // Compute a conservative digit bound from bits, then tighten by comparing against 10^k.
+    const bits: usize = mag.bitCountAbs();
+    // log10(2) ~= 0.30103. Add slack to ensure `hi` is never an underestimate.
+    var hi: usize = @max(2, (bits * 30103) / 100000 + 2);
+    var lo: usize = @max(1, ((bits - 1) * 30103) / 100000);
+
+    // Ensure bounds are valid.
+    if (lo >= hi) lo = hi - 1;
+
+    while (lo + 1 < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (try bigIntAbsLtPow10(allocator, mag, mid)) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    return hi;
+}
+
+fn bigIntAbsLtPow10(allocator: std.mem.Allocator, mag: BigIntConst, scale: usize) IonError!bool {
+    // Performance: avoid `BigInt.toString()` just to count decimal digits.
+    if (scale == 0) return mag.eqlZero();
+    if (scale > std.math.maxInt(u32)) return true;
+
+    // Fast path: compare against `u128` when possible (10^38 fits in u128).
+    if (scale <= 38) {
+        const bits = mag.bitCountAbs();
+        if (bits > 128) return false;
+
+        var threshold: u128 = 1;
+        var i: usize = 0;
+        while (i < scale) : (i += 1) threshold *= 10;
+
+        var buf: [16]u8 = undefined;
+        @memset(&buf, 0);
+        mag.writeTwosComplement(&buf, .big);
+        const v = std.mem.readInt(u128, &buf, .big);
+        return v < threshold;
+    }
+
+    var ten = std.math.big.int.Managed.initSet(allocator, 10) catch return IonError.OutOfMemory;
+    defer ten.deinit();
+    var pow10 = std.math.big.int.Managed.init(allocator) catch return IonError.OutOfMemory;
+    defer pow10.deinit();
+    pow10.pow(&ten, @intCast(scale)) catch return IonError.OutOfMemory;
+    return std.math.big.int.Const.orderAbs(mag, pow10.toConst()) == .lt;
 }
 
 fn writeSymbolAsFieldNameText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: value.Symbol) IonError!void {
