@@ -261,6 +261,30 @@ This is a rough "where to look next" map. Passing `ion-tests/` does not imply fe
 
 ## To-dos (spec completeness / performance)
 
+### Spec completeness
+
+`ion-tests` is a strong correctness baseline (and is currently fully passing), but it is not a full Ion specification test suite. The items below are known gaps or areas where the implementation is intentionally conformance-driven.
+
+1) Ion 1.1 module state and symbol semantics (beyond the conformance "default module" model)
+   - The conformance runner models `set_symbols`/`add_symbols`/`set_macros`/`add_macros`/`use` in a minimal way to keep the suite actionable.
+   - Full Ion 1.1 semantics require a more complete module model for symbol IDs, symbol addresses, and macro tables (reader + writer).
+   - Relevant files: `zig/src/ion/text.zig`, `zig/src/ion/binary11.zig`, `zig/src/ion/shared_module_catalog11.zig`.
+
+2) Ion 1.1 macro system / TDL (beyond the subset exercised by conformance)
+   - Conformance-driven macro evaluation is implemented, but it is not a complete macro compiler/evaluator.
+   - Relevant files: `zig/src/ion/macro.zig`, `zig/src/ion/tdl_eval.zig`, `zig/src/conformance/runner.zig`.
+
+3) Ion 1.1 writing (text + binary) is still incomplete
+   - `zig/src/ion/writer11.zig` is a partial binary writer used for regression tests/ad-hoc tooling.
+   - Missing: emitting macros/e-expressions, emitting module mutation directives, and richer symbol/address modeling needed for deterministic output.
+   - Text writer does not emit Ion 1.1 e-expression syntax.
+   - Relevant files: `zig/src/ion/writer11.zig`, `zig/src/ion/writer.zig`.
+
+4) Reader architecture: DOM-only (no streaming/lazy reader)
+   - The Zig implementation currently parses documents into an arena-backed DOM.
+   - A streaming/lazy reader is not required for `ion-tests`, but is important for parity with ion-rust and for large inputs.
+   - Relevant files: `zig/src/ion.zig`, `zig/src/ion/value.zig`.
+
 ### Performance
 
 Large integer/decimal fixtures can be dominated by BigInt string formatting/parsing.
