@@ -16,8 +16,8 @@ pub const Options = struct {
     ///
     /// - `.inline_text_only` writes symbols only as inline text (A0..AF/FA) and rejects
     ///   symbols that do not have text.
-    /// - `.addresses` also allows encoding symbols by address (E1..E3) and may use system symbol
-    ///   address `0xEE` when the SID corresponds to a known system symbol.
+    /// - `.addresses` also allows encoding symbols by address (E1..E3) and may use the system
+    ///   symbol address opcode `0xEE` when the symbol text matches a known Ion 1.1 system symbol.
     ///
     /// Note: emitting symbol addresses correctly requires module/symbol table context. This writer
     /// does not model that state yet, which is why it is experimental. (ion-rust treats `0xEE` as
