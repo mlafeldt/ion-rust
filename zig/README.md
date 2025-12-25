@@ -4,12 +4,14 @@
 
 This repository contains a Zig 0.15.2 implementation of an Amazon Ion reader/writer under `zig/`, plus a Zig-only test harness that exercises the official `ion-tests/iontestdata` and `ion-tests/iontestdata_1_1` corpora.
 
+Milestone (2025-12-25): the Zig port passes 100% of the `ion-tests/` suites that we run (Ion 1.0 corpus, Ion 1.1 text corpus, and the Ion 1.1 conformance suite), with no skips.
+
 Key properties:
 
 1) No original Rust code removed; the port lives under `zig/`.
 2) Zig toolchain: Zig 0.15.2.
 3) Tests run via Zig only: `cd zig && zig build test --summary all`.
-4) "All tests pass" means: `cd zig && zig build test --summary all` passes (including full `ion-tests/` corpus + conformance coverage) with 0 skips in `zig/src/tests.zig` and 0 skipped conformance branches.
+4) "All tests pass" means: `cd zig && zig build test --summary all` passes (including the full `ion-tests/` corpus + conformance coverage that we run) with 0 skips in `zig/src/tests.zig` and 0 skipped conformance branches.
 
 ## Quickstart
 
@@ -163,7 +165,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
-- As of 2025-12-25, `cd zig && zig build test --summary all` runs 61 Zig tests; all pass.
+- As of 2025-12-25, `cd zig && zig build test --summary all` runs 61 Zig tests; all pass (0 skips).
 
 ### Skip list (currently empty)
 
