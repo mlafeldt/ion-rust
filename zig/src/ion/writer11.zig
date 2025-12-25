@@ -983,31 +983,60 @@ fn writeSetSymbolsDirective(allocator: std.mem.Allocator, out: *std.ArrayListUnm
     // and tagged-group is:
     //   <flexuint total_len> <payload bytes...>
     // with payload being a concatenation of tagged value expressions.
-    var args = std.ArrayListUnmanaged(u8){};
-    defer args.deinit(allocator);
-
-    // Single variadic param => 1 bitmap byte (low 2 bits are grouping).
-    if (user_texts.len == 0) {
-        try appendByte(&args, allocator, 0x00); // grouping 00 (absent)
-    } else if (user_texts.len == 1) {
-        try appendByte(&args, allocator, 0x01); // grouping 01 (single)
-        try writeString(allocator, &args, user_texts[0]);
-    } else {
-        try appendByte(&args, allocator, 0x02); // grouping 10 (group)
-
-        var payload = std.ArrayListUnmanaged(u8){};
-        defer payload.deinit(allocator);
-        for (user_texts) |t| {
-            try writeString(allocator, &payload, t);
-        }
-        try writeFlexUIntShift1(&args, allocator, payload.items.len);
-        try appendSlice(&args, allocator, payload.items);
+    // Build the tagged arg list as a slice of elements.
+    var elems = std.ArrayListUnmanaged(value.Element){};
+    defer elems.deinit(allocator);
+    for (user_texts) |t| {
+        elems.append(allocator, .{ .annotations = &.{}, .value = .{ .string = t } }) catch return IonError.OutOfMemory;
     }
 
+    try writeSystemMacroInvocationLengthPrefixedTaggedVariadic(allocator, out, 19, elems.items);
+}
+
+pub fn writeSystemMacroInvocationLengthPrefixedTaggedVariadic(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    addr: u8,
+    args: []const value.Element,
+) IonError!void {
+    // Writes a length-prefixed e-expression (0xF5) for a system macro at `addr` whose signature is:
+    //   (<name> <tagged expr*>)
+    //
+    // This matches the encoding expected by `binary11.readLengthPrefixedSystemValuesArgs` and the
+    // `expandSystemMacroLengthPrefixed` cases that use a single variadic tagged parameter.
+    var arg_bytes = std.ArrayListUnmanaged(u8){};
+    defer arg_bytes.deinit(allocator);
+    try encodeSingleVariadicTaggedArgBindings(allocator, &arg_bytes, .{}, args);
+
     try appendByte(out, allocator, 0xF5);
-    try writeFlexUIntShift1(out, allocator, 19);
-    try writeFlexUIntShift1(out, allocator, args.items.len);
-    try appendSlice(out, allocator, args.items);
+    try writeFlexUIntShift1(out, allocator, addr);
+    try writeFlexUIntShift1(out, allocator, arg_bytes.items.len);
+    try appendSlice(out, allocator, arg_bytes.items);
+}
+
+fn encodeSingleVariadicTaggedArgBindings(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    options: Options,
+    args: []const value.Element,
+) IonError!void {
+    // Single variadic param => 1 bitmap byte (low 2 bits are grouping).
+    if (args.len == 0) {
+        try appendByte(out, allocator, 0x00); // grouping 00 (absent)
+        return;
+    }
+    if (args.len == 1) {
+        try appendByte(out, allocator, 0x01); // grouping 01 (single)
+        try writeElement(allocator, out, options, args[0]);
+        return;
+    }
+
+    try appendByte(out, allocator, 0x02); // grouping 10 (group)
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    for (args) |e| try writeElement(allocator, &payload, options, e);
+    try writeFlexUIntShift1(out, allocator, payload.items.len);
+    try appendSlice(out, allocator, payload.items);
 }
 
 fn collectUserSymbolTexts(

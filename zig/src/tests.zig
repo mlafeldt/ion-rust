@@ -252,6 +252,25 @@ test "zig ion serializeDocument binary_1_1 roundtrips values" {
     try std.testing.expect(ion.eq.ionEqElements(elems, parsed));
 }
 
+test "ion 1.1 writer11 can emit length-prefixed system values e-expression" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const args = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .string = "hi" } },
+        .{ .annotations = &.{}, .value = .{ .bool = true } },
+    };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationLengthPrefixedTaggedVariadic(std.testing.allocator, &out, 1, &args);
+
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, out.items, null);
+    try std.testing.expect(ion.eq.ionEqElements(elems, &args));
+}
+
 test "ion-tests equiv groups" {
     const allocator = std.testing.allocator;
     const skip = try concatSkipLists(allocator, &.{ &global_skip_list, &equivs_skip_list });
