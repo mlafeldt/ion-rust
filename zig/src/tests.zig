@@ -1344,6 +1344,44 @@ test "ion 1.1 binary set_macros updates macro table (experimental)" {
     try std.testing.expectEqual(@as(i128, 7), elems[0].value.int.small);
 }
 
+test "ion 1.1 binary set_macros supports literal macro bodies (experimental)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const sym_macro = try ion.value.makeSymbol(&arena, "macro");
+    const sym_foo = try ion.value.makeSymbol(&arena, "foo");
+    const sym_x = try ion.value.makeSymbol(&arena, "x");
+
+    // (macro foo (x) 1)
+    const params_items = try arena.allocator().alloc(ion.value.Element, 1);
+    params_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = sym_x } };
+    const params = ion.value.Element{ .annotations = &.{}, .value = .{ .sexp = params_items } };
+
+    const def_items = try arena.allocator().alloc(ion.value.Element, 4);
+    def_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = sym_macro } };
+    def_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = sym_foo } };
+    def_items[2] = params;
+    def_items[3] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
+    const macro_def = ion.value.Element{ .annotations = &.{}, .value = .{ .sexp = def_items } };
+
+    const macro_doc_bytes = try ion.writer11.writeBinary11(std.testing.allocator, &.{macro_def});
+    defer std.testing.allocator.free(macro_doc_bytes);
+    const macro_value_bytes = macro_doc_bytes[4..];
+
+    // IVM + `(:$ion::set_macros <macro_def>)` + user macro invocation at address 0 with arg 7
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+    try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xEF, 0x15, 0x01 });
+    try bytes.appendSlice(std.testing.allocator, macro_value_bytes);
+    try bytes.appendSlice(std.testing.allocator, &.{ 0x00, 0x61, 0x07 });
+
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expect(elems[0].value.int == .small);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+}
+
 test "ion 1.1 binary use affects symbol ID text (experimental)" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

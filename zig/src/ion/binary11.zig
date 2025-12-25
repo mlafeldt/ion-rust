@@ -2810,8 +2810,8 @@ const Decoder = struct {
                 }
             }
 
-            // Literal expression: not yet needed for binary e-expression conformance coverage.
-            return IonError.Unsupported;
+            // Literal expression: emit as-is.
+            out.append(self.arena.allocator(), expr) catch return IonError.OutOfMemory;
         }
 
         return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
