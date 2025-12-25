@@ -1032,16 +1032,25 @@ pub fn writeSystemMacroInvocationLengthPrefixedWithParams(
     args_by_param: []const []const value.Element,
     options: Options,
 ) IonError!void {
+    return writeMacroInvocationLengthPrefixedWithParams(allocator, out, addr, params, args_by_param, options);
+}
+
+pub fn writeMacroInvocationLengthPrefixedWithParams(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    addr: usize,
+    params: []const ion.macro.Param,
+    args_by_param: []const []const value.Element,
+    options: Options,
+) IonError!void {
     // Low-level helper for emitting length-prefixed e-expressions (0xF5) using the same
     // signature-driven argument binding encoding that `binary11.readLengthPrefixedArgBindings`
     // expects.
-    //
-    // Currently, this writer only supports `.tagged` parameters.
     if (params.len != args_by_param.len) return IonError.InvalidIon;
 
     var arg_bytes = std.ArrayListUnmanaged(u8){};
     defer arg_bytes.deinit(allocator);
-    try encodeLengthPrefixedArgBindingsTagged(allocator, &arg_bytes, params, args_by_param, options);
+    try encodeLengthPrefixedArgBindings(allocator, &arg_bytes, params, args_by_param, options);
 
     try appendByte(out, allocator, 0xF5);
     try writeFlexUIntShift1(out, allocator, addr);
@@ -1144,6 +1153,178 @@ fn encodeLengthPrefixedArgBindingsTagged(
         }
         variadic_idx += 1;
     }
+}
+
+fn encodeLengthPrefixedArgBindings(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    params: []const ion.macro.Param,
+    args_by_param: []const []const value.Element,
+    options: Options,
+) IonError!void {
+    const bitmap_len = bitmapSizeInBytesForParams(params);
+    var bitmap = std.ArrayListUnmanaged(u8){};
+    defer bitmap.deinit(allocator);
+    bitmap.resize(allocator, bitmap_len) catch return IonError.OutOfMemory;
+    @memset(bitmap.items, 0);
+
+    var variadic_idx: usize = 0;
+    for (params, 0..) |p, idx| {
+        if (p.card == .one) {
+            if (args_by_param[idx].len != 1) return IonError.InvalidIon;
+            continue;
+        }
+
+        const args = args_by_param[idx];
+        const grouping: u2 = if (args.len == 0) 0b00 else if (args.len == 1) 0b01 else 0b10;
+        if (grouping == 0b00 and p.card == .one_or_many) return IonError.InvalidIon;
+        if (grouping == 0b10 and p.card == .zero_or_one) return IonError.InvalidIon;
+
+        const bit: usize = variadic_idx * 2;
+        const byte_idx: usize = bit / 8;
+        const bit_in_byte: u3 = @intCast(bit % 8);
+        if (byte_idx >= bitmap.items.len) return IonError.InvalidIon;
+        bitmap.items[byte_idx] |= (@as(u8, grouping) << bit_in_byte);
+        variadic_idx += 1;
+    }
+    try appendSlice(out, allocator, bitmap.items);
+
+    for (params, 0..) |p, idx| {
+        const args = args_by_param[idx];
+
+        if (p.card == .one) {
+            try writeArgValue(allocator, out, options, p.ty, args[0]);
+            continue;
+        }
+
+        const grouping: u2 = if (args.len == 0) 0b00 else if (args.len == 1) 0b01 else 0b10;
+        switch (grouping) {
+            0b00 => {},
+            0b01 => try writeArgValue(allocator, out, options, p.ty, args[0]),
+            0b10 => {
+                // Use a length-prefixed group payload (not the delimited/chunked form).
+                var payload = std.ArrayListUnmanaged(u8){};
+                defer payload.deinit(allocator);
+                for (args) |e| try writeArgValue(allocator, &payload, options, p.ty, e);
+                try writeFlexUIntShift1(out, allocator, payload.items.len);
+                try appendSlice(out, allocator, payload.items);
+            },
+            else => return IonError.InvalidIon,
+        }
+    }
+}
+
+fn writeArgValue(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    options: Options,
+    ty: ion.macro.ParamType,
+    e: value.Element,
+) IonError!void {
+    if (e.annotations.len != 0) return IonError.InvalidIon;
+    return switch (ty) {
+        .tagged => writeElement(allocator, out, options, e),
+        .macro_shape => IonError.Unsupported,
+        .flex_uint => blk: {
+            if (e.value != .int) return IonError.InvalidIon;
+            try writeFlexUIntShift1Int(out, allocator, e.value.int);
+            break :blk;
+        },
+        .flex_int => blk: {
+            if (e.value != .int) return IonError.InvalidIon;
+            try writeFlexIntShift1Int(out, allocator, e.value.int);
+            break :blk;
+        },
+        .flex_sym => blk: {
+            if (e.value != .symbol) return IonError.InvalidIon;
+            try writeFlexSymSymbol(out, allocator, options, e.value.symbol);
+            break :blk;
+        },
+        .uint8, .uint16, .uint32, .uint64 => blk: {
+            if (e.value != .int) return IonError.InvalidIon;
+            const u = try intToU64(e.value.int);
+            const n: usize = switch (ty) {
+                .uint8 => 1,
+                .uint16 => 2,
+                .uint32 => 4,
+                .uint64 => 8,
+                else => unreachable,
+            };
+            if (n == 1) {
+                if (u > std.math.maxInt(u8)) return IonError.InvalidIon;
+                try appendByte(out, allocator, @intCast(u));
+                break :blk;
+            }
+            var buf: [8]u8 = undefined;
+            std.mem.writeInt(u64, &buf, u, .little);
+            try appendSlice(out, allocator, buf[0..n]);
+            break :blk;
+        },
+        .int8, .int16, .int32, .int64 => blk: {
+            if (e.value != .int) return IonError.InvalidIon;
+            const i = try intToI64(e.value.int);
+            const n: usize = switch (ty) {
+                .int8 => 1,
+                .int16 => 2,
+                .int32 => 4,
+                .int64 => 8,
+                else => unreachable,
+            };
+            if (n == 1) {
+                if (i < std.math.minInt(i8) or i > std.math.maxInt(i8)) return IonError.InvalidIon;
+                try appendByte(out, allocator, @bitCast(@as(i8, @intCast(i))));
+                break :blk;
+            }
+            var buf: [8]u8 = undefined;
+            std.mem.writeInt(i64, &buf, i, .little);
+            try appendSlice(out, allocator, buf[0..n]);
+            break :blk;
+        },
+        .float16 => blk: {
+            if (e.value != .float) return IonError.InvalidIon;
+            const f: f16 = @floatCast(e.value.float);
+            var buf: [2]u8 = undefined;
+            std.mem.writeInt(u16, &buf, @bitCast(f), .little);
+            try appendSlice(out, allocator, &buf);
+            break :blk;
+        },
+        .float32 => blk: {
+            if (e.value != .float) return IonError.InvalidIon;
+            const f: f32 = @floatCast(e.value.float);
+            var buf: [4]u8 = undefined;
+            std.mem.writeInt(u32, &buf, @bitCast(f), .little);
+            try appendSlice(out, allocator, &buf);
+            break :blk;
+        },
+        .float64 => blk: {
+            if (e.value != .float) return IonError.InvalidIon;
+            var buf: [8]u8 = undefined;
+            std.mem.writeInt(u64, &buf, @bitCast(e.value.float), .little);
+            try appendSlice(out, allocator, &buf);
+            break :blk;
+        },
+    };
+}
+
+fn intToU64(v: value.Int) IonError!u64 {
+    return switch (v) {
+        .small => |i| {
+            if (i < 0) return IonError.InvalidIon;
+            if (i > std.math.maxInt(u64)) return IonError.InvalidIon;
+            return @intCast(i);
+        },
+        .big => |p| p.*.toConst().toInt(u64) catch return IonError.InvalidIon,
+    };
+}
+
+fn intToI64(v: value.Int) IonError!i64 {
+    return switch (v) {
+        .small => |i| {
+            if (i < std.math.minInt(i64) or i > std.math.maxInt(i64)) return IonError.InvalidIon;
+            return @intCast(i);
+        },
+        .big => |p| p.*.toConst().toInt(i64) catch return IonError.InvalidIon,
+    };
 }
 
 fn collectUserSymbolTexts(
