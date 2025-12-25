@@ -117,6 +117,16 @@ pub const SystemSymtab11 = struct {
         if (sid == 0 or sid > max_id) return null;
         return symbols[sid];
     }
+
+    /// Returns the system SID for a symbol text, or null if not a system symbol.
+    pub fn sidForText(text: []const u8) ?u32 {
+        // Linear scan is fine at this size.
+        var sid: u32 = 1;
+        while (sid <= max_id) : (sid += 1) {
+            if (std.mem.eql(u8, symbols[sid], text)) return sid;
+        }
+        return null;
+    }
 };
 
 /// Mutable symbol table used by the parsers to resolve SIDs to text.

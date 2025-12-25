@@ -2111,7 +2111,7 @@ test "ion 1.1 binary writer emits delimited containers" {
 
 test "ion 1.1 binary writer uses EE for system symbols" {
     const doc = &[_]ion.value.Element{
-        .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } },
+        .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = null, .text = "$ion" } } },
     };
 
     const bytes = try ion.writer11.writeBinary11(std.testing.allocator, doc);

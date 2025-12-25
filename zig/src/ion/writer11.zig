@@ -611,6 +611,16 @@ fn writeString(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s
 fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, s: value.Symbol) IonError!void {
     if (s.text) |t| {
         if (!std.unicode.utf8ValidateSlice(t)) return IonError.InvalidIon;
+        if (options.symbol_encoding == .addresses) {
+            if (symtab.SystemSymtab11.sidForText(t)) |sys_sid| {
+                if (sys_sid <= 0xFF) {
+                    // System symbol address: EE <addr>
+                    try appendByte(out, allocator, 0xEE);
+                    try appendByte(out, allocator, @intCast(sys_sid));
+                    return;
+                }
+            }
+        }
         if (t.len <= 15) {
             try appendByte(out, allocator, 0xA0 + @as(u8, @intCast(t.len)));
             try appendSlice(out, allocator, t);
@@ -647,14 +657,6 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
 
     if (s.sid) |sid| {
         if (options.symbol_encoding == .inline_text_only) return IonError.InvalidIon;
-
-        // System symbol address: EE (1-byte fixed uint address). Only use this for known Ion 1.1
-        // system symbols so we don't conflate user SIDs with system symbol addresses.
-        if (sid <= 0xFF and symtab.SystemSymtab11.textForSid(@intCast(sid)) != null) {
-            try appendByte(out, allocator, 0xEE);
-            try appendByte(out, allocator, @intCast(sid));
-            return;
-        }
 
         // Symbol address: E1..E3 (fixed uint with bias).
         if (sid <= 0xFF) {
@@ -840,6 +842,16 @@ fn writeAnnotationsSequence(allocator: std.mem.Allocator, out: *std.ArrayListUnm
 fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, options: Options, sym: value.Symbol) IonError!void {
     if (sym.text) |t| {
         if (!std.unicode.utf8ValidateSlice(t)) return IonError.InvalidIon;
+        if (options.symbol_encoding == .addresses) {
+            if (symtab.SystemSymtab11.sidForText(t)) |sys_sid| {
+                if (sys_sid >= 1 and sys_sid <= 0x80) {
+                    // FlexSym escape: FlexInt(0) then 0x60 + <addr>.
+                    try writeFlexIntShift1(out, allocator, 0);
+                    try appendByte(out, allocator, @intCast(0x60 + sys_sid));
+                    return;
+                }
+            }
+        }
         // FlexSym inline text: FlexInt(-len) then bytes.
         try writeFlexIntShift1(out, allocator, -@as(i64, @intCast(t.len)));
         try appendSlice(out, allocator, t);
