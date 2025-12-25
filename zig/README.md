@@ -33,7 +33,7 @@ Key properties:
   - `parseDocumentWithMacroTableIon11Modules(allocator, bytes, mactab)`:
     - Conformance-runner-only entrypoint for parsing Ion 1.1 *text* using the conformance suite's "default module" symbol model.
   - `serializeDocument(allocator, format, elements)`:
-    - Supports `Format.binary`, and text formats (compact/lines/pretty) via the text writer.
+    - Supports `Format.binary` (Ion 1.0), `Format.binary_1_1` (Ion 1.1, experimental), and text formats (compact/lines/pretty).
   - `Document` owns an arena and a slice of parsed `Element`s; `deinit()` frees the arena.
 
 ### Data model
@@ -163,7 +163,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
-- As of 2025-12-25, `cd zig && zig build test --summary all` runs 60 Zig tests; all pass.
+- As of 2025-12-25, `cd zig && zig build test --summary all` runs 61 Zig tests; all pass.
 
 ### Skip list (currently empty)
 
