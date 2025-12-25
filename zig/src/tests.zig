@@ -1407,6 +1407,19 @@ test "ion 1.1 binary e-expression length-prefixed system set_macros updates macr
     try std.testing.expectEqual(@as(i128, 7), elems[0].value.int.small);
 }
 
+test "ion 1.1 binary directives may not be invoked in containers (experimental)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // IVM + list(delimited) containing `(:$ion::add_symbols "")`
+    // F1 => list(delimited start)
+    // EF 14 => system macro address 20 (add_symbols)
+    // 01 90 => presence=1, short string len=0
+    // F0 => end(delimited)
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xF1, 0xEF, 0x14, 0x01, 0x90, 0xF0 };
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes));
+}
+
 test "ion 1.1 binary system sum supports big ints" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

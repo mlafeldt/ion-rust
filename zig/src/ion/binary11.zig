@@ -68,18 +68,21 @@ pub fn parseTopLevelWithMacroTableAndState(
 ) IonError!ParseResultWithState {
     if (bytes.len < 4) return IonError.InvalidIon;
     if (!(bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA)) return IonError.InvalidIon;
-    var d = Decoder{ .arena = arena, .input = bytes[4..], .i = 0, .mactab = mactab };
+    var d = Decoder{ .arena = arena, .input = bytes[4..], .i = 0, .mactab = mactab, .invoke_ctx = .top };
     const elems = try d.parseTopLevel();
     return .{ .elements = elems, .state = d.module_state };
 }
 
 const Decoder = struct {
+    const InvokeCtx = enum { top, nested };
+
     arena: *value.Arena,
     input: []const u8,
     i: usize,
     mactab: ?*const MacroTable,
     mactab_local: MacroTable = .{ .macros = &.{} },
     mactab_local_set: bool = false,
+    invoke_ctx: InvokeCtx = .nested,
     module_state: ModuleState11 = .{},
 
     fn currentMacroTable(self: *const Decoder) ?*const MacroTable {
@@ -281,7 +284,7 @@ const Decoder = struct {
         const args_bytes = self.input[self.i .. self.i + args_len];
         self.i += args_len;
 
-        var sub = Decoder{ .arena = self.arena, .input = args_bytes, .i = 0, .mactab = self.currentMacroTable() };
+        var sub = Decoder{ .arena = self.arena, .input = args_bytes, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
 
         if (self.currentMacroTable()) |tab| {
             if (tab.macroForAddress(addr)) |m| {
@@ -839,19 +842,31 @@ const Decoder = struct {
                     }
                 }
                 if (all_text) {
+                    if (self.invoke_ctx != .top) return IonError.InvalidIon;
                     try self.setIon11UserSymbolsFromTextArgs(args);
                     break :blk &.{}; // set_symbols produces nothing
                 }
                 break :blk try flatten(self.arena, args);
             },
             20 => blk: {
+                if (self.invoke_ctx != .top) return IonError.InvalidIon;
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "text", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
                 if (sub.i != sub.input.len) return IonError.InvalidIon;
-                try self.addIon11UserSymbolsFromTextArgs(bindings[0].values);
+                const args = bindings[0].values;
+                for (args) |e| {
+                    if (e.annotations.len != 0) return IonError.InvalidIon;
+                    switch (e.value) {
+                        .string => {},
+                        .symbol => |s| if (s.text == null) return IonError.InvalidIon,
+                        else => return IonError.InvalidIon,
+                    }
+                }
+                try self.addIon11UserSymbolsFromTextArgs(args);
                 break :blk &.{};
             },
             21 => blk: {
+                if (self.invoke_ctx != .top) return IonError.InvalidIon;
                 // Conformance reuses address 21 for `meta` and `set_macros`.
                 // Disambiguate by argument shape: all macro defs => `set_macros`, else `meta`.
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "macro_def", .shape = null }};
@@ -864,6 +879,7 @@ const Decoder = struct {
                 break :blk &.{};
             },
             22 => blk: {
+                if (self.invoke_ctx != .top) return IonError.InvalidIon;
                 // (add_macros <macro_def*>)
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "macro_def", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
@@ -876,6 +892,7 @@ const Decoder = struct {
                 break :blk &.{};
             },
             23 => blk: {
+                if (self.invoke_ctx != .top) return IonError.InvalidIon;
                 // (use <catalog_key> [<version>])
                 const p = [_]ion.macro.Param{
                     .{ .ty = .tagged, .card = .one, .name = "key", .shape = null },
@@ -1165,7 +1182,7 @@ const Decoder = struct {
         const total_len = try readFlexUInt(self.input, &self.i);
         if (total_len != 0) {
             const payload = try self.readBytes(total_len);
-            var sub = Decoder{ .arena = self.arena, .input = payload, .i = 0, .mactab = self.currentMacroTable() };
+            var sub = Decoder{ .arena = self.arena, .input = payload, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
             var out = std.ArrayListUnmanaged(value.Element){};
             errdefer out.deinit(self.arena.allocator());
             while (sub.i < sub.input.len) {
@@ -1184,7 +1201,7 @@ const Decoder = struct {
             const chunk_len = try readFlexUInt(self.input, &self.i);
             if (chunk_len == 0) break;
             const chunk = try self.readBytes(chunk_len);
-            var sub = Decoder{ .arena = self.arena, .input = chunk, .i = 0, .mactab = self.currentMacroTable() };
+            var sub = Decoder{ .arena = self.arena, .input = chunk, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
             while (sub.i < sub.input.len) {
                 const e = try sub.readMacroShapeValueExpr(shape);
                 out.append(self.arena.allocator(), e) catch return IonError.OutOfMemory;
@@ -1199,7 +1216,7 @@ const Decoder = struct {
         const total_len = try readFlexUInt(self.input, &self.i);
         if (total_len != 0) {
             const payload = try self.readBytes(total_len);
-            var sub = Decoder{ .arena = self.arena, .input = payload, .i = 0, .mactab = self.currentMacroTable() };
+            var sub = Decoder{ .arena = self.arena, .input = payload, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
             var out = std.ArrayListUnmanaged(value.Element){};
             errdefer out.deinit(self.arena.allocator());
             while (sub.i < sub.input.len) {
@@ -1683,6 +1700,7 @@ const Decoder = struct {
             }
         }
         if (all_text) {
+            if (self.invoke_ctx != .top) return IonError.InvalidIon;
             try self.setIon11UserSymbolsFromTextArgs(args);
             return &.{};
         }
@@ -1706,6 +1724,7 @@ const Decoder = struct {
         //
         // Binary conformance coverage only checks that the invocation parses and produces no user
         // values. We still need to consume the arguments so they don't appear as top-level values.
+        if (self.invoke_ctx != .top) return IonError.InvalidIon;
         if (self.i >= self.input.len) return IonError.Incomplete;
         const presence = self.input[self.i];
         self.i += 1;
@@ -1713,19 +1732,26 @@ const Decoder = struct {
             0 => return &.{},
             1 => {
                 const v = try self.readValue();
-                if (v == .string) {
-                    const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
-                    one[0] = .{ .annotations = &.{}, .value = v };
-                    try self.addIon11UserSymbolsFromTextArgs(one);
-                } else if (v == .symbol and v.symbol.text != null) {
-                    const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
-                    one[0] = .{ .annotations = &.{}, .value = v };
-                    try self.addIon11UserSymbolsFromTextArgs(one);
-                }
+                const t: []const u8 = switch (v) {
+                    .string => |s| s,
+                    .symbol => |s| s.text orelse return IonError.InvalidIon,
+                    else => return IonError.InvalidIon,
+                };
+                const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                one[0] = .{ .annotations = &.{}, .value = .{ .string = t } };
+                try self.addIon11UserSymbolsFromTextArgs(one);
                 return &.{};
             },
             2 => {
                 const group = try self.readExpressionGroup(.tagged);
+                for (group) |e| {
+                    if (e.annotations.len != 0) return IonError.InvalidIon;
+                    switch (e.value) {
+                        .string => {},
+                        .symbol => |s| if (s.text == null) return IonError.InvalidIon,
+                        else => return IonError.InvalidIon,
+                    }
+                }
                 try self.addIon11UserSymbolsFromTextArgs(group);
                 return &.{};
             },
@@ -1741,6 +1767,7 @@ const Decoder = struct {
         // disambiguate by argument shape:
         // - if all provided args are unannotated `(macro ...)` sexps, treat as `set_macros`
         // - otherwise treat as `meta`
+        if (self.invoke_ctx != .top) return IonError.InvalidIon;
         if (self.i >= self.input.len) return IonError.Incomplete;
         const presence = self.input[self.i];
         self.i += 1;
@@ -1766,6 +1793,7 @@ const Decoder = struct {
         // (add_macros <macro_def*>)
         //
         // Updates the active macro table by appending macro defs.
+        if (self.invoke_ctx != .top) return IonError.InvalidIon;
         if (self.i >= self.input.len) return IonError.Incomplete;
         const presence = self.input[self.i];
         self.i += 1;
@@ -1832,6 +1860,7 @@ const Decoder = struct {
         // Conformance binary encoding begins with a 1-byte presence code for the optional version:
         //   0 => absent (defaults to 1)
         //   1 => tagged integer value
+        if (self.invoke_ctx != .top) return IonError.InvalidIon;
         if (self.i >= self.input.len) return IonError.Incomplete;
         const presence = self.input[self.i];
         self.i += 1;
@@ -2498,7 +2527,7 @@ const Decoder = struct {
         var cursor: usize = 0;
         if (ty == .tagged) {
             // Parse a sequence of ordinary Ion 1.1 values.
-            var sub = Decoder{ .arena = self.arena, .input = payload, .i = 0, .mactab = null };
+            var sub = Decoder{ .arena = self.arena, .input = payload, .i = 0, .mactab = null, .invoke_ctx = .nested };
             while (sub.i < sub.input.len) {
                 const v = try sub.readValue();
                 out.append(self.arena.allocator(), .{ .annotations = &.{}, .value = v }) catch return IonError.OutOfMemory;
@@ -2722,7 +2751,7 @@ const Decoder = struct {
         if (op >= 0xB0 and op <= 0xBF) {
             const len: usize = op - 0xB0;
             const body = try self.readBytes(len);
-            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.currentMacroTable() };
+            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
             while (sub.i < sub.input.len) {
@@ -2736,7 +2765,7 @@ const Decoder = struct {
         if (op >= 0xC0 and op <= 0xCF) {
             const len: usize = op - 0xC0;
             const body = try self.readBytes(len);
-            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.currentMacroTable() };
+            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
             while (sub.i < sub.input.len) {
@@ -2860,7 +2889,7 @@ const Decoder = struct {
         if (op == 0xFB) {
             const len = try readFlexUInt(self.input, &self.i);
             const body = try self.readBytes(len);
-            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.currentMacroTable() };
+            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
             while (sub.i < sub.input.len) {
@@ -2874,7 +2903,7 @@ const Decoder = struct {
         if (op == 0xFC) {
             const len = try readFlexUInt(self.input, &self.i);
             const body = try self.readBytes(len);
-            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.currentMacroTable() };
+            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
             while (sub.i < sub.input.len) {
@@ -2894,6 +2923,10 @@ const Decoder = struct {
 
         // Delimited containers.
         if (op == 0xF1) {
+            const prev_ctx = self.invoke_ctx;
+            self.invoke_ctx = .nested;
+            defer self.invoke_ctx = prev_ctx;
+
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
             while (true) {
@@ -2908,6 +2941,10 @@ const Decoder = struct {
             return value.Value{ .list = items.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory };
         }
         if (op == 0xF2) {
+            const prev_ctx = self.invoke_ctx;
+            self.invoke_ctx = .nested;
+            defer self.invoke_ctx = prev_ctx;
+
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
             while (true) {
@@ -3014,7 +3051,7 @@ fn readFlexSymSymbol(arena: *value.Arena, input: []const u8, cursor: *usize) Ion
 }
 
 fn parseStructBody(arena: *value.Arena, body: []const u8, mactab: ?*const MacroTable) IonError!value.Struct {
-    var d = Decoder{ .arena = arena, .input = body, .i = 0, .mactab = mactab };
+    var d = Decoder{ .arena = arena, .input = body, .i = 0, .mactab = mactab, .invoke_ctx = .nested };
     var fields = std.ArrayListUnmanaged(value.StructField){};
     errdefer fields.deinit(arena.allocator());
 
@@ -3057,7 +3094,7 @@ fn parseStructBody(arena: *value.Arena, body: []const u8, mactab: ?*const MacroT
 }
 
 fn parseStructDelimited(arena: *value.Arena, input: []const u8, cursor: *usize, mactab: ?*const MacroTable) IonError!value.Struct {
-    var d = Decoder{ .arena = arena, .input = input, .i = cursor.*, .mactab = mactab };
+    var d = Decoder{ .arena = arena, .input = input, .i = cursor.*, .mactab = mactab, .invoke_ctx = .nested };
     defer cursor.* = d.i;
 
     var fields = std.ArrayListUnmanaged(value.StructField){};
