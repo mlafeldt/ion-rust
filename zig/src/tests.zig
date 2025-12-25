@@ -12,6 +12,14 @@ const std = @import("std");
 const ion = @import("ion.zig");
 const conformance = @import("conformance/runner.zig");
 
+fn appendFlexUIntShift1(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(u8), v: usize) !void {
+    const raw: u128 = (@as(u128, v) << 1) | 1;
+    var tmp = raw;
+    while (tmp != 0) : (tmp >>= 8) {
+        try list.append(allocator, @intCast(tmp & 0xFF));
+    }
+}
+
 fn isSkipped(path: []const u8, skip_list: []const []const u8) bool {
     for (skip_list) |skip| {
         if (std.mem.eql(u8, path, skip)) return true;
@@ -1015,16 +1023,6 @@ test "ion 1.1 binary e-expression length-prefixed system sum supports big ints" 
     var bytes = std.ArrayListUnmanaged(u8){};
     defer bytes.deinit(std.testing.allocator);
 
-    const appendFlexUIntShift1 = struct {
-        fn run(list: *std.ArrayListUnmanaged(u8), v: usize) !void {
-            const raw: u128 = (@as(u128, v) << 1) | 1;
-            var tmp = raw;
-            while (tmp != 0) : (tmp >>= 8) {
-                try list.append(std.testing.allocator, @intCast(tmp & 0xFF));
-            }
-        }
-    }.run;
-
     var args = std.ArrayListUnmanaged(u8){};
     defer args.deinit(std.testing.allocator);
 
@@ -1037,8 +1035,8 @@ test "ion 1.1 binary e-expression length-prefixed system sum supports big ints" 
     try args.appendSlice(std.testing.allocator, &.{ 0x61, 0x01 });
 
     try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xF5 });
-    try appendFlexUIntShift1(&bytes, 7);
-    try appendFlexUIntShift1(&bytes, args.items.len);
+    try appendFlexUIntShift1(std.testing.allocator, &bytes, 7);
+    try appendFlexUIntShift1(std.testing.allocator, &bytes, args.items.len);
     try bytes.appendSlice(std.testing.allocator, args.items);
 
     const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
@@ -1059,16 +1057,6 @@ test "ion 1.1 binary e-expression length-prefixed system delta supports big ints
     var bytes = std.ArrayListUnmanaged(u8){};
     defer bytes.deinit(std.testing.allocator);
 
-    const appendFlexUIntShift1 = struct {
-        fn run(list: *std.ArrayListUnmanaged(u8), v: usize) !void {
-            const raw: u128 = (@as(u128, v) << 1) | 1;
-            var tmp = raw;
-            while (tmp != 0) : (tmp >>= 8) {
-                try list.append(std.testing.allocator, @intCast(tmp & 0xFF));
-            }
-        }
-    }.run;
-
     var group = std.ArrayListUnmanaged(u8){};
     defer group.deinit(std.testing.allocator);
     try group.appendSlice(std.testing.allocator, &.{ 0xF6, 0x35 });
@@ -1081,12 +1069,12 @@ test "ion 1.1 binary e-expression length-prefixed system delta supports big ints
     defer args.deinit(std.testing.allocator);
     // Bitmap for a single variadic param: 10 (arg group).
     try args.append(std.testing.allocator, 0x02);
-    try appendFlexUIntShift1(&args, group.items.len);
+    try appendFlexUIntShift1(std.testing.allocator, &args, group.items.len);
     try args.appendSlice(std.testing.allocator, group.items);
 
     try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xF5 });
-    try appendFlexUIntShift1(&bytes, 6);
-    try appendFlexUIntShift1(&bytes, args.items.len);
+    try appendFlexUIntShift1(std.testing.allocator, &bytes, 6);
+    try appendFlexUIntShift1(std.testing.allocator, &bytes, args.items.len);
     try bytes.appendSlice(std.testing.allocator, args.items);
 
     const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
@@ -1144,16 +1132,6 @@ test "ion 1.1 binary e-expression length-prefixed system make_timestamp supports
     defer std.testing.allocator.free(decimal_bytes);
     const seconds_value_bytes = decimal_bytes[4..];
 
-    const appendFlexUIntShift1 = struct {
-        fn run(list: *std.ArrayListUnmanaged(u8), v: usize) !void {
-            const raw: u128 = (@as(u128, v) << 1) | 1;
-            var tmp = raw;
-            while (tmp != 0) : (tmp >>= 8) {
-                try list.append(std.testing.allocator, @intCast(tmp & 0xFF));
-            }
-        }
-    }.run;
-
     // make_timestamp(year=2025, month=12, day=24, hour=1, minute=2, seconds=<big decimal>, offset absent)
     //
     // Variadic params (month/day/hour/minute/seconds/offset) are bitmap-encoded first. Here:
@@ -1171,8 +1149,8 @@ test "ion 1.1 binary e-expression length-prefixed system make_timestamp supports
     var bytes = std.ArrayListUnmanaged(u8){};
     defer bytes.deinit(std.testing.allocator);
     try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xF5 });
-    try appendFlexUIntShift1(&bytes, 12);
-    try appendFlexUIntShift1(&bytes, args.items.len);
+    try appendFlexUIntShift1(std.testing.allocator, &bytes, 12);
+    try appendFlexUIntShift1(std.testing.allocator, &bytes, args.items.len);
     try bytes.appendSlice(std.testing.allocator, args.items);
 
     const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
@@ -1301,16 +1279,6 @@ test "ion 1.1 binary e-expression length-prefixed system use affects symbol ID t
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
 
-    const appendFlexUIntShift1 = struct {
-        fn run(list: *std.ArrayListUnmanaged(u8), v: usize) !void {
-            const raw: u128 = (@as(u128, v) << 1) | 1;
-            var tmp = raw;
-            while (tmp != 0) : (tmp >>= 8) {
-                try list.append(std.testing.allocator, @intCast(tmp & 0xFF));
-            }
-        }
-    }.run;
-
     // IVM + `F5 <addr=23> <args>` + symbol(SID=1) + symbol(SID=2)
     // Args encoding for signature: (use <key> [<version>])
     // - bitmap(1 byte): version present as single value => 01
@@ -1325,8 +1293,8 @@ test "ion 1.1 binary e-expression length-prefixed system use affects symbol ID t
     var bytes = std.ArrayListUnmanaged(u8){};
     defer bytes.deinit(std.testing.allocator);
     try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xF5 });
-    try appendFlexUIntShift1(&bytes, 23);
-    try appendFlexUIntShift1(&bytes, args.items.len);
+    try appendFlexUIntShift1(std.testing.allocator, &bytes, 23);
+    try appendFlexUIntShift1(std.testing.allocator, &bytes, args.items.len);
     try bytes.appendSlice(std.testing.allocator, args.items);
     try bytes.appendSlice(std.testing.allocator, &.{ 0xE1, 0x01, 0xE1, 0x02 });
 
@@ -1344,16 +1312,6 @@ test "ion 1.1 binary e-expression length-prefixed system use affects symbol ID t
 test "ion 1.1 binary e-expression length-prefixed system set_macros updates macro table (experimental)" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
-
-    const appendFlexUIntShift1 = struct {
-        fn run(list: *std.ArrayListUnmanaged(u8), v: usize) !void {
-            const raw: u128 = (@as(u128, v) << 1) | 1;
-            var tmp = raw;
-            while (tmp != 0) : (tmp >>= 8) {
-                try list.append(std.testing.allocator, @intCast(tmp & 0xFF));
-            }
-        }
-    }.run;
 
     const sym_macro = try ion.value.makeSymbol(&arena, "macro");
     const sym_foo = try ion.value.makeSymbol(&arena, "foo");
@@ -1387,14 +1345,14 @@ test "ion 1.1 binary e-expression length-prefixed system set_macros updates macr
     var args = std.ArrayListUnmanaged(u8){};
     defer args.deinit(std.testing.allocator);
     try args.append(std.testing.allocator, 0x02); // bitmap: group present
-    try appendFlexUIntShift1(&args, macro_value_bytes.len);
+    try appendFlexUIntShift1(std.testing.allocator, &args, macro_value_bytes.len);
     try args.appendSlice(std.testing.allocator, macro_value_bytes);
 
     var bytes = std.ArrayListUnmanaged(u8){};
     defer bytes.deinit(std.testing.allocator);
     try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xF5 });
-    try appendFlexUIntShift1(&bytes, 21);
-    try appendFlexUIntShift1(&bytes, args.items.len);
+    try appendFlexUIntShift1(std.testing.allocator, &bytes, 21);
+    try appendFlexUIntShift1(std.testing.allocator, &bytes, args.items.len);
     try bytes.appendSlice(std.testing.allocator, args.items);
 
     // Invoke user macro at address 0 with arg 7.
@@ -1444,16 +1402,6 @@ test "ion 1.1 binary directives may not be invoked inside length-prefixed arg gr
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
 
-    const appendFlexUIntShift1 = struct {
-        fn run(list: *std.ArrayListUnmanaged(u8), v: usize) !void {
-            const raw: u128 = (@as(u128, v) << 1) | 1;
-            var tmp = raw;
-            while (tmp != 0) : (tmp >>= 8) {
-                try list.append(std.testing.allocator, @intCast(tmp & 0xFF));
-            }
-        }
-    }.run;
-
     // IVM + `(:$ion::values (:: (:use "abcs" 1)))`, but with the `values` argument group encoded
     // as a *length-prefixed* tagged expression group (not delimited).
     //
@@ -1470,7 +1418,7 @@ test "ion 1.1 binary directives may not be invoked inside length-prefixed arg gr
     defer bytes.deinit(std.testing.allocator);
 
     try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xEF, 0x01, 0x02 });
-    try appendFlexUIntShift1(&bytes, payload.len);
+    try appendFlexUIntShift1(std.testing.allocator, &bytes, payload.len);
     try bytes.appendSlice(std.testing.allocator, payload);
 
     try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes.items));
