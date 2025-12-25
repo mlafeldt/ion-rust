@@ -1264,6 +1264,39 @@ test "ion 1.1 binary set_macros updates macro table (experimental)" {
     try std.testing.expectEqual(@as(i128, 7), elems[0].value.int.small);
 }
 
+test "ion 1.1 binary use affects symbol ID text (experimental)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // IVM + `(:$ion::use "abcs" 1)` + symbol(SID=1) + symbol(SID=2)
+    // EF 17 => system macro address 23 (use)
+    // 01    => presence: tagged version
+    // 94 'abcs' => short string len=4
+    // 61 01 => int(1)
+    // E1 01 => symbol address (len=1), SID=1 (imported symbol "a")
+    // E1 02 => symbol address (len=1), SID=2 (system symbol "$ion")
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA,
+        0xEF, 0x17, 0x01, 0x94,
+        0x61, 0x62, 0x63, 0x73,
+        0x61, 0x01, 0xE1, 0x01,
+        0xE1, 0x02,
+    };
+
+    const res = try ion.binary11.parseTopLevelWithState(&arena, bytes);
+    const elems = res.elements;
+    try ion.value.resolveDefaultModuleSymbols11(&arena, elems, res.state.user_symbols, res.state.system_loaded);
+
+    try std.testing.expectEqual(@as(usize, 2), elems.len);
+    try std.testing.expect(elems[0].value == .symbol);
+    try std.testing.expectEqual(@as(?u32, 1), elems[0].value.symbol.sid);
+    try std.testing.expectEqualStrings("a", elems[0].value.symbol.text.?);
+
+    try std.testing.expect(elems[1].value == .symbol);
+    try std.testing.expectEqual(@as(?u32, 2), elems[1].value.symbol.sid);
+    try std.testing.expectEqualStrings("$ion", elems[1].value.symbol.text.?);
+}
+
 test "ion 1.1 binary system sum supports big ints" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

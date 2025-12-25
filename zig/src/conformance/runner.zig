@@ -3,6 +3,7 @@ const ion = @import("../ion.zig");
 const value = ion.value;
 const denote = @import("denote.zig");
 const tdl_eval = @import("../ion/tdl_eval.zig");
+const shared_module_catalog11 = @import("../ion/shared_module_catalog11.zig");
 
 pub const RunError = error{
     InvalidConformanceDsl,
@@ -62,31 +63,6 @@ const SharedSymtabCatalog = struct {
             if (best == null or e.version > best.?.version) best = e;
         }
         return best;
-    }
-};
-
-const SharedModuleCatalog11 = struct {
-    const Entry = struct {
-        name: []const u8,
-        version: u32,
-        symbols: []const []const u8,
-    };
-
-    // Minimal Ion 1.1 shared module catalog required by the conformance suite (`system_macros/use.ion`).
-    //
-    // Note: this is distinct from the Ion 1.0 shared symbol table catalog above; the conformance
-    // suite models `use` as importing symbols into the default module address space.
-    const entries = [_]Entry{
-        .{ .name = "abcs", .version = 1, .symbols = &.{"a"} },
-        .{ .name = "abcs", .version = 2, .symbols = &.{ "a", "b" } },
-        .{ .name = "mnop", .version = 1, .symbols = &.{"m"} },
-    };
-
-    fn lookup(name: []const u8, version: u32) ?Entry {
-        for (entries) |e| {
-            if (e.version == version and std.mem.eql(u8, e.name, name)) return e;
-        }
-        return null;
     }
 };
 
@@ -1972,7 +1948,7 @@ fn applyAbstractUseSystemValue(
         }
     }
 
-    const entry = SharedModuleCatalog11.lookup(module_name, version) orelse return RunError.InvalidConformanceDsl;
+    const entry = shared_module_catalog11.lookup(module_name, version) orelse return RunError.InvalidConformanceDsl;
 
     // Conformance models `use` as importing symbols into the default module address space.
     // The default module starts with the system module symbols and `use` inserts user-module

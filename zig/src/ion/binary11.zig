@@ -8,15 +8,17 @@
 //! (system directives like `set_symbols`/`add_symbols`/`set_macros`/`add_macros`/`use`) is only
 //! partially modeled. We currently:
 //! - track `set_symbols`/`add_symbols` text for optional post-parse SID resolution, and
-//! - apply `set_macros`/`add_macros` to the active macro table for subsequent e-expression decoding.
+//! - apply `set_macros`/`add_macros` to the active macro table for subsequent e-expression decoding, and
+//! - apply `use` using the minimal conformance shared module catalog (symbols only).
 //!
-//! Decoding arbitrary Ion 1.1 binary streams that rely on in-stream module mutation (especially
-//! `use`) is not supported yet.
+//! Decoding arbitrary Ion 1.1 binary streams that rely on in-stream module mutation beyond this
+//! minimal model is not supported yet.
 
 const std = @import("std");
 const ion = @import("../ion.zig");
 const value = @import("value.zig");
 const symtab = @import("symtab.zig");
+const shared_module_catalog11 = @import("shared_module_catalog11.zig");
 
 const IonError = ion.IonError;
 const MacroTable = ion.macro.MacroTable;
@@ -1788,16 +1790,40 @@ const Decoder = struct {
 
         const key_v = try self.readValue();
         if (key_v != .string) return IonError.InvalidIon;
+        if (key_v.string.len == 0) return IonError.InvalidIon;
+        const module_name = key_v.string;
 
+        var version: u32 = 1;
         switch (presence) {
-            0 => return &.{},
+            0 => {},
             1 => {
                 const v = try self.readValue();
                 if (v != .int) return IonError.InvalidIon;
-                return &.{};
+                const vv: i128 = try self.intToI128(v.int);
+                if (vv <= 0 or vv > std.math.maxInt(u32)) return IonError.InvalidIon;
+                version = @intCast(vv);
             },
             else => return IonError.InvalidIon,
         }
+
+        const entry = shared_module_catalog11.lookup(module_name, version) orelse return IonError.InvalidIon;
+        try self.appendIon11UserSymbolsFromModule(entry.symbols);
+        return &.{};
+    }
+
+    fn appendIon11UserSymbolsFromModule(self: *Decoder, symbols: []const []const u8) IonError!void {
+        if (symbols.len == 0) return;
+
+        const old = self.module_state.user_symbols;
+        const out = self.arena.allocator().alloc(?[]const u8, old.len + symbols.len) catch return IonError.OutOfMemory;
+        if (old.len != 0) @memcpy(out[0..old.len], old);
+
+        for (symbols, 0..) |s, idx0| {
+            out[old.len + idx0] = try self.arena.dupe(s);
+        }
+
+        self.module_state.user_symbols = out;
+        self.module_state.system_loaded = true;
     }
 
     fn expandSystem16(self: *Decoder) IonError![]value.Element {

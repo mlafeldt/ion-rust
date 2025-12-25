@@ -11,6 +11,7 @@ const ion = @import("../ion.zig");
 const value = @import("value.zig");
 const symtab = @import("symtab.zig");
 const tdl_eval = @import("tdl_eval.zig");
+const shared_module_catalog11 = @import("shared_module_catalog11.zig");
 
 const IonError = ion.IonError;
 
@@ -946,7 +947,11 @@ const Parser = struct {
         if (kind != null and kind.? == .use) {
             // Ion 1.1 `use` is a system macro whose effect is to import a shared module into the
             // default module, appending its symbols and macros. The conformance runner models this
-            // behavior abstractly; the text parser only validates the syntax and produces no values.
+            // behavior abstractly; for non-conformance parsing, we implement a minimal symbol import
+            // model when `ion11_module_mode` is enabled.
+            //
+            // `use` may only occur where system values can occur (top-level).
+            if (invoke_ctx != .top) return IonError.InvalidIon;
             if (exprs.items.len < 1 or exprs.items.len > 2) return IonError.InvalidIon;
 
             const key_vals = exprs.items[0];
@@ -969,6 +974,31 @@ const Parser = struct {
                     };
                     if (v_i128 <= 0) return IonError.InvalidIon;
                 }
+            }
+
+            if (self.ion11_module_mode) {
+                var version: u32 = 1;
+                if (exprs.items.len == 2) {
+                    const ver_vals = exprs.items[1];
+                    if (ver_vals.len == 1) {
+                        const ver = ver_vals[0];
+                        const v_i128: i128 = switch (ver.value.int) {
+                            .small => |v| v,
+                            .big => unreachable,
+                        };
+                        if (v_i128 > std.math.maxInt(u32)) return IonError.InvalidIon;
+                        version = @intCast(v_i128);
+                    }
+                }
+
+                const entry = shared_module_catalog11.lookup(key.value.string, version) orelse return IonError.InvalidIon;
+                if (entry.symbols.len != 0) {
+                    const merged = self.arena.allocator().alloc(?[]const u8, self.ion11_user_symbols.len + entry.symbols.len) catch return IonError.OutOfMemory;
+                    if (self.ion11_user_symbols.len != 0) @memcpy(merged[0..self.ion11_user_symbols.len], self.ion11_user_symbols);
+                    for (entry.symbols, 0..) |s, i| merged[self.ion11_user_symbols.len + i] = try self.arena.dupe(s);
+                    self.ion11_user_symbols = merged;
+                }
+                self.ion11_system_loaded = true;
             }
 
             return &.{};

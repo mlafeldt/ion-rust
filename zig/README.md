@@ -62,7 +62,8 @@ Key properties:
     - Conformance-only directives:
       - `set_symbols` / `add_symbols` and an Ion 1.1 "default module" symbol model where user symbols occupy `$1..$n` and system symbols follow.
       - `set_macros` / `add_macros` mutate the active macro table for subsequent parsing (used by `ion-tests/conformance/demos/metaprogramming.ion`).
-      - `meta` / `use` are validated for syntax and produce no values; module import side effects are modeled by the conformance runner, not the text parser.
+      - `meta` is validated for syntax and produces no values.
+      - `use` is validated for syntax and produces no values; when `ion11_module_mode` is enabled, the parser applies a minimal conformance-catalog symbol import model.
     - This is still far from a complete Ion 1.1 macro system.
 
 ### Binary Ion 1.0 parsing
@@ -111,7 +112,8 @@ Key properties:
     - `mactab` support for the conformance runner and `%x` expansion for simple single-parameter user macros.
     - Minimal module mutation modeling:
       - tracks `set_symbols`/`add_symbols` text for optional post-parse SID resolution (via `parseTopLevelWithState(...)`), and
-      - applies `set_macros`/`add_macros` to the active macro table so subsequent e-expressions decode against the updated table.
+      - applies `set_macros`/`add_macros` to the active macro table so subsequent e-expressions decode against the updated table, and
+      - applies `use` using the minimal conformance shared module catalog (symbols only).
   - Not implemented:
     - Full Ion 1.1 module/symbol resolution for symbol IDs (symbol IDs are preserved but typically not resolved to text).
       - Optional helpers (intentionally opt-in so tests can keep stable output representations when desired):
@@ -161,7 +163,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
-- As of 2025-12-24, `cd zig && zig build test --summary all` runs 54 Zig tests; all pass.
+- As of 2025-12-24, `cd zig && zig build test --summary all` runs 55 Zig tests; all pass.
 
 ### Skip list (currently empty)
 
