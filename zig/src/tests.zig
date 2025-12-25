@@ -186,6 +186,27 @@ test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
     try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xA4, '$', 'i', 'o', 'n' }) != null);
 }
 
+test "ion 1.1 binary FlexSym escape returns system symbol as text" {
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA, // IVM
+        0xF3, // delimited struct
+        0x01, 0x61, // FlexSym escape: system symbol address 1 ($ion)
+        0x61, 0x01, // int 1 (1-byte LE twos complement)
+        0x01, 0xF0, // FlexSym escape: end delimited
+    };
+
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes);
+
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .@"struct");
+    const st = elems[0].value.@"struct";
+    try std.testing.expectEqual(@as(usize, 1), st.fields.len);
+    try std.testing.expectEqualStrings("$ion", st.fields[0].name.text orelse return error.TestExpectedEqual);
+    try std.testing.expect(st.fields[0].name.sid == null);
+}
+
 test "zig ion serializeDocument binary_1_1 roundtrips values" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

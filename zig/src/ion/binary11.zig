@@ -3165,8 +3165,11 @@ fn readFlexSym(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!
         0x60 => .{ .symbol = value.makeSymbolId(0, null) },
         0x61...0xE0 => blk: {
             const addr: u32 = @intCast(esc - 0x60);
-            _ = symtab.SystemSymtab11.textForSid(addr) orelse return IonError.InvalidIon;
-            break :blk .{ .symbol = value.makeSymbolId(addr, null) };
+            const sys_text = symtab.SystemSymtab11.textForSid(addr) orelse return IonError.InvalidIon;
+            // Match `0xEE` behavior: system symbol addresses are a distinct address space, so
+            // represent them as text rather than as an SID.
+            const t = try arena.dupe(sys_text);
+            break :blk .{ .symbol = value.makeSymbolId(null, t) };
         },
         0xF0 => .end_delimited,
         else => IonError.Unsupported,
