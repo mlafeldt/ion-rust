@@ -150,6 +150,7 @@ Key properties:
   - Emits Ion 1.1 IVM and a subset of Ion 1.1 binary value opcodes.
   - Emits lists/sexps/structs using the delimited container opcodes (`F1`/`F2`/`F3`) for simple streaming output.
   - Exposed via `ion.serializeDocument(..., .binary_1_1, ...)` for regression tests/ad-hoc tooling; the main corpus/conformance harness does not currently roundtrip through binary Ion 1.1.
+  - Provides a low-level helper for emitting length-prefixed system macro invocations with a single variadic tagged parameter (for example: `values`): `writer11.writeSystemMacroInvocationLengthPrefixedTaggedVariadic(...)`.
   - Limitations: no general macro/e-expression emission. For deterministic self-contained output it can emit a minimal `set_symbols` prelude, but it does not model arbitrary module mutation directives.
 
 ### Equality semantics
