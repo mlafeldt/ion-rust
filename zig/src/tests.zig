@@ -149,6 +149,18 @@ test "zig ion parses simple text" {
     try std.testing.expect(doc.elements.len == 1);
 }
 
+test "zig ion serializeDocument binary_1_1 emits Ion 1.1 IVM" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const elems = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } }};
+    const bytes = try ion.serializeDocument(std.testing.allocator, .binary_1_1, elems);
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expect(bytes.len >= 4);
+    try std.testing.expectEqualSlices(u8, &.{ 0xE0, 0x01, 0x01, 0xEA }, bytes[0..4]);
+}
+
 test "ion-tests equiv groups" {
     const allocator = std.testing.allocator;
     const skip = try concatSkipLists(allocator, &.{ &global_skip_list, &equivs_skip_list });

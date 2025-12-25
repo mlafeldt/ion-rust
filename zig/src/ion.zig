@@ -203,6 +203,12 @@ fn decodeTextToUtf8(allocator: Allocator, bytes: []const u8) IonError!?[]u8 {
 pub const Format = enum(u32) {
     /// Ion binary (Ion 1.0).
     binary = 0,
+    /// Ion binary (Ion 1.1).
+    ///
+    /// Note: this uses the experimental Ion 1.1 binary writer (`zig/src/ion/writer11.zig`).
+    /// It emits values (not macros/e-expressions) and is primarily intended for regression tests
+    /// and ad-hoc tooling.
+    binary_1_1 = 4,
     /// Ion text (writer currently shares implementation; formatting is not distinguished).
     text_compact = 1,
     /// Ion text (writer currently shares implementation; formatting is not distinguished).
@@ -217,6 +223,7 @@ pub const Format = enum(u32) {
 pub fn serializeDocument(allocator: Allocator, format: Format, doc: []const value.Element) IonError![]u8 {
     return switch (format) {
         .binary => try writer.writeBinary(allocator, doc),
+        .binary_1_1 => try writer11.writeBinary11(allocator, doc),
         .text_compact, .text_lines, .text_pretty => try writer.writeText(allocator, doc),
     };
 }
