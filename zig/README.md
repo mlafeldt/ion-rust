@@ -326,6 +326,17 @@ to keep coverage progressing.
 If we later find a concrete bug in `ion-rust` or `ion-java` (with a minimal repro and expected/actual behavior), add it
 to this section with an issue link.
 
+## Notes on ion-java Ion 1.1 (opcode table mismatch)
+
+The `amazon-ion/ion-java` repository contains an Ion 1.1 opcode table (`/tmp/ion-java/src/main/java/com/amazon/ion/impl/bin/OpCodes.java`) that does not match the Ion 1.1 binary model used by ion-rust and exercised by `ion-tests`.
+
+Examples:
+
+1) ion-java marks `0xEE` as reserved; ion-rust uses `0xEE` as `SystemSymbolAddress` in Ion 1.1 binary.
+2) ion-java's short integer opcodes start at `0x50`; ion-rust uses `0x60..0x68` for fixed-length integers (and `0xF6` for length-prefixed integers).
+
+For this Zig port, treat ion-rust + `ion-tests` as the source of truth for Ion 1.1 binary opcodes and semantics.
+
 ### 6) NOP pads inside structs with non-zero SIDs
 
 The corpus includes cases where a struct field name is followed by a NOP (padding) before the value, and the field name SID can be non-zero.

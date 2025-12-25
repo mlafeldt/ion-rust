@@ -20,7 +20,8 @@ pub const Options = struct {
     ///   address `0xEE` when the SID corresponds to a known system symbol.
     ///
     /// Note: emitting symbol addresses correctly requires module/symbol table context. This writer
-    /// does not model that state yet, which is why it is experimental.
+    /// does not model that state yet, which is why it is experimental. (ion-rust treats `0xEE` as
+    /// `SystemSymbolAddress`; ion-java's Ion 1.1 opcode table differs.)
     symbol_encoding: enum { inline_text_only, addresses } = .addresses,
 };
 

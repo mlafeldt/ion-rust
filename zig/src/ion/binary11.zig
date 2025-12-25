@@ -2927,6 +2927,10 @@ const Decoder = struct {
         }
 
         // System symbol address: EE (1-byte fixed uint address).
+        //
+        // Note: This follows ion-rust's Ion 1.1 binary model (`SystemSymbolAddress = 0xEE`).
+        // The amazon-ion/ion-java repo has an Ion 1.1 opcode table that marks 0xEE as reserved;
+        // that table appears to reflect an older draft and does not match ion-rust + ion-tests.
         if (op == 0xEE) {
             const b = try self.readBytes(1);
             const addr: u32 = b[0];
