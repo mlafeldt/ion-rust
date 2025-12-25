@@ -1420,6 +1420,26 @@ test "ion 1.1 binary directives may not be invoked in containers (experimental)"
     try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes));
 }
 
+test "ion 1.1 binary directives may not be invoked as e-expression arguments (experimental)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // IVM + `(:$ion::values (:use "abcs" 1))`
+    // EF 01 => system macro address 1 (values)
+    // 02    => presence: arg group
+    // 01    => FlexUInt(0): delimited tagged group
+    // EF 17 ... => system macro address 23 (use) (invalid here)
+    // F0    => group terminator
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA,
+        0xEF, 0x01, 0x02, 0x01,
+        0xEF, 0x17, 0x01, 0x94,
+        0x61, 0x62, 0x63, 0x73,
+        0x61, 0x01, 0xF0,
+    };
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes));
+}
+
 test "ion 1.1 binary system sum supports big ints" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

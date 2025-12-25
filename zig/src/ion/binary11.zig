@@ -85,6 +85,12 @@ const Decoder = struct {
     invoke_ctx: InvokeCtx = .nested,
     module_state: ModuleState11 = .{},
 
+    fn pushInvokeCtx(self: *Decoder, next: InvokeCtx) InvokeCtx {
+        const prev = self.invoke_ctx;
+        self.invoke_ctx = next;
+        return prev;
+    }
+
     fn currentMacroTable(self: *const Decoder) ?*const MacroTable {
         if (self.mactab_local_set) return &self.mactab_local;
         return self.mactab;
@@ -1341,12 +1347,18 @@ const Decoder = struct {
         return switch (presence) {
             0 => &.{},
             1 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const v = try self.readValue();
                 const out = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
                 out[0] = .{ .annotations = &.{}, .value = v };
                 break :blk out;
             },
-            2 => try self.readExpressionGroup(.tagged),
+            2 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
+                break :blk try self.readExpressionGroup(.tagged);
+            },
             else => return IonError.InvalidIon,
         };
     }
@@ -1374,12 +1386,18 @@ const Decoder = struct {
                 return switch (c) {
                     0 => &.{},
                     1 => blk: {
+                        const prev = d.pushInvokeCtx(.nested);
+                        defer d.invoke_ctx = prev;
                         const v = try d.readValue();
                         const one = d.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
                         one[0] = .{ .annotations = &.{}, .value = v };
                         break :blk one;
                     },
-                    2 => d.readExpressionGroup(.tagged),
+                    2 => blk: {
+                        const prev = d.pushInvokeCtx(.nested);
+                        defer d.invoke_ctx = prev;
+                        break :blk d.readExpressionGroup(.tagged);
+                    },
                     else => IonError.InvalidIon,
                 };
             }
@@ -1407,12 +1425,18 @@ const Decoder = struct {
         const count_vals: []const value.Element = switch (p_count) {
             0 => &.{},
             1 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const v = try self.readValue();
                 const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
                 one[0] = .{ .annotations = &.{}, .value = v };
                 break :blk one;
             },
-            2 => try self.readExpressionGroup(.tagged),
+            2 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
+                break :blk try self.readExpressionGroup(.tagged);
+            },
             else => return IonError.InvalidIon,
         };
         if (count_vals.len != 1) return IonError.InvalidIon;
@@ -1430,15 +1454,23 @@ const Decoder = struct {
                 break :blk switch (b) {
                     0 => &.{},
                     1 => blk2: {
+                        const prev = self.pushInvokeCtx(.nested);
+                        defer self.invoke_ctx = prev;
                         const v = try self.readValue();
                         const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
                         one[0] = .{ .annotations = &.{}, .value = v };
                         break :blk2 one;
                     },
-                    2 => try self.readExpressionGroup(.tagged),
+                    2 => blk2: {
+                        const prev = self.pushInvokeCtx(.nested);
+                        defer self.invoke_ctx = prev;
+                        break :blk2 try self.readExpressionGroup(.tagged);
+                    },
                     else => unreachable,
                 };
             }
+            const prev = self.pushInvokeCtx(.nested);
+            defer self.invoke_ctx = prev;
             const v = try self.readValue();
             const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
             one[0] = .{ .annotations = &.{}, .value = v };
@@ -1462,6 +1494,8 @@ const Decoder = struct {
         //
         // Conformance binary encoding uses two *tagged* values back-to-back (no presence byte),
         // e.g. `EF 07 60 60` for `(:sum 0 0)`.
+        const prev = self.pushInvokeCtx(.nested);
+        defer self.invoke_ctx = prev;
         const a_v = try self.readValue();
         const b_v = try self.readValue();
         if (a_v != .int or b_v != .int) return IonError.InvalidIon;
@@ -1513,8 +1547,15 @@ const Decoder = struct {
 
         switch (presence) {
             0 => {},
-            1 => try addText(self.arena, &texts, try self.readValue()),
+            1 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
+                try addText(self.arena, &texts, try self.readValue());
+                break :blk;
+            },
             2 => {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const group = try self.readExpressionGroup(.tagged);
                 for (group) |e| try addText(self.arena, &texts, e.value);
             },
@@ -1559,8 +1600,15 @@ const Decoder = struct {
 
         switch (presence) {
             0 => {},
-            1 => try addText(self.arena, &texts, try self.readValue()),
+            1 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
+                try addText(self.arena, &texts, try self.readValue());
+                break :blk;
+            },
             2 => {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const group = try self.readExpressionGroup(.tagged);
                 for (group) |e| try addText(self.arena, &texts, e.value);
             },
@@ -1606,8 +1654,15 @@ const Decoder = struct {
 
         switch (presence) {
             0 => {},
-            1 => try addLob(self.arena, &parts, try self.readValue()),
+            1 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
+                try addLob(self.arena, &parts, try self.readValue());
+                break :blk;
+            },
             2 => {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const group = try self.readExpressionGroup(.tagged);
                 for (group) |e| try addLob(self.arena, &parts, e.value);
             },
@@ -1639,12 +1694,18 @@ const Decoder = struct {
         const args: []const value.Element = switch (presence) {
             0 => &.{},
             1 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const v = try self.readValue();
                 const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
                 one[0] = .{ .annotations = &.{}, .value = v };
                 break :blk one;
             },
-            2 => try self.readExpressionGroup(.tagged),
+            2 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
+                break :blk try self.readExpressionGroup(.tagged);
+            },
             else => return IonError.InvalidIon,
         };
 
@@ -1676,12 +1737,18 @@ const Decoder = struct {
         const args: []const value.Element = switch (presence) {
             0 => &.{},
             1 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const v = try self.readValue();
                 const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
                 one[0] = .{ .annotations = &.{}, .value = v };
                 break :blk one;
             },
-            2 => try self.readExpressionGroup(.tagged),
+            2 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
+                break :blk try self.readExpressionGroup(.tagged);
+            },
             else => return IonError.InvalidIon,
         };
 
@@ -1731,6 +1798,8 @@ const Decoder = struct {
         switch (presence) {
             0 => return &.{},
             1 => {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const v = try self.readValue();
                 const t: []const u8 = switch (v) {
                     .string => |s| s,
@@ -1743,6 +1812,8 @@ const Decoder = struct {
                 return &.{};
             },
             2 => {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const group = try self.readExpressionGroup(.tagged);
                 for (group) |e| {
                     if (e.annotations.len != 0) return IonError.InvalidIon;
@@ -1774,12 +1845,18 @@ const Decoder = struct {
         const args: []const value.Element = switch (presence) {
             0 => &.{},
             1 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const v = try self.readValue();
                 const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
                 one[0] = .{ .annotations = &.{}, .value = v };
                 break :blk one;
             },
-            2 => try self.readExpressionGroup(.tagged),
+            2 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
+                break :blk try self.readExpressionGroup(.tagged);
+            },
             else => return IonError.InvalidIon,
         };
 
@@ -1800,12 +1877,18 @@ const Decoder = struct {
         const args: []const value.Element = switch (presence) {
             0 => &.{},
             1 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const v = try self.readValue();
                 const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
                 one[0] = .{ .annotations = &.{}, .value = v };
                 break :blk one;
             },
-            2 => try self.readExpressionGroup(.tagged),
+            2 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
+                break :blk try self.readExpressionGroup(.tagged);
+            },
             else => return IonError.InvalidIon,
         };
 
@@ -1865,6 +1948,9 @@ const Decoder = struct {
         const presence = self.input[self.i];
         self.i += 1;
 
+        const prev = self.pushInvokeCtx(.nested);
+        defer self.invoke_ctx = prev;
+
         const key_v = try self.readValue();
         if (key_v != .string) return IonError.InvalidIon;
         if (key_v.string.len == 0) return IonError.InvalidIon;
@@ -1911,6 +1997,8 @@ const Decoder = struct {
         //
         // Binary encoding does not include an explicit argument count here, so disambiguate based
         // on the first argument's type.
+        const prev = self.pushInvokeCtx(.nested);
+        defer self.invoke_ctx = prev;
         const first = try self.readValue();
         switch (first) {
             .string, .clob, .blob => return self.expandParseIonFrom(first),
@@ -1933,12 +2021,18 @@ const Decoder = struct {
         const args: []const value.Element = switch (presence) {
             0 => &.{},
             1 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const v = try self.readValue();
                 const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
                 one[0] = .{ .annotations = &.{}, .value = v };
                 break :blk one;
             },
-            2 => try self.readExpressionGroup(.tagged),
+            2 => blk: {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
+                break :blk try self.readExpressionGroup(.tagged);
+            },
             else => return IonError.InvalidIon,
         };
 
@@ -1990,6 +2084,8 @@ const Decoder = struct {
             .symbol => |s| s,
             else => return IonError.InvalidIon,
         };
+        const prev = self.pushInvokeCtx(.nested);
+        defer self.invoke_ctx = prev;
         const val_v = try self.readValue();
 
         const fields = self.arena.allocator().alloc(value.StructField, 1) catch return IonError.OutOfMemory;
@@ -2010,6 +2106,9 @@ const Decoder = struct {
         if (self.i >= self.input.len) return IonError.Incomplete;
         const presence = self.input[self.i];
         self.i += 1;
+
+        const prev = self.pushInvokeCtx(.nested);
+        defer self.invoke_ctx = prev;
 
         var anns = std.ArrayListUnmanaged(value.Symbol){};
         errdefer anns.deinit(self.arena.allocator());
@@ -2055,6 +2154,8 @@ const Decoder = struct {
         //
         // Conformance binary encoding uses two *tagged* values back-to-back (no presence byte),
         // e.g. `EF 0B 60 60` for `(:make_decimal 0 0)`.
+        const prev = self.pushInvokeCtx(.nested);
+        defer self.invoke_ctx = prev;
         const coeff_v = try self.readValue();
         if (coeff_v != .int) return IonError.InvalidIon;
         const exp_v = try self.readValue();
@@ -2116,10 +2217,14 @@ const Decoder = struct {
         switch (presence) {
             0 => {},
             1 => {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const v = try self.readValue();
                 args.append(self.arena.allocator(), .{ .annotations = &.{}, .value = v }) catch return IonError.OutOfMemory;
             },
             2 => {
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
                 const group = try self.readExpressionGroup(.tagged);
                 args.appendSlice(self.arena.allocator(), group) catch return IonError.OutOfMemory;
             },
@@ -2205,6 +2310,9 @@ const Decoder = struct {
         //   00 absent, 01 single tagged value, 10 expression group, 11 invalid.
         const presence_bytes = try self.readBytes(2);
         const presence_u16 = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(presence_bytes.ptr)), .little);
+
+        const prev = self.pushInvokeCtx(.nested);
+        defer self.invoke_ctx = prev;
 
         const code = struct {
             fn get(p: u16, idx: u4) u2 {
@@ -2561,8 +2669,14 @@ const Decoder = struct {
                     self.i += 1;
                     break;
                 }
-                const v = try self.readValue();
-                out.append(self.arena.allocator(), .{ .annotations = &.{}, .value = v }) catch return IonError.OutOfMemory;
+
+                // Tagged groups may contain arbitrary Ion 1.1 *value expressions* (including
+                // e-expressions). This is important for enforcing directive scoping rules:
+                // directives are only valid at the top-level, and must be rejected if invoked as
+                // e-expression arguments.
+                const vals = try self.readValueExpr();
+                if (vals.len == 0) continue; // ignore IVM/NOP padding in-stream
+                out.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
             }
             return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
         }
