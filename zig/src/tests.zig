@@ -271,6 +271,31 @@ test "ion 1.1 writer11 can emit length-prefixed system values e-expression" {
     try std.testing.expect(ion.eq.ionEqElements(elems, &args));
 }
 
+test "ion 1.1 writer11 can emit length-prefixed system default e-expression" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const params = [_]ion.macro.Param{
+        .{ .ty = .tagged, .card = .zero_or_many, .name = "expr", .shape = null },
+        .{ .ty = .tagged, .card = .zero_or_many, .name = "default_expr", .shape = null },
+    };
+
+    const expr_empty = [_]ion.value.Element{};
+    const default_args = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 42 } } },
+        .{ .annotations = &.{}, .value = .{ .string = "fallback" } },
+    };
+    const args_by_param = [_][]const ion.value.Element{ &expr_empty, &default_args };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationLengthPrefixedWithParams(std.testing.allocator, &out, 2, &params, &args_by_param, .{});
+
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, out.items, null);
+    try std.testing.expect(ion.eq.ionEqElements(elems, &default_args));
+}
+
 test "ion-tests equiv groups" {
     const allocator = std.testing.allocator;
     const skip = try concatSkipLists(allocator, &.{ &global_skip_list, &equivs_skip_list });

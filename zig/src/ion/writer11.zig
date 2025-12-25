@@ -1024,6 +1024,31 @@ pub fn writeSystemMacroInvocationLengthPrefixedTaggedVariadicWithOptions(
     try appendSlice(out, allocator, arg_bytes.items);
 }
 
+pub fn writeSystemMacroInvocationLengthPrefixedWithParams(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    addr: u8,
+    params: []const ion.macro.Param,
+    args_by_param: []const []const value.Element,
+    options: Options,
+) IonError!void {
+    // Low-level helper for emitting length-prefixed e-expressions (0xF5) using the same
+    // signature-driven argument binding encoding that `binary11.readLengthPrefixedArgBindings`
+    // expects.
+    //
+    // Currently, this writer only supports `.tagged` parameters.
+    if (params.len != args_by_param.len) return IonError.InvalidIon;
+
+    var arg_bytes = std.ArrayListUnmanaged(u8){};
+    defer arg_bytes.deinit(allocator);
+    try encodeLengthPrefixedArgBindingsTagged(allocator, &arg_bytes, params, args_by_param, options);
+
+    try appendByte(out, allocator, 0xF5);
+    try writeFlexUIntShift1(out, allocator, addr);
+    try writeFlexUIntShift1(out, allocator, arg_bytes.items.len);
+    try appendSlice(out, allocator, arg_bytes.items);
+}
+
 fn encodeSingleVariadicTaggedArgBindings(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
@@ -1047,6 +1072,78 @@ fn encodeSingleVariadicTaggedArgBindings(
     for (args) |e| try writeElement(allocator, &payload, options, e);
     try writeFlexUIntShift1(out, allocator, payload.items.len);
     try appendSlice(out, allocator, payload.items);
+}
+
+fn bitmapSizeInBytesForParams(params: []const ion.macro.Param) usize {
+    const bits_per_param: usize = 2;
+    const bits_per_byte: usize = 8;
+    var variadic: usize = 0;
+    for (params) |p| {
+        if (p.card != .one) variadic += 1;
+    }
+    return ((variadic * bits_per_param) + 7) / bits_per_byte;
+}
+
+fn encodeLengthPrefixedArgBindingsTagged(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    params: []const ion.macro.Param,
+    args_by_param: []const []const value.Element,
+    options: Options,
+) IonError!void {
+    const bitmap_len = bitmapSizeInBytesForParams(params);
+    var bitmap = std.ArrayListUnmanaged(u8){};
+    defer bitmap.deinit(allocator);
+    bitmap.resize(allocator, bitmap_len) catch return IonError.OutOfMemory;
+    @memset(bitmap.items, 0);
+
+    var variadic_idx: usize = 0;
+    for (params, 0..) |p, idx| {
+        if (p.ty != .tagged) return IonError.Unsupported;
+        if (p.card == .one) {
+            if (args_by_param[idx].len != 1) return IonError.InvalidIon;
+            continue;
+        }
+
+        const args = args_by_param[idx];
+        const grouping: u2 = if (args.len == 0) 0b00 else if (args.len == 1) 0b01 else 0b10;
+        if (grouping == 0b00 and p.card == .one_or_many) return IonError.InvalidIon;
+        if (grouping == 0b10 and p.card == .zero_or_one) return IonError.InvalidIon;
+
+        const bit: usize = variadic_idx * 2;
+        const byte_idx: usize = bit / 8;
+        const bit_in_byte: u3 = @intCast(bit % 8);
+        if (byte_idx >= bitmap.items.len) return IonError.InvalidIon;
+        bitmap.items[byte_idx] |= (@as(u8, grouping) << bit_in_byte);
+        variadic_idx += 1;
+    }
+    try appendSlice(out, allocator, bitmap.items);
+
+    // Emit argument payloads in parameter order.
+    variadic_idx = 0;
+    for (params, 0..) |p, idx| {
+        const args = args_by_param[idx];
+
+        if (p.card == .one) {
+            try writeElement(allocator, out, options, args[0]);
+            continue;
+        }
+
+        const grouping: u2 = if (args.len == 0) 0b00 else if (args.len == 1) 0b01 else 0b10;
+        switch (grouping) {
+            0b00 => {},
+            0b01 => try writeElement(allocator, out, options, args[0]),
+            0b10 => {
+                var payload = std.ArrayListUnmanaged(u8){};
+                defer payload.deinit(allocator);
+                for (args) |e| try writeElement(allocator, &payload, options, e);
+                try writeFlexUIntShift1(out, allocator, payload.items.len);
+                try appendSlice(out, allocator, payload.items);
+            },
+            else => return IonError.InvalidIon,
+        }
+        variadic_idx += 1;
+    }
 }
 
 fn collectUserSymbolTexts(
