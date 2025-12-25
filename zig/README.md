@@ -163,7 +163,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
-- As of 2025-12-25, `cd zig && zig build test --summary all` runs 59 Zig tests; all pass.
+- As of 2025-12-25, `cd zig && zig build test --summary all` runs 60 Zig tests; all pass.
 
 ### Skip list (currently empty)
 
