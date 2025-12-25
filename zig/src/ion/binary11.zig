@@ -2634,11 +2634,21 @@ const Decoder = struct {
 
         var cursor: usize = 0;
         if (ty == .tagged) {
-            // Parse a sequence of ordinary Ion 1.1 values.
-            var sub = Decoder{ .arena = self.arena, .input = payload, .i = 0, .mactab = null, .invoke_ctx = .nested };
+            // Parse a sequence of Ion 1.1 value expressions (values + e-expressions).
+            // Tagged expression groups can appear as macro arguments, and conformance cases rely on
+            // these being able to contain nested macro invocations (while still enforcing that
+            // directives are top-level only).
+            var sub = Decoder{
+                .arena = self.arena,
+                .input = payload,
+                .i = 0,
+                .mactab = self.currentMacroTable(),
+                .invoke_ctx = .nested,
+            };
             while (sub.i < sub.input.len) {
-                const v = try sub.readValue();
-                out.append(self.arena.allocator(), .{ .annotations = &.{}, .value = v }) catch return IonError.OutOfMemory;
+                const vals = try sub.readValueExpr();
+                if (vals.len == 0) continue; // ignore IVM/NOP padding in-stream
+                out.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
             }
             return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
         }

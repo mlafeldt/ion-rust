@@ -1440,6 +1440,42 @@ test "ion 1.1 binary directives may not be invoked as e-expression arguments (ex
     try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes));
 }
 
+test "ion 1.1 binary directives may not be invoked inside length-prefixed arg groups (experimental)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const appendFlexUIntShift1 = struct {
+        fn run(list: *std.ArrayListUnmanaged(u8), v: usize) !void {
+            const raw: u128 = (@as(u128, v) << 1) | 1;
+            var tmp = raw;
+            while (tmp != 0) : (tmp >>= 8) {
+                try list.append(std.testing.allocator, @intCast(tmp & 0xFF));
+            }
+        }
+    }.run;
+
+    // IVM + `(:$ion::values (:: (:use "abcs" 1)))`, but with the `values` argument group encoded
+    // as a *length-prefixed* tagged expression group (not delimited).
+    //
+    // We reject `use` here because directives are valid only at the top-level.
+    const payload = &[_]u8{
+        0xEF, 0x17, // system macro address 23 (use)
+        0x01, // presence: no arg groups
+        0x94, // short string len=4
+        0x61, 0x62, 0x63, 0x73, // "abcs"
+        0x61, 0x01, // int(1)
+    };
+
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+
+    try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xEF, 0x01, 0x02 });
+    try appendFlexUIntShift1(&bytes, payload.len);
+    try bytes.appendSlice(std.testing.allocator, payload);
+
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes.items));
+}
+
 test "ion 1.1 binary system sum supports big ints" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
