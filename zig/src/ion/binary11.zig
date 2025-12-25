@@ -851,9 +851,57 @@ const Decoder = struct {
                 try self.addIon11UserSymbolsFromTextArgs(bindings[0].values);
                 break :blk &.{};
             },
-            21, 22, 23 => blk: {
-                // Directives / module mutations: conformance only checks they parse and do not
-                // contribute application values.
+            21 => blk: {
+                // Conformance reuses address 21 for `meta` and `set_macros`.
+                // Disambiguate by argument shape: all macro defs => `set_macros`, else `meta`.
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "macro_def", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const defs = bindings[0].values;
+                if (defs.len != 0 and self.allArgsAreMacroDefs(defs)) {
+                    try self.applySetMacros(defs);
+                }
+                break :blk &.{};
+            },
+            22 => blk: {
+                // (add_macros <macro_def*>)
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "macro_def", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const defs = bindings[0].values;
+                if (defs.len != 0) {
+                    if (!self.allArgsAreMacroDefs(defs)) return IonError.InvalidIon;
+                    try self.applyAddMacros(defs);
+                }
+                break :blk &.{};
+            },
+            23 => blk: {
+                // (use <catalog_key> [<version>])
+                const p = [_]ion.macro.Param{
+                    .{ .ty = .tagged, .card = .one, .name = "key", .shape = null },
+                    .{ .ty = .tagged, .card = .zero_or_one, .name = "version", .shape = null },
+                };
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+
+                const key_elem = bindings[0].values;
+                if (key_elem.len != 1) return IonError.InvalidIon;
+                const key = key_elem[0];
+                if (key.annotations.len != 0 or key.value != .string or key.value.string.len == 0) return IonError.InvalidIon;
+
+                var version: u32 = 1;
+                const ver_vals = bindings[1].values;
+                if (ver_vals.len != 0) {
+                    if (ver_vals.len != 1) return IonError.InvalidIon;
+                    const ver = ver_vals[0];
+                    if (ver.annotations.len != 0 or ver.value != .int) return IonError.InvalidIon;
+                    const vv = try self.intToI128(ver.value.int);
+                    if (vv <= 0 or vv > std.math.maxInt(u32)) return IonError.InvalidIon;
+                    version = @intCast(vv);
+                }
+
+                const entry = shared_module_catalog11.lookup(key.value.string, version) orelse return IonError.InvalidIon;
+                try self.appendIon11UserSymbolsFromModule(entry.symbols);
                 break :blk &.{};
             },
             else => IonError.Unsupported,

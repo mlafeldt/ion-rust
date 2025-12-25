@@ -1297,6 +1297,116 @@ test "ion 1.1 binary use affects symbol ID text (experimental)" {
     try std.testing.expectEqualStrings("$ion", elems[1].value.symbol.text.?);
 }
 
+test "ion 1.1 binary e-expression length-prefixed system use affects symbol ID text (experimental)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const appendFlexUIntShift1 = struct {
+        fn run(list: *std.ArrayListUnmanaged(u8), v: usize) !void {
+            const raw: u128 = (@as(u128, v) << 1) | 1;
+            var tmp = raw;
+            while (tmp != 0) : (tmp >>= 8) {
+                try list.append(std.testing.allocator, @intCast(tmp & 0xFF));
+            }
+        }
+    }.run;
+
+    // IVM + `F5 <addr=23> <args>` + symbol(SID=1) + symbol(SID=2)
+    // Args encoding for signature: (use <key> [<version>])
+    // - bitmap(1 byte): version present as single value => 01
+    // - key: short string "abcs"
+    // - version: int(1)
+    var args = std.ArrayListUnmanaged(u8){};
+    defer args.deinit(std.testing.allocator);
+    try args.append(std.testing.allocator, 0x01); // bitmap: version present
+    try args.appendSlice(std.testing.allocator, &.{ 0x94, 0x61, 0x62, 0x63, 0x73 }); // "abcs"
+    try args.appendSlice(std.testing.allocator, &.{ 0x61, 0x01 }); // 1
+
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+    try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xF5 });
+    try appendFlexUIntShift1(&bytes, 23);
+    try appendFlexUIntShift1(&bytes, args.items.len);
+    try bytes.appendSlice(std.testing.allocator, args.items);
+    try bytes.appendSlice(std.testing.allocator, &.{ 0xE1, 0x01, 0xE1, 0x02 });
+
+    const res = try ion.binary11.parseTopLevelWithState(&arena, bytes.items);
+    const elems = res.elements;
+    try ion.value.resolveDefaultModuleSymbols11(&arena, elems, res.state.user_symbols, res.state.system_loaded);
+
+    try std.testing.expectEqual(@as(usize, 2), elems.len);
+    try std.testing.expect(elems[0].value == .symbol);
+    try std.testing.expectEqualStrings("a", elems[0].value.symbol.text.?);
+    try std.testing.expect(elems[1].value == .symbol);
+    try std.testing.expectEqualStrings("$ion", elems[1].value.symbol.text.?);
+}
+
+test "ion 1.1 binary e-expression length-prefixed system set_macros updates macro table (experimental)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const appendFlexUIntShift1 = struct {
+        fn run(list: *std.ArrayListUnmanaged(u8), v: usize) !void {
+            const raw: u128 = (@as(u128, v) << 1) | 1;
+            var tmp = raw;
+            while (tmp != 0) : (tmp >>= 8) {
+                try list.append(std.testing.allocator, @intCast(tmp & 0xFF));
+            }
+        }
+    }.run;
+
+    const sym_macro = try ion.value.makeSymbol(&arena, "macro");
+    const sym_foo = try ion.value.makeSymbol(&arena, "foo");
+    const sym_x = try ion.value.makeSymbol(&arena, "x");
+    const sym_percent = try ion.value.makeSymbol(&arena, "%");
+
+    // (macro foo (x) (% x))
+    const params_items = try arena.allocator().alloc(ion.value.Element, 1);
+    params_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = sym_x } };
+    const params = ion.value.Element{ .annotations = &.{}, .value = .{ .sexp = params_items } };
+
+    const body_items = try arena.allocator().alloc(ion.value.Element, 2);
+    body_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = sym_percent } };
+    body_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = sym_x } };
+    const body = ion.value.Element{ .annotations = &.{}, .value = .{ .sexp = body_items } };
+
+    const def_items = try arena.allocator().alloc(ion.value.Element, 4);
+    def_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = sym_macro } };
+    def_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = sym_foo } };
+    def_items[2] = params;
+    def_items[3] = body;
+    const macro_def = ion.value.Element{ .annotations = &.{}, .value = .{ .sexp = def_items } };
+
+    const macro_doc_bytes = try ion.writer11.writeBinary11(std.testing.allocator, &.{macro_def});
+    defer std.testing.allocator.free(macro_doc_bytes);
+    const macro_value_bytes = macro_doc_bytes[4..];
+
+    // Args encoding for signature: (set_macros <macro_def*>)
+    // - bitmap(1 byte): group present => 10
+    // - group: <len> <payload> where payload is the encoded macro definition value expression
+    var args = std.ArrayListUnmanaged(u8){};
+    defer args.deinit(std.testing.allocator);
+    try args.append(std.testing.allocator, 0x02); // bitmap: group present
+    try appendFlexUIntShift1(&args, macro_value_bytes.len);
+    try args.appendSlice(std.testing.allocator, macro_value_bytes);
+
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+    try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xF5 });
+    try appendFlexUIntShift1(&bytes, 21);
+    try appendFlexUIntShift1(&bytes, args.items.len);
+    try bytes.appendSlice(std.testing.allocator, args.items);
+
+    // Invoke user macro at address 0 with arg 7.
+    try bytes.appendSlice(std.testing.allocator, &.{ 0x00, 0x61, 0x07 });
+
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expect(elems[0].value.int == .small);
+    try std.testing.expectEqual(@as(i128, 7), elems[0].value.int.small);
+}
+
 test "ion 1.1 binary system sum supports big ints" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
