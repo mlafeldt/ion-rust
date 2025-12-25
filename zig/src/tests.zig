@@ -2148,6 +2148,9 @@ test "ion 1.1 binary writer emits delimited containers" {
 }
 
 test "ion 1.1 binary writer uses EE for system symbols" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
     const doc = &[_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = null, .text = "$ion" } } },
     };
@@ -2157,6 +2160,34 @@ test "ion 1.1 binary writer uses EE for system symbols" {
 
     // 0xEE <addr>
     try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x01 }) != null);
+
+    const parsed = try ion.binary11.parseTopLevel(&arena, bytes);
+    try std.testing.expectEqual(@as(usize, 1), parsed.len);
+    try std.testing.expect(parsed[0].value == .symbol);
+    try std.testing.expectEqualStrings("$ion", parsed[0].value.symbol.text orelse return error.TestExpectedEqual);
+}
+
+test "ion 1.1 binary writer uses FlexSym escape for system field names" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const struct_fields = try arena.allocator().alloc(ion.value.StructField, 1);
+    struct_fields[0] = .{
+        .name = .{ .sid = null, .text = "$ion" },
+        .value = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+    };
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = struct_fields } } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11(std.testing.allocator, doc);
+    defer std.testing.allocator.free(bytes);
+
+    // F3 (struct open), then FlexSym escape for address 1 ($ion): 01 61.
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xF3, 0x01, 0x61, 0x61, 0x01 }) != null);
+
+    const parsed = try ion.binary11.parseTopLevel(&arena, bytes);
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
 }
 
 test "ion 1.1 binary writer emits float widths" {
