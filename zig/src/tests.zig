@@ -161,6 +161,50 @@ test "zig ion serializeDocument binary_1_1 emits Ion 1.1 IVM" {
     try std.testing.expectEqualSlices(u8, &.{ 0xE0, 0x01, 0x01, 0xEA }, bytes[0..4]);
 }
 
+test "zig ion serializeDocument binary_1_1 roundtrips values" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const sym_a = try ion.value.makeSymbol(&arena, "a");
+    const sym_field = try ion.value.makeSymbol(&arena, "field");
+
+    const anns = try arena.allocator().alloc(ion.value.Symbol, 1);
+    anns[0] = sym_a;
+
+    const struct_fields = try arena.allocator().alloc(ion.value.StructField, 2);
+    struct_fields[0] = .{
+        .name = sym_field,
+        .value = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+    };
+    struct_fields[1] = .{
+        .name = sym_a,
+        .value = .{ .annotations = &.{}, .value = .{ .string = "hello" } },
+    };
+
+    const st = ion.value.Struct{ .fields = struct_fields };
+
+    const elems = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .null = .null } },
+        .{ .annotations = &.{}, .value = .{ .bool = true } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = -7 } } },
+        .{ .annotations = &.{}, .value = .{ .float = 3.25 } },
+        .{ .annotations = &.{}, .value = .{ .decimal = .{ .is_negative = false, .coefficient = .{ .small = 314 }, .exponent = -2 } } },
+        .{ .annotations = anns, .value = .{ .symbol = sym_a } },
+        .{ .annotations = &.{}, .value = .{ .string = "world" } },
+        .{ .annotations = &.{}, .value = .{ .blob = "xyz" } },
+        .{ .annotations = &.{}, .value = .{ .clob = "abc" } },
+        .{ .annotations = &.{}, .value = .{ .@"struct" = st } },
+    };
+
+    const bytes = try ion.serializeDocument(std.testing.allocator, .binary_1_1, elems);
+    defer std.testing.allocator.free(bytes);
+
+    var parsed = try ion.parseDocument(std.testing.allocator, bytes);
+    defer parsed.deinit();
+
+    try std.testing.expect(ion.eq.ionEqElements(elems, parsed.elements));
+}
+
 test "ion-tests equiv groups" {
     const allocator = std.testing.allocator;
     const skip = try concatSkipLists(allocator, &.{ &global_skip_list, &equivs_skip_list });

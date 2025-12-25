@@ -634,9 +634,11 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s
             try appendByte(out, allocator, @intCast((raw >> 16) & 0xFF));
             return;
         }
-        return IonError.Unsupported;
+        // Ion 1.1 symbol address opcodes only allow 1-, 2-, or 3-byte fixed UInt payloads (with
+        // biases). Larger SIDs cannot be represented and are invalid Ion.
+        return IonError.InvalidIon;
     }
-    return IonError.Unsupported;
+    return IonError.InvalidIon;
 }
 
 fn writeLob(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), op: u8, bytes: []const u8) IonError!void {
@@ -784,7 +786,7 @@ fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
         try writeFlexIntShift1(out, allocator, @intCast(sid));
         return;
     }
-    return IonError.Unsupported;
+    return IonError.InvalidIon;
 }
 
 fn twosComplementIntBytesLe(allocator: std.mem.Allocator, i: value.Int) IonError![]u8 {
