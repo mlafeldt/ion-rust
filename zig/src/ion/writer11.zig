@@ -11,25 +11,42 @@ const symtab = @import("symtab.zig");
 
 const IonError = ion.IonError;
 
+pub const Options = struct {
+    /// Controls how symbol values are encoded.
+    ///
+    /// - `.inline_text_only` writes symbols only as inline text (A0..AF/FA) and rejects
+    ///   symbols that do not have text.
+    /// - `.addresses` also allows encoding symbols by address (E1..E3) and may use system symbol
+    ///   address `0xEE` when the SID corresponds to a known system symbol.
+    ///
+    /// Note: emitting symbol addresses correctly requires module/symbol table context. This writer
+    /// does not model that state yet, which is why it is experimental.
+    symbol_encoding: enum { inline_text_only, addresses } = .addresses,
+};
+
 pub fn writeBinary11(allocator: std.mem.Allocator, doc: []const value.Element) IonError![]u8 {
+    return writeBinary11WithOptions(allocator, doc, .{});
+}
+
+pub fn writeBinary11WithOptions(allocator: std.mem.Allocator, doc: []const value.Element, options: Options) IonError![]u8 {
     var out = std.ArrayListUnmanaged(u8){};
     errdefer out.deinit(allocator);
 
     // Ion 1.1 IVM: E0 01 01 EA
     try appendSlice(&out, allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
-    for (doc) |e| try writeElement(allocator, &out, e);
+    for (doc) |e| try writeElement(allocator, &out, options, e);
 
     return out.toOwnedSlice(allocator) catch return IonError.OutOfMemory;
 }
 
-fn writeElement(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), e: value.Element) IonError!void {
+fn writeElement(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, e: value.Element) IonError!void {
     if (e.annotations.len != 0) {
         try writeAnnotationsSequence(allocator, out, e.annotations);
     }
-    try writeValue(allocator, out, e.value);
+    try writeValue(allocator, out, options, e.value);
 }
 
-fn writeValue(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), v: value.Value) IonError!void {
+fn writeValue(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, v: value.Value) IonError!void {
     switch (v) {
         .null => |t| try writeNull(allocator, out, t),
         .bool => |b| try appendByte(out, allocator, if (b) 0x6E else 0x6F),
@@ -37,12 +54,12 @@ fn writeValue(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), v:
         .float => |f| try writeFloat(allocator, out, f),
         .decimal => |d| try writeDecimal(allocator, out, d),
         .string => |s| try writeString(allocator, out, s),
-        .symbol => |s| try writeSymbol(allocator, out, s),
+        .symbol => |s| try writeSymbol(allocator, out, options, s),
         .blob => |b| try writeLob(allocator, out, 0xFE, b),
         .clob => |b| try writeLob(allocator, out, 0xFF, b),
-        .list => |items| try writeDelimitedList(allocator, out, items),
-        .sexp => |items| try writeDelimitedSexp(allocator, out, items),
-        .@"struct" => |st| try writeDelimitedStruct(allocator, out, st),
+        .list => |items| try writeDelimitedList(allocator, out, options, items),
+        .sexp => |items| try writeDelimitedSexp(allocator, out, options, items),
+        .@"struct" => |st| try writeDelimitedStruct(allocator, out, options, st),
         .timestamp => |ts| try writeTimestamp(allocator, out, ts),
     }
 }
@@ -590,7 +607,7 @@ fn writeString(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s
     try appendSlice(out, allocator, s);
 }
 
-fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: value.Symbol) IonError!void {
+fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, s: value.Symbol) IonError!void {
     if (s.text) |t| {
         if (!std.unicode.utf8ValidateSlice(t)) return IonError.InvalidIon;
         if (t.len <= 15) {
@@ -604,6 +621,8 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s
         return;
     }
     if (s.sid) |sid| {
+        if (options.symbol_encoding == .inline_text_only) return IonError.InvalidIon;
+
         // System symbol address: EE (1-byte fixed uint address). Only use this for known Ion 1.1
         // system symbols so we don't conflate user SIDs with system symbol addresses.
         if (sid <= 0xFF and symtab.SystemSymtab11.textForSid(@intCast(sid)) != null) {
@@ -647,33 +666,33 @@ fn writeLob(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), op: 
     try appendSlice(out, allocator, bytes);
 }
 
-fn writeDelimitedList(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), items: []const value.Element) IonError!void {
+fn writeDelimitedList(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, items: []const value.Element) IonError!void {
     try appendByte(out, allocator, 0xF1);
-    for (items) |e| try writeElement(allocator, out, e);
+    for (items) |e| try writeElement(allocator, out, options, e);
     try appendByte(out, allocator, 0xF0);
 }
 
-fn writeDelimitedSexp(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), items: []const value.Element) IonError!void {
+fn writeDelimitedSexp(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, items: []const value.Element) IonError!void {
     try appendByte(out, allocator, 0xF2);
-    for (items) |e| try writeElement(allocator, out, e);
+    for (items) |e| try writeElement(allocator, out, options, e);
     try appendByte(out, allocator, 0xF0);
 }
 
-fn writeDelimitedStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), st: value.Struct) IonError!void {
+fn writeDelimitedStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, st: value.Struct) IonError!void {
     try appendByte(out, allocator, 0xF3);
     for (st.fields) |f| {
         try writeFlexSymSymbol(out, allocator, f.name);
-        try writeElement(allocator, out, f.value);
+        try writeElement(allocator, out, options, f.value);
     }
     // Delimited struct close marker: FlexSym escape F0.
     try writeFlexIntShift1(out, allocator, 0);
     try appendByte(out, allocator, 0xF0);
 }
 
-fn writeSequence(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), short_base: u8, long_op: u8, items: []const value.Element) IonError!void {
+fn writeSequence(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, short_base: u8, long_op: u8, items: []const value.Element) IonError!void {
     var body = std.ArrayListUnmanaged(u8){};
     defer body.deinit(allocator);
-    for (items) |e| try writeElement(allocator, &body, e);
+    for (items) |e| try writeElement(allocator, &body, options, e);
 
     if (body.items.len <= 15) {
         try appendByte(out, allocator, short_base + @as(u8, @intCast(body.items.len)));
@@ -686,7 +705,7 @@ fn writeSequence(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8),
     try appendSlice(out, allocator, body.items);
 }
 
-fn writeStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), st: value.Struct) IonError!void {
+fn writeStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, st: value.Struct) IonError!void {
     // For simplicity, always use FlexSym field-name mode:
     // struct-body := FlexUInt(0) then repeated (FlexSym field-name, value-expr).
     var body = std.ArrayListUnmanaged(u8){};
@@ -695,7 +714,7 @@ fn writeStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s
     try writeFlexUIntShift1(&body, allocator, 0);
     for (st.fields) |f| {
         try writeFlexSymSymbol(&body, allocator, f.name);
-        try writeElement(allocator, &body, f.value);
+        try writeElement(allocator, &body, options, f.value);
     }
 
     if (body.items.len <= 15) {
@@ -863,18 +882,50 @@ fn trimTwosComplementLe(allocator: std.mem.Allocator, owned: []u8) IonError![]u8
 }
 
 fn writeFlexUIntShift1(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, v: usize) IonError!void {
-    const raw: u128 = (@as(u128, v) << 1) | 1;
-    var tmp = raw;
-    while (tmp != 0) : (tmp >>= 8) {
-        try appendByte(out, allocator, @intCast(tmp & 0xFF));
+    // FlexUInt encoding uses a tag bit that is the least-significant set bit of the underlying
+    // little-endian integer. If the tag bit is at position (N-1), the encoding is N bytes long and
+    // the value is obtained by shifting right by N bits.
+    //
+    // This means each byte contributes 7 payload bits. Choose the minimal byte length that can
+    // represent `v`.
+    const uv: u128 = @intCast(v);
+    const bits: usize = if (v == 0) 0 else (usize_bits: {
+        const lz: usize = @intCast(@clz(uv));
+        break :usize_bits 128 - lz;
+    });
+    const n: usize = @max(@as(usize, 1), (bits + 6) / 7);
+
+    const tag: u128 = @as(u128, 1) << @intCast(n - 1);
+    const raw: u128 = (uv << @intCast(n)) | tag;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        try appendByte(out, allocator, @intCast((raw >> @intCast(i * 8)) & 0xFF));
     }
 }
 
 fn writeFlexIntShift1(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, v: i64) IonError!void {
-    const raw_i128: i128 = @as(i128, v) * 2 + 1;
-    const bytes = try twosComplementI128BytesLe(allocator, raw_i128);
-    defer allocator.free(bytes);
-    try appendSlice(out, allocator, bytes);
+    // FlexInt is the signed analogue of FlexUInt: N bytes encode a signed value occupying 7*N bits.
+    // The tag bit is at position (N-1) and the value is recovered by shifting right by N.
+    var n: usize = 1;
+    while (true) : (n += 1) {
+        if (n > 10) return IonError.InvalidIon; // i64 fits in <=10 bytes (70 payload bits).
+        const width: usize = n * 7;
+        const mag_bits: usize = width - 1;
+        if (mag_bits >= 63) break;
+        const max: i64 = (@as(i64, 1) << @intCast(mag_bits)) - 1;
+        const min: i64 = -(@as(i64, 1) << @intCast(mag_bits));
+        if (v >= min and v <= max) break;
+    }
+
+    const width: usize = n * 7;
+    const mask: u128 = (@as(u128, 1) << @intCast(width)) - 1;
+    const payload_twos: u128 = @as(u128, @bitCast(@as(i128, v))) & mask;
+    const tag: u128 = @as(u128, 1) << @intCast(n - 1);
+    const raw: u128 = (payload_twos << @intCast(n)) | tag;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        try appendByte(out, allocator, @intCast((raw >> @intCast(i * 8)) & 0xFF));
+    }
 }
 
 fn appendByte(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, b: u8) IonError!void {

@@ -223,7 +223,7 @@ pub const Format = enum(u32) {
 pub fn serializeDocument(allocator: Allocator, format: Format, doc: []const value.Element) IonError![]u8 {
     return switch (format) {
         .binary => try writer.writeBinary(allocator, doc),
-        .binary_1_1 => try writer11.writeBinary11(allocator, doc),
+        .binary_1_1 => try writer11.writeBinary11WithOptions(allocator, doc, .{ .symbol_encoding = .inline_text_only }),
         .text_compact, .text_lines, .text_pretty => try writer.writeText(allocator, doc),
     };
 }

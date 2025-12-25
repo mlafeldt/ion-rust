@@ -13,10 +13,18 @@ const ion = @import("ion.zig");
 const conformance = @import("conformance/runner.zig");
 
 fn appendFlexUIntShift1(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(u8), v: usize) !void {
-    const raw: u128 = (@as(u128, v) << 1) | 1;
-    var tmp = raw;
-    while (tmp != 0) : (tmp >>= 8) {
-        try list.append(allocator, @intCast(tmp & 0xFF));
+    const value: u128 = @intCast(v);
+    const bits: usize = if (v == 0) 0 else (usize_bits: {
+        const lz: usize = @intCast(@clz(value));
+        break :usize_bits 128 - lz;
+    });
+    const n: usize = @max(@as(usize, 1), (bits + 6) / 7);
+
+    const tag: u128 = @as(u128, 1) << @intCast(n - 1);
+    const raw: u128 = (value << @intCast(n)) | tag;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        try list.append(allocator, @intCast((raw >> @intCast(i * 8)) & 0xFF));
     }
 }
 
@@ -159,6 +167,13 @@ test "zig ion serializeDocument binary_1_1 emits Ion 1.1 IVM" {
 
     try std.testing.expect(bytes.len >= 4);
     try std.testing.expectEqualSlices(u8, &.{ 0xE0, 0x01, 0x01, 0xEA }, bytes[0..4]);
+}
+
+test "zig ion serializeDocument binary_1_1 rejects SID-only symbols" {
+    const elems = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } },
+    };
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.serializeDocument(std.testing.allocator, .binary_1_1, elems));
 }
 
 test "zig ion serializeDocument binary_1_1 roundtrips values" {
@@ -1809,7 +1824,7 @@ test "ion 1.1 binary writer roundtrip (basic)" {
         .value = .{ .annotations = &.{}, .value = .{ .string = "x" } },
     };
     struct_fields[2] = .{
-        .name = .{ .sid = 10, .text = null },
+        .name = .{ .sid = 200, .text = null },
         .value = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 9 } } },
     };
 
@@ -1817,7 +1832,7 @@ test "ion 1.1 binary writer roundtrip (basic)" {
         .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
         .{ .annotations = &.{}, .value = .{ .string = "hello" } },
         .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = null, .text = "sym" } } },
-        .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 10, .text = null } } },
+        .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 200, .text = null } } },
         .{ .annotations = &.{}, .value = .{ .decimal = .{ .is_negative = false, .coefficient = .{ .small = 12345 }, .exponent = -2 } } },
         .{ .annotations = &.{}, .value = .{ .blob = &.{ 0x00, 0xFF, 0x01 } } },
         .{ .annotations = &.{}, .value = .{ .list = list_items } },

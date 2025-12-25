@@ -2930,8 +2930,11 @@ const Decoder = struct {
         if (op == 0xEE) {
             const b = try self.readBytes(1);
             const addr: u32 = b[0];
-            _ = symtab.SystemSymtab11.textForSid(addr) orelse return IonError.InvalidIon;
-            return value.Value{ .symbol = value.makeSymbolId(addr, null) };
+            const sys_text = symtab.SystemSymtab11.textForSid(addr) orelse return IonError.InvalidIon;
+            // System symbol addresses live in a separate address space from symbol IDs. Return the
+            // symbol as text so callers don't have to interpret the address as an SID.
+            const t = try self.arena.dupe(sys_text);
+            return value.Value{ .symbol = value.makeSymbolId(null, t) };
         }
 
         // integers: 60..68 (len in opcode)
