@@ -36,7 +36,10 @@ Key properties:
     - Conformance-runner-only entrypoint for parsing Ion 1.1 *text* using the conformance suite's "default module" symbol model.
   - `serializeDocument(allocator, format, elements)`:
     - Supports `Format.binary` (Ion 1.0), `Format.binary_1_1` (Ion 1.1, experimental), and text formats (compact/lines/pretty).
-    - `Format.binary_1_1` currently emits symbols as inline text only (no module/symbol-address state), so it rejects SID-only non-system symbols (including in annotations and field names). Known Ion 1.1 system symbols (SIDs 1..62) are inlined by text.
+    - `Format.binary_1_1` emits a self-contained stream:
+      - It emits a minimal module prelude (`set_symbols`) for any non-system symbol text present in the document, then emits subsequent symbol references by *address* (E1..E3 / FlexSym positive) instead of inline text.
+      - It rejects SID-only non-system symbols (including in annotations and field names), because those cannot be serialized deterministically without external module state.
+      - Known Ion 1.1 system symbols are emitted using `0xEE` (SystemSymbolAddress).
   - `Document` owns an arena and a slice of parsed `Element`s; `deinit()` frees the arena.
 
 ### Data model
@@ -146,8 +149,8 @@ Key properties:
 - `zig/src/ion/writer11.zig` (experimental / partial)
   - Emits Ion 1.1 IVM and a subset of Ion 1.1 binary value opcodes.
   - Emits lists/sexps/structs using the delimited container opcodes (`F1`/`F2`/`F3`) for simple streaming output.
-  - Intended for regression tests/ad-hoc tooling; exposed via `ion.serializeDocument(..., .binary_1_1, ...)` but not used by the main corpus/conformance harness yet.
-  - Limitations: no macro/e-expression emission, and no module mutation modeling.
+  - Exposed via `ion.serializeDocument(..., .binary_1_1, ...)` for regression tests/ad-hoc tooling; the main corpus/conformance harness does not currently roundtrip through binary Ion 1.1.
+  - Limitations: no general macro/e-expression emission. For deterministic self-contained output it can emit a minimal `set_symbols` prelude, but it does not model arbitrary module mutation directives.
 
 ### Equality semantics
 

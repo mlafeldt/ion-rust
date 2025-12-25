@@ -1,8 +1,11 @@
 //! Ion 1.1 binary writer (partial).
 //!
-//! This currently targets only the subset needed for regression tests and ad-hoc tooling.
-//! It does NOT emit Ion 1.1 e-expressions/macros and does not model module mutation directives.
-//! Symbol values can be written as either inline text (A0..AF/FA) or as symbol addresses (E1..E3).
+//! This targets a value-only subset (no general e-expression/macro emission).
+//! For self-contained output, it can emit a minimal module prelude (`set_symbols`) so user symbols
+//! can be encoded by address without relying on external module state.
+//!
+//! Symbol values can be written as either inline text (A0..AF/FA) or as symbol addresses (E1..E3),
+//! and system symbols can be referenced using `0xEE` (SystemSymbolAddress).
 
 const std = @import("std");
 const ion = @import("../ion.zig");
@@ -20,9 +23,15 @@ pub const Options = struct {
     ///   symbol address opcode `0xEE` when the symbol text matches a known Ion 1.1 system symbol.
     ///
     /// Note: emitting symbol addresses correctly requires module/symbol table context. This writer
-    /// does not model that state yet, which is why it is experimental. (ion-rust treats `0xEE` as
-    /// `SystemSymbolAddress`; ion-java's Ion 1.1 opcode table differs.)
+    /// can either be given that state via `user_symbol_ids` (for ad-hoc tooling), or it can emit a
+    /// minimal `set_symbols` prelude via `writeBinary11SelfContained` to make the output
+    /// deterministic and self-contained.
     symbol_encoding: enum { inline_text_only, addresses } = .addresses,
+
+    /// Optional mapping from user symbol text -> module address (SID) for emitting symbol addresses.
+    /// When present and `symbol_encoding == .addresses`, symbols with matching `text` will be
+    /// encoded using E1..E3 (or FlexSym positive addresses) instead of inline text.
+    user_symbol_ids: ?*const std.StringHashMapUnmanaged(u32) = null,
 };
 
 pub fn writeBinary11(allocator: std.mem.Allocator, doc: []const value.Element) IonError![]u8 {
@@ -36,6 +45,36 @@ pub fn writeBinary11WithOptions(allocator: std.mem.Allocator, doc: []const value
     // Ion 1.1 IVM: E0 01 01 EA
     try appendSlice(&out, allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
     for (doc) |e| try writeElement(allocator, &out, options, e);
+
+    return out.toOwnedSlice(allocator) catch return IonError.OutOfMemory;
+}
+
+pub fn writeBinary11SelfContained(allocator: std.mem.Allocator, doc: []const value.Element) IonError![]u8 {
+    // Emit a minimal module prelude (set_symbols) so non-system symbols can be encoded by address
+    // without external module context.
+    //
+    // This writer keeps a strict contract: it requires `text` for any non-system symbol. SID-only
+    // non-system symbols cannot be serialized deterministically in a self-contained stream because
+    // their meaning depends on ambient module state.
+    var map = std.StringHashMapUnmanaged(u32){};
+    defer map.deinit(allocator);
+    var user_texts = std.ArrayListUnmanaged([]const u8){};
+    defer user_texts.deinit(allocator);
+
+    try collectUserSymbolTexts(allocator, doc, &map, &user_texts);
+
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+
+    // Ion 1.1 IVM: E0 01 01 EA
+    try appendSlice(&out, allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+
+    if (user_texts.items.len != 0) {
+        try writeSetSymbolsDirective(allocator, &out, user_texts.items);
+    }
+
+    const opts: Options = .{ .symbol_encoding = .addresses, .user_symbol_ids = &map };
+    for (doc) |e| try writeElement(allocator, &out, opts, e);
 
     return out.toOwnedSlice(allocator) catch return IonError.OutOfMemory;
 }
@@ -620,6 +659,12 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
                     return;
                 }
             }
+            if (options.user_symbol_ids) |m| {
+                if (m.get(t)) |sid| {
+                    try writeSymbolAddress(out, allocator, sid);
+                    return;
+                }
+            }
         }
         if (t.len <= 15) {
             try appendByte(out, allocator, 0xA0 + @as(u8, @intCast(t.len)));
@@ -658,6 +703,14 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
     if (s.sid) |sid| {
         if (options.symbol_encoding == .inline_text_only) return IonError.InvalidIon;
 
+        // If the caller provided an SID-only system symbol, encode it as a system symbol address.
+        // This keeps the output self-contained and avoids depending on ambient module state.
+        if (sid > 0 and sid <= symtab.SystemSymtab11.max_id and sid <= 0xFF) {
+            try appendByte(out, allocator, 0xEE);
+            try appendByte(out, allocator, @intCast(sid));
+            return;
+        }
+
         // Symbol address: E1..E3 (fixed uint with bias).
         if (sid <= 0xFF) {
             try appendByte(out, allocator, 0xE1);
@@ -683,6 +736,32 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
         // Ion 1.1 symbol address opcodes only allow 1-, 2-, or 3-byte fixed UInt payloads (with
         // biases). Larger SIDs cannot be represented and are invalid Ion.
         return IonError.InvalidIon;
+    }
+    return IonError.InvalidIon;
+}
+
+fn writeSymbolAddress(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, sid: u32) IonError!void {
+    // Symbol address: E1..E3 (fixed uint with bias).
+    if (sid <= 0xFF) {
+        try appendByte(out, allocator, 0xE1);
+        try appendByte(out, allocator, @intCast(sid));
+        return;
+    }
+    if (sid <= 0xFFFF + 256) {
+        try appendByte(out, allocator, 0xE2);
+        const raw: u16 = @intCast(sid - 256);
+        var buf: [2]u8 = undefined;
+        std.mem.writeInt(u16, &buf, raw, .little);
+        try appendSlice(out, allocator, &buf);
+        return;
+    }
+    if (sid <= 0xFFFFFF + 65792) {
+        try appendByte(out, allocator, 0xE3);
+        const raw: u32 = sid - 65792;
+        try appendByte(out, allocator, @intCast(raw & 0xFF));
+        try appendByte(out, allocator, @intCast((raw >> 8) & 0xFF));
+        try appendByte(out, allocator, @intCast((raw >> 16) & 0xFF));
+        return;
     }
     return IonError.InvalidIon;
 }
@@ -851,6 +930,12 @@ fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
                     return;
                 }
             }
+            if (options.user_symbol_ids) |m| {
+                if (m.get(t)) |sid| {
+                    try writeFlexIntShift1(out, allocator, @intCast(sid));
+                    return;
+                }
+            }
         }
         // FlexSym inline text: FlexInt(-len) then bytes.
         try writeFlexIntShift1(out, allocator, -@as(i64, @intCast(t.len)));
@@ -878,6 +963,100 @@ fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
         return;
     }
     return IonError.InvalidIon;
+}
+
+fn writeSetSymbolsDirective(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), user_texts: []const []const u8) IonError!void {
+    // Encode a system macro invocation:
+    //   (:$ion::set_symbols <text*>)
+    // using the conformance-style encoding that our binary reader accepts:
+    //   EF 13 <presence> <args...>
+    // where presence is:
+    //   0 => no args
+    //   1 => single tagged value
+    //   2 => tagged expression group
+    try appendByte(out, allocator, 0xEF);
+    try appendByte(out, allocator, 0x13); // system macro address 19
+
+    if (user_texts.len == 0) {
+        try appendByte(out, allocator, 0x00);
+        return;
+    }
+    if (user_texts.len == 1) {
+        try appendByte(out, allocator, 0x01);
+        try writeString(allocator, out, user_texts[0]);
+        return;
+    }
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    for (user_texts) |t| {
+        try writeString(allocator, &payload, t);
+    }
+
+    try appendByte(out, allocator, 0x02);
+    try writeFlexUIntShift1(out, allocator, payload.items.len);
+    try appendSlice(out, allocator, payload.items);
+}
+
+fn collectUserSymbolTexts(
+    allocator: std.mem.Allocator,
+    elems: []const value.Element,
+    map: *std.StringHashMapUnmanaged(u32),
+    out_texts: *std.ArrayListUnmanaged([]const u8),
+) IonError!void {
+    var next_sid: u32 = 1;
+
+    const addText = struct {
+        fn run(alloc: std.mem.Allocator, m: *std.StringHashMapUnmanaged(u32), texts: *std.ArrayListUnmanaged([]const u8), next: *u32, t: []const u8) IonError!void {
+            if (symtab.SystemSymtab11.sidForText(t) != null) return;
+            if (m.contains(t)) return;
+            m.put(alloc, t, next.*) catch return IonError.OutOfMemory;
+            texts.append(alloc, t) catch return IonError.OutOfMemory;
+            next.* += 1;
+        }
+    }.run;
+
+    const validateSidOnly = struct {
+        fn run(sym: value.Symbol) IonError!void {
+            if (sym.text != null) return;
+            if (sym.sid) |sid| {
+                // Allow SID-only system symbols; everything else requires text for self-contained output.
+                if (sid > 0 and sid <= symtab.SystemSymtab11.max_id) return;
+                return IonError.InvalidIon;
+            }
+            return IonError.InvalidIon;
+        }
+    }.run;
+
+    const walkElement = struct {
+        fn run(
+            alloc: std.mem.Allocator,
+            m: *std.StringHashMapUnmanaged(u32),
+            texts: *std.ArrayListUnmanaged([]const u8),
+            next: *u32,
+            e: value.Element,
+        ) IonError!void {
+            for (e.annotations) |a| {
+                if (a.text) |t| try addText(alloc, m, texts, next, t) else try validateSidOnly(a);
+            }
+            switch (e.value) {
+                .symbol => |s| {
+                    if (s.text) |t| try addText(alloc, m, texts, next, t) else try validateSidOnly(s);
+                },
+                .list => |items| for (items) |child| try run(alloc, m, texts, next, child),
+                .sexp => |items| for (items) |child| try run(alloc, m, texts, next, child),
+                .@"struct" => |st| {
+                    for (st.fields) |f| {
+                        if (f.name.text) |t| try addText(alloc, m, texts, next, t) else try validateSidOnly(f.name);
+                        try run(alloc, m, texts, next, f.value);
+                    }
+                },
+                .null, .bool, .int, .float, .decimal, .timestamp, .string, .blob, .clob => {},
+            }
+        }
+    }.run;
+
+    for (elems) |e| try walkElement(allocator, map, out_texts, &next_sid, e);
 }
 
 fn twosComplementIntBytesLe(allocator: std.mem.Allocator, i: value.Int) IonError![]u8 {

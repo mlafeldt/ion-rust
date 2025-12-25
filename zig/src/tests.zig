@@ -183,7 +183,7 @@ test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
     const bytes = try ion.serializeDocument(std.testing.allocator, .binary_1_1, elems);
     defer std.testing.allocator.free(bytes);
 
-    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xA4, '$', 'i', 'o', 'n' }) != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x01 }) != null);
 }
 
 test "ion 1.1 binary FlexSym escape returns system symbol as text" {
@@ -245,10 +245,11 @@ test "zig ion serializeDocument binary_1_1 roundtrips values" {
     const bytes = try ion.serializeDocument(std.testing.allocator, .binary_1_1, elems);
     defer std.testing.allocator.free(bytes);
 
-    var parsed = try ion.parseDocument(std.testing.allocator, bytes);
-    defer parsed.deinit();
+    const res = try ion.binary11.parseTopLevelWithState(&arena, bytes);
+    const parsed = res.elements;
+    try ion.value.resolveDefaultModuleSymbols11(&arena, parsed, res.state.user_symbols, res.state.system_loaded);
 
-    try std.testing.expect(ion.eq.ionEqElements(elems, parsed.elements));
+    try std.testing.expect(ion.eq.ionEqElements(elems, parsed));
 }
 
 test "ion-tests equiv groups" {
