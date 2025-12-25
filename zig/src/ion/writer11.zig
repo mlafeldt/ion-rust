@@ -966,36 +966,48 @@ fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
 }
 
 fn writeSetSymbolsDirective(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), user_texts: []const []const u8) IonError!void {
-    // Encode a system macro invocation:
+    // Encode a length-prefixed system macro invocation:
     //   (:$ion::set_symbols <text*>)
-    // using the conformance-style encoding that our binary reader accepts:
-    //   EF 13 <presence> <args...>
-    // where presence is:
-    //   0 => no args
-    //   1 => single tagged value
-    //   2 => tagged expression group
-    try appendByte(out, allocator, 0xEF);
-    try appendByte(out, allocator, 0x13); // system macro address 19
+    // using the `0xF5` e-expression form understood by `binary11.readMacroInvocationLengthPrefixed`.
+    //
+    // This makes the output more spec-aligned than the older conformance-specific `EF 13 <presence>`
+    // encoding.
+    //
+    // In the conformance module model, address 19 is interpreted as `set_symbols` when all args are
+    // unannotated text values.
+    //
+    // Encoding:
+    //   F5 <flexuint addr=19> <flexuint args_len> <args_bytes...>
+    // where args_bytes encodes bindings for a single variadic tagged param (zero_or_many):
+    //   <bitmap:1 byte> [ <value-expr> | <tagged-group> ]
+    // and tagged-group is:
+    //   <flexuint total_len> <payload bytes...>
+    // with payload being a concatenation of tagged value expressions.
+    var args = std.ArrayListUnmanaged(u8){};
+    defer args.deinit(allocator);
 
+    // Single variadic param => 1 bitmap byte (low 2 bits are grouping).
     if (user_texts.len == 0) {
-        try appendByte(out, allocator, 0x00);
-        return;
-    }
-    if (user_texts.len == 1) {
-        try appendByte(out, allocator, 0x01);
-        try writeString(allocator, out, user_texts[0]);
-        return;
+        try appendByte(&args, allocator, 0x00); // grouping 00 (absent)
+    } else if (user_texts.len == 1) {
+        try appendByte(&args, allocator, 0x01); // grouping 01 (single)
+        try writeString(allocator, &args, user_texts[0]);
+    } else {
+        try appendByte(&args, allocator, 0x02); // grouping 10 (group)
+
+        var payload = std.ArrayListUnmanaged(u8){};
+        defer payload.deinit(allocator);
+        for (user_texts) |t| {
+            try writeString(allocator, &payload, t);
+        }
+        try writeFlexUIntShift1(&args, allocator, payload.items.len);
+        try appendSlice(&args, allocator, payload.items);
     }
 
-    var payload = std.ArrayListUnmanaged(u8){};
-    defer payload.deinit(allocator);
-    for (user_texts) |t| {
-        try writeString(allocator, &payload, t);
-    }
-
-    try appendByte(out, allocator, 0x02);
-    try writeFlexUIntShift1(out, allocator, payload.items.len);
-    try appendSlice(out, allocator, payload.items);
+    try appendByte(out, allocator, 0xF5);
+    try writeFlexUIntShift1(out, allocator, 19);
+    try writeFlexUIntShift1(out, allocator, args.items.len);
+    try appendSlice(out, allocator, args.items);
 }
 
 fn collectUserSymbolTexts(
