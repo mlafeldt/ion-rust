@@ -143,7 +143,7 @@ Key properties:
 - `zig/src/ion/writer11.zig` (experimental / partial)
   - Emits Ion 1.1 IVM and a subset of Ion 1.1 binary value opcodes.
   - Emits lists/sexps/structs using the delimited container opcodes (`F1`/`F2`/`F3`) for simple streaming output.
-  - Intended for regression tests/ad-hoc tooling; not used by the main corpus/conformance harness yet.
+  - Intended for regression tests/ad-hoc tooling; exposed via `ion.serializeDocument(..., .binary_1_1, ...)` but not used by the main corpus/conformance harness yet.
   - Limitations: no macro/e-expression emission, and no module mutation modeling.
 
 ### Equality semantics
