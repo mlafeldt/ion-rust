@@ -999,6 +999,16 @@ pub fn writeSystemMacroInvocationLengthPrefixedTaggedVariadic(
     addr: u8,
     args: []const value.Element,
 ) IonError!void {
+    return writeSystemMacroInvocationLengthPrefixedTaggedVariadicWithOptions(allocator, out, addr, args, .{});
+}
+
+pub fn writeSystemMacroInvocationLengthPrefixedTaggedVariadicWithOptions(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    addr: u8,
+    args: []const value.Element,
+    options: Options,
+) IonError!void {
     // Writes a length-prefixed e-expression (0xF5) for a system macro at `addr` whose signature is:
     //   (<name> <tagged expr*>)
     //
@@ -1006,7 +1016,7 @@ pub fn writeSystemMacroInvocationLengthPrefixedTaggedVariadic(
     // `expandSystemMacroLengthPrefixed` cases that use a single variadic tagged parameter.
     var arg_bytes = std.ArrayListUnmanaged(u8){};
     defer arg_bytes.deinit(allocator);
-    try encodeSingleVariadicTaggedArgBindings(allocator, &arg_bytes, .{}, args);
+    try encodeSingleVariadicTaggedArgBindings(allocator, &arg_bytes, options, args);
 
     try appendByte(out, allocator, 0xF5);
     try writeFlexUIntShift1(out, allocator, addr);
