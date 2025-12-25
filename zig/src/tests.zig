@@ -393,6 +393,49 @@ test "ion 1.1 writer11 can encode macro_shape args (system $ion::make_decimal sh
     try std.testing.expect(elems.len == 1 and ion.eq.ionEqElements(elems, &.{expected}));
 }
 
+test "ion 1.1 writer11 can emit unqualified user macro invocation (non-length-prefixed)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Macro at address 1:
+    //   (macro m (flex_uint::x*) (% x))
+    const body_sym_percent = try ion.value.makeSymbol(&arena, "%");
+    const body_sym_x = try ion.value.makeSymbol(&arena, "x");
+    const body_sx_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    body_sx_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_percent } };
+    body_sx_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_x } };
+    const body_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = body_sx_items } };
+
+    const macro_params = [_]ion.macro.Param{.{ .ty = .flex_uint, .card = .zero_or_many, .name = "x", .shape = null }};
+    const macro_body = [_]ion.value.Element{body_elem};
+    const macro_defs = try std.testing.allocator.alloc(ion.macro.Macro, 2);
+    defer std.testing.allocator.free(macro_defs);
+    macro_defs[0] = .{ .name = null, .params = &.{}, .body = &.{} };
+    macro_defs[1] = .{ .name = "m", .params = @constCast(macro_params[0..]), .body = &macro_body };
+    const mactab: ion.macro.MacroTable = .{ .macros = macro_defs };
+
+    const arg_vals = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 9 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 10 } } },
+    };
+    const args_by_param = [_][]const ion.value.Element{&arg_vals};
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeUserMacroInvocationAtAddressWithParams(
+        std.testing.allocator,
+        &out,
+        1,
+        macro_params[0..],
+        args_by_param[0..],
+        .{},
+    );
+
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, out.items, &mactab);
+    try std.testing.expect(ion.eq.ionEqElements(elems, &arg_vals));
+}
+
 test "ion-tests equiv groups" {
     const allocator = std.testing.allocator;
     const skip = try concatSkipLists(allocator, &.{ &global_skip_list, &equivs_skip_list });

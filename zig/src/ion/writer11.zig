@@ -1054,12 +1054,30 @@ pub fn writeMacroInvocationLengthPrefixedWithParams(
 
     var arg_bytes = std.ArrayListUnmanaged(u8){};
     defer arg_bytes.deinit(allocator);
-    try encodeLengthPrefixedArgBindings(allocator, &arg_bytes, params, args_by_param, options);
+    try encodeArgBindings(allocator, &arg_bytes, params, args_by_param, options);
 
     try appendByte(out, allocator, 0xF5);
     try writeFlexUIntShift1(out, allocator, addr);
     try writeFlexUIntShift1(out, allocator, arg_bytes.items.len);
     try appendSlice(out, allocator, arg_bytes.items);
+}
+
+pub fn writeUserMacroInvocationAtAddressWithParams(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    addr: u8,
+    params: []const ion.macro.Param,
+    args_by_param: []const []const value.Element,
+    options: Options,
+) IonError!void {
+    // Writes an unqualified (non-length-prefixed) e-expression whose address is encoded directly
+    // in the opcode byte (0x00..0x3F) and whose arguments are encoded using the same signature-
+    // driven encoding as the length-prefixed form, just without the outer args length.
+    //
+    // This corresponds to `binary11.readUserMacroInvocationAt` for user-defined macros.
+    if (addr > 0x3F) return IonError.InvalidIon;
+    try appendByte(out, allocator, addr);
+    try encodeArgBindings(allocator, out, params, args_by_param, options);
 }
 
 fn encodeSingleVariadicTaggedArgBindings(
@@ -1095,6 +1113,16 @@ fn bitmapSizeInBytesForParams(params: []const ion.macro.Param) usize {
         if (p.card != .one) variadic += 1;
     }
     return ((variadic * bits_per_param) + 7) / bits_per_byte;
+}
+
+fn encodeArgBindings(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    params: []const ion.macro.Param,
+    args_by_param: []const []const value.Element,
+    options: Options,
+) IonError!void {
+    return encodeLengthPrefixedArgBindings(allocator, out, params, args_by_param, options);
 }
 
 fn encodeLengthPrefixedArgBindingsTagged(
