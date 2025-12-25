@@ -1220,6 +1220,107 @@ fn writeFlexIntShift1(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
     }
 }
 
+fn writeFlexUIntShift1Int(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, v: value.Int) IonError!void {
+    // Generalization of `writeFlexUIntShift1` that supports BigInt inputs.
+    switch (v) {
+        .small => |i| {
+            if (i < 0) return IonError.InvalidIon;
+            var tmp = std.math.big.int.Managed.init(allocator) catch return IonError.OutOfMemory;
+            defer tmp.deinit();
+            tmp.set(@as(u128, @intCast(i))) catch return IonError.OutOfMemory;
+            return writeFlexUIntShift1Big(out, allocator, tmp.toConst());
+        },
+        .big => |p| {
+            if (!p.*.toConst().positive) return IonError.InvalidIon;
+            return writeFlexUIntShift1Big(out, allocator, p.*.toConst());
+        },
+    }
+}
+
+fn writeFlexUIntShift1Big(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, c: std.math.big.int.Const) IonError!void {
+    // FlexUInt encoding uses a tag bit that is the least-significant set bit of the underlying
+    // little-endian integer. If the tag bit is at position (N-1), the encoding is N bytes long and
+    // the value is obtained by shifting right by N bits.
+    if (!c.positive) return IonError.InvalidIon;
+    const bits: usize = c.bitCountAbs();
+    const n: usize = @max(@as(usize, 1), (bits + 6) / 7);
+
+    var val = std.math.big.int.Managed.init(allocator) catch return IonError.OutOfMemory;
+    defer val.deinit();
+    val.copy(c) catch return IonError.OutOfMemory;
+
+    var shifted = std.math.big.int.Managed.init(allocator) catch return IonError.OutOfMemory;
+    defer shifted.deinit();
+    shifted.shiftLeft(&val, n) catch return IonError.OutOfMemory;
+
+    var tag = std.math.big.int.Managed.init(allocator) catch return IonError.OutOfMemory;
+    defer tag.deinit();
+    tag.set(@as(u8, 1)) catch return IonError.OutOfMemory;
+    tag.shiftLeft(&tag, n - 1) catch return IonError.OutOfMemory;
+
+    var raw = std.math.big.int.Managed.init(allocator) catch return IonError.OutOfMemory;
+    defer raw.deinit();
+    raw.add(&shifted, &tag) catch return IonError.OutOfMemory;
+
+    const buf = allocator.alloc(u8, n) catch return IonError.OutOfMemory;
+    defer allocator.free(buf);
+    raw.toConst().writeTwosComplement(buf, .little);
+    try appendSlice(out, allocator, buf);
+}
+
+fn writeFlexIntShift1Int(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, v: value.Int) IonError!void {
+    // Generalization of `writeFlexIntShift1` that supports BigInt inputs.
+    const c = switch (v) {
+        .small => |i| blk: {
+            var tmp = std.math.big.int.Managed.init(allocator) catch return IonError.OutOfMemory;
+            defer tmp.deinit();
+            tmp.set(i) catch return IonError.OutOfMemory;
+            break :blk tmp.toConst();
+        },
+        .big => |p| p.*.toConst(),
+    };
+
+    var n: usize = 1;
+    while (true) : (n += 1) {
+        const width: usize = n * 7;
+        if (c.fitsInTwosComp(.signed, width)) break;
+        if (n > 1_000_000) return IonError.InvalidIon; // sanity cap
+    }
+
+    const width: usize = n * 7;
+    const bytes_len: usize = (width + 7) / 8;
+    var payload_bytes = std.ArrayListUnmanaged(u8){};
+    defer payload_bytes.deinit(allocator);
+    payload_bytes.resize(allocator, bytes_len) catch return IonError.OutOfMemory;
+    @memset(payload_bytes.items, 0);
+    c.writePackedTwosComplement(payload_bytes.items, 0, width, .little);
+
+    var payload_u = std.math.big.int.Managed.init(allocator) catch return IonError.OutOfMemory;
+    defer payload_u.deinit();
+    payload_u.ensureCapacity((bytes_len * 8 + @bitSizeOf(std.math.big.Limb) - 1) / @bitSizeOf(std.math.big.Limb)) catch return IonError.OutOfMemory;
+    var m = payload_u.toMutable();
+    m.readTwosComplement(payload_bytes.items, bytes_len * 8, .little, .unsigned);
+    payload_u.setMetadata(true, m.len);
+
+    var shifted = std.math.big.int.Managed.init(allocator) catch return IonError.OutOfMemory;
+    defer shifted.deinit();
+    shifted.shiftLeft(&payload_u, n) catch return IonError.OutOfMemory;
+
+    var tag = std.math.big.int.Managed.init(allocator) catch return IonError.OutOfMemory;
+    defer tag.deinit();
+    tag.set(@as(u8, 1)) catch return IonError.OutOfMemory;
+    tag.shiftLeft(&tag, n - 1) catch return IonError.OutOfMemory;
+
+    var raw = std.math.big.int.Managed.init(allocator) catch return IonError.OutOfMemory;
+    defer raw.deinit();
+    raw.add(&shifted, &tag) catch return IonError.OutOfMemory;
+
+    const buf = allocator.alloc(u8, n) catch return IonError.OutOfMemory;
+    defer allocator.free(buf);
+    raw.toConst().writeTwosComplement(buf, .little);
+    try appendSlice(out, allocator, buf);
+}
+
 fn appendByte(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, b: u8) IonError!void {
     out.append(allocator, b) catch return IonError.OutOfMemory;
 }
