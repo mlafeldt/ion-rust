@@ -171,7 +171,7 @@ test "zig ion serializeDocument binary_1_1 emits Ion 1.1 IVM" {
 
 test "zig ion serializeDocument binary_1_1 rejects SID-only symbols" {
     const elems = &[_]ion.value.Element{
-        .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } },
+        .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 200, .text = null } } },
     };
     try std.testing.expectError(ion.IonError.InvalidIon, ion.serializeDocument(std.testing.allocator, .binary_1_1, elems));
 }
@@ -1876,8 +1876,8 @@ test "ion 1.1 binary writer roundtrip (annotations)" {
 
 test "ion 1.1 binary_1_1 serialize rejects sid-only annotations" {
     var ann_sids_arr = [_]ion.value.Symbol{
-        .{ .sid = 1, .text = null },
-        .{ .sid = 2, .text = null },
+        .{ .sid = 200, .text = null },
+        .{ .sid = 201, .text = null },
     };
     const ann_sids: []ion.value.Symbol = ann_sids_arr[0..];
 

@@ -620,6 +620,30 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
         try appendSlice(out, allocator, t);
         return;
     }
+
+    if (options.symbol_encoding == .inline_text_only) {
+        // We don't have module/symbol-address state in this mode, but we can still inline known
+        // Ion 1.1 system symbol texts by SID.
+        if (s.sid) |sid| {
+            if (sid > 0 and sid <= symtab.SystemSymtab11.max_id) {
+                if (symtab.SystemSymtab11.textForSid(sid)) |sys_text| {
+                    if (!std.unicode.utf8ValidateSlice(sys_text)) return IonError.InvalidIon;
+                    if (sys_text.len <= 15) {
+                        try appendByte(out, allocator, 0xA0 + @as(u8, @intCast(sys_text.len)));
+                        try appendSlice(out, allocator, sys_text);
+                        return;
+                    }
+
+                    try appendByte(out, allocator, 0xFA);
+                    try writeFlexUIntShift1(out, allocator, sys_text.len);
+                    try appendSlice(out, allocator, sys_text);
+                    return;
+                }
+            }
+        }
+        return IonError.InvalidIon;
+    }
+
     if (s.sid) |sid| {
         if (options.symbol_encoding == .inline_text_only) return IonError.InvalidIon;
 
@@ -732,9 +756,28 @@ fn writeAnnotationsSequence(allocator: std.mem.Allocator, out: *std.ArrayListUnm
     if (anns.len == 0) return;
 
     if (options.symbol_encoding == .inline_text_only) {
-        for (anns) |a| {
-            if (a.text == null) return IonError.InvalidIon;
+        switch (anns.len) {
+            1 => {
+                try appendByte(out, allocator, 0xE7);
+                try writeFlexSymSymbol(out, allocator, options, anns[0]);
+            },
+            2 => {
+                try appendByte(out, allocator, 0xE8);
+                try writeFlexSymSymbol(out, allocator, options, anns[0]);
+                try writeFlexSymSymbol(out, allocator, options, anns[1]);
+            },
+            else => {
+                var seq = std.ArrayListUnmanaged(u8){};
+                defer seq.deinit(allocator);
+                for (anns) |a| {
+                    try writeFlexSymSymbol(&seq, allocator, options, a);
+                }
+                try appendByte(out, allocator, 0xE9);
+                try writeFlexUIntShift1(out, allocator, seq.items.len);
+                try appendSlice(out, allocator, seq.items);
+            },
         }
+        return;
     }
 
     var all_sid_only = true;
@@ -802,7 +845,16 @@ fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
         return;
     }
     if (sym.sid) |sid| {
-        if (options.symbol_encoding == .inline_text_only) return IonError.InvalidIon;
+        if (options.symbol_encoding == .inline_text_only) {
+            if (sid > 0 and sid <= symtab.SystemSymtab11.max_id) {
+                const sys_text = symtab.SystemSymtab11.textForSid(sid) orelse return IonError.InvalidIon;
+                if (!std.unicode.utf8ValidateSlice(sys_text)) return IonError.InvalidIon;
+                try writeFlexIntShift1(out, allocator, -@as(i64, @intCast(sys_text.len)));
+                try appendSlice(out, allocator, sys_text);
+                return;
+            }
+            return IonError.InvalidIon;
+        }
         if (sid == 0) {
             // FlexSym escape: FlexInt(0) then 0x60 => symbol 0.
             try writeFlexIntShift1(out, allocator, 0);

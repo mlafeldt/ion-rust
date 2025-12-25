@@ -36,7 +36,7 @@ Key properties:
     - Conformance-runner-only entrypoint for parsing Ion 1.1 *text* using the conformance suite's "default module" symbol model.
   - `serializeDocument(allocator, format, elements)`:
     - Supports `Format.binary` (Ion 1.0), `Format.binary_1_1` (Ion 1.1, experimental), and text formats (compact/lines/pretty).
-    - `Format.binary_1_1` currently emits symbols as inline text only (no module/symbol-address state), so it rejects SID-only symbols (including in annotations and field names).
+    - `Format.binary_1_1` currently emits symbols as inline text only (no module/symbol-address state), so it rejects SID-only non-system symbols (including in annotations and field names). Known Ion 1.1 system symbols (SIDs 1..62) are inlined by text.
   - `Document` owns an arena and a slice of parsed `Element`s; `deinit()` frees the arena.
 
 ### Data model
