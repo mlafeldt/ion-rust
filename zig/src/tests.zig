@@ -1874,6 +1874,37 @@ test "ion 1.1 binary writer roundtrip (annotations)" {
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
 }
 
+test "ion 1.1 binary_1_1 serialize rejects sid-only annotations" {
+    var ann_sids_arr = [_]ion.value.Symbol{
+        .{ .sid = 1, .text = null },
+        .{ .sid = 2, .text = null },
+    };
+    const ann_sids: []ion.value.Symbol = ann_sids_arr[0..];
+
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = ann_sids, .value = .{ .string = "x" } },
+    };
+
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.serializeDocument(std.testing.allocator, .binary_1_1, doc));
+}
+
+test "ion 1.1 binary_1_1 serialize rejects sid-only field names" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const struct_fields = try arena.allocator().alloc(ion.value.StructField, 1);
+    struct_fields[0] = .{
+        .name = .{ .sid = 200, .text = null },
+        .value = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+    };
+
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = struct_fields } } },
+    };
+
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.serializeDocument(std.testing.allocator, .binary_1_1, doc));
+}
+
 test "ion 1.1 binary writer roundtrip (typed nulls)" {
     const doc = &[_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .null = .null } },

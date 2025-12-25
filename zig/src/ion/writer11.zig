@@ -41,7 +41,7 @@ pub fn writeBinary11WithOptions(allocator: std.mem.Allocator, doc: []const value
 
 fn writeElement(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, e: value.Element) IonError!void {
     if (e.annotations.len != 0) {
-        try writeAnnotationsSequence(allocator, out, e.annotations);
+        try writeAnnotationsSequence(allocator, out, options, e.annotations);
     }
     try writeValue(allocator, out, options, e.value);
 }
@@ -681,7 +681,7 @@ fn writeDelimitedSexp(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged
 fn writeDelimitedStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, st: value.Struct) IonError!void {
     try appendByte(out, allocator, 0xF3);
     for (st.fields) |f| {
-        try writeFlexSymSymbol(out, allocator, f.name);
+        try writeFlexSymSymbol(out, allocator, options, f.name);
         try writeElement(allocator, out, options, f.value);
     }
     // Delimited struct close marker: FlexSym escape F0.
@@ -713,7 +713,7 @@ fn writeStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
 
     try writeFlexUIntShift1(&body, allocator, 0);
     for (st.fields) |f| {
-        try writeFlexSymSymbol(&body, allocator, f.name);
+        try writeFlexSymSymbol(&body, allocator, options, f.name);
         try writeElement(allocator, &body, options, f.value);
     }
 
@@ -728,8 +728,14 @@ fn writeStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
     try appendSlice(out, allocator, body.items);
 }
 
-fn writeAnnotationsSequence(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), anns: []const value.Symbol) IonError!void {
+fn writeAnnotationsSequence(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, anns: []const value.Symbol) IonError!void {
     if (anns.len == 0) return;
+
+    if (options.symbol_encoding == .inline_text_only) {
+        for (anns) |a| {
+            if (a.text == null) return IonError.InvalidIon;
+        }
+    }
 
     var all_sid_only = true;
     for (anns) |a| {
@@ -767,18 +773,18 @@ fn writeAnnotationsSequence(allocator: std.mem.Allocator, out: *std.ArrayListUnm
     switch (anns.len) {
         1 => {
             try appendByte(out, allocator, 0xE7);
-            try writeFlexSymSymbol(out, allocator, anns[0]);
+            try writeFlexSymSymbol(out, allocator, options, anns[0]);
         },
         2 => {
             try appendByte(out, allocator, 0xE8);
-            try writeFlexSymSymbol(out, allocator, anns[0]);
-            try writeFlexSymSymbol(out, allocator, anns[1]);
+            try writeFlexSymSymbol(out, allocator, options, anns[0]);
+            try writeFlexSymSymbol(out, allocator, options, anns[1]);
         },
         else => {
             var seq = std.ArrayListUnmanaged(u8){};
             defer seq.deinit(allocator);
             for (anns) |a| {
-                try writeFlexSymSymbol(&seq, allocator, a);
+                try writeFlexSymSymbol(&seq, allocator, options, a);
             }
             try appendByte(out, allocator, 0xE9);
             try writeFlexUIntShift1(out, allocator, seq.items.len);
@@ -787,7 +793,7 @@ fn writeAnnotationsSequence(allocator: std.mem.Allocator, out: *std.ArrayListUnm
     }
 }
 
-fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, sym: value.Symbol) IonError!void {
+fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, options: Options, sym: value.Symbol) IonError!void {
     if (sym.text) |t| {
         if (!std.unicode.utf8ValidateSlice(t)) return IonError.InvalidIon;
         // FlexSym inline text: FlexInt(-len) then bytes.
@@ -796,6 +802,7 @@ fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
         return;
     }
     if (sym.sid) |sid| {
+        if (options.symbol_encoding == .inline_text_only) return IonError.InvalidIon;
         if (sid == 0) {
             // FlexSym escape: FlexInt(0) then 0x60 => symbol 0.
             try writeFlexIntShift1(out, allocator, 0);
