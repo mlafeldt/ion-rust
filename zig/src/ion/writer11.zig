@@ -32,6 +32,10 @@ pub const Options = struct {
     /// When present and `symbol_encoding == .addresses`, symbols with matching `text` will be
     /// encoded using E1..E3 (or FlexSym positive addresses) instead of inline text.
     user_symbol_ids: ?*const std.StringHashMapUnmanaged(u32) = null,
+
+    /// Optional macro table for encoding `ParamType.macro_shape` arguments.
+    /// When absent, writing `macro_shape` arguments is unsupported.
+    mactab: ?*const ion.macro.MacroTable = null,
 };
 
 pub fn writeBinary11(allocator: std.mem.Allocator, doc: []const value.Element) IonError![]u8 {
@@ -1193,19 +1197,19 @@ fn encodeLengthPrefixedArgBindings(
         const args = args_by_param[idx];
 
         if (p.card == .one) {
-            try writeArgValue(allocator, out, options, p.ty, args[0]);
+            try writeArgValue(allocator, out, options, p, args[0]);
             continue;
         }
 
         const grouping: u2 = if (args.len == 0) 0b00 else if (args.len == 1) 0b01 else 0b10;
         switch (grouping) {
             0b00 => {},
-            0b01 => try writeArgValue(allocator, out, options, p.ty, args[0]),
+            0b01 => try writeArgValue(allocator, out, options, p, args[0]),
             0b10 => {
                 // Use a length-prefixed group payload (not the delimited/chunked form).
                 var payload = std.ArrayListUnmanaged(u8){};
                 defer payload.deinit(allocator);
-                for (args) |e| try writeArgValue(allocator, &payload, options, p.ty, e);
+                for (args) |e| try writeArgValue(allocator, &payload, options, p, e);
                 try writeFlexUIntShift1(out, allocator, payload.items.len);
                 try appendSlice(out, allocator, payload.items);
             },
@@ -1218,13 +1222,13 @@ fn writeArgValue(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
     options: Options,
-    ty: ion.macro.ParamType,
+    p: ion.macro.Param,
     e: value.Element,
 ) IonError!void {
     if (e.annotations.len != 0) return IonError.InvalidIon;
-    return switch (ty) {
+    return switch (p.ty) {
         .tagged => writeElement(allocator, out, options, e),
-        .macro_shape => IonError.Unsupported,
+        .macro_shape => writeMacroShapeArg(allocator, out, options, p, e),
         .flex_uint => blk: {
             if (e.value != .int) return IonError.InvalidIon;
             try writeFlexUIntShift1Int(out, allocator, e.value.int);
@@ -1243,7 +1247,7 @@ fn writeArgValue(
         .uint8, .uint16, .uint32, .uint64 => blk: {
             if (e.value != .int) return IonError.InvalidIon;
             const u = try intToU64(e.value.int);
-            const n: usize = switch (ty) {
+            const n: usize = switch (p.ty) {
                 .uint8 => 1,
                 .uint16 => 2,
                 .uint32 => 4,
@@ -1263,7 +1267,7 @@ fn writeArgValue(
         .int8, .int16, .int32, .int64 => blk: {
             if (e.value != .int) return IonError.InvalidIon;
             const i = try intToI64(e.value.int);
-            const n: usize = switch (ty) {
+            const n: usize = switch (p.ty) {
                 .int8 => 1,
                 .int16 => 2,
                 .int32 => 4,
@@ -1304,6 +1308,42 @@ fn writeArgValue(
             break :blk;
         },
     };
+}
+
+fn writeMacroShapeArg(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    options: Options,
+    p: ion.macro.Param,
+    e: value.Element,
+) IonError!void {
+    const shape = p.shape orelse return IonError.InvalidIon;
+    if (e.value != .sexp) return IonError.InvalidIon;
+    const args = e.value.sexp;
+
+    // Qualified system macro shape: `$ion::make_decimal`.
+    if (shape.module) |m| {
+        if (!std.mem.eql(u8, m, "$ion")) return IonError.Unsupported;
+        if (std.mem.eql(u8, shape.name, "make_decimal")) {
+            if (args.len != 2) return IonError.InvalidIon;
+            // Decoder expects two tagged value expressions.
+            try writeElement(allocator, out, options, args[0]);
+            try writeElement(allocator, out, options, args[1]);
+            return;
+        }
+        return IonError.Unsupported;
+    }
+
+    const tab = options.mactab orelse return IonError.Unsupported;
+    const m = tab.macroForName(shape.name) orelse return IonError.Unsupported;
+    if (args.len != m.params.len) return IonError.InvalidIon;
+
+    for (m.params, 0..) |mp, idx| {
+        if (mp.card != .one) return IonError.Unsupported;
+        // Match decoder: tagged params are encoded as a value expression; tagless params are
+        // encoded using the tagless byte representation.
+        try writeArgValue(allocator, out, options, mp, args[idx]);
+    }
 }
 
 fn intToU64(v: value.Int) IonError!u64 {
