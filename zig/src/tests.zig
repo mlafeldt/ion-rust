@@ -176,6 +176,16 @@ test "zig ion serializeDocument binary_1_1 rejects SID-only symbols" {
     try std.testing.expectError(ion.IonError.InvalidIon, ion.serializeDocument(std.testing.allocator, .binary_1_1, elems));
 }
 
+test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
+    const elems = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } }, // $ion
+    };
+    const bytes = try ion.serializeDocument(std.testing.allocator, .binary_1_1, elems);
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xA4, '$', 'i', 'o', 'n' }) != null);
+}
+
 test "zig ion serializeDocument binary_1_1 roundtrips values" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
