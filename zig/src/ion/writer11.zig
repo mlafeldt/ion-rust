@@ -1,6 +1,8 @@
 //! Ion 1.1 binary writer (partial).
 //!
-//! This targets a value-only subset (no general e-expression/macro emission).
+//! This started as a value-only writer, but has grown a small set of low-level helpers for
+//! emitting Ion 1.1 binary e-expressions (including conformance-driven directive/macro patterns).
+//! It is still not a full Ion 1.1 module/macro system implementation.
 //! For self-contained output, it can emit a minimal module prelude (`set_symbols`) so user symbols
 //! can be encoded by address without relying on external module state.
 //!
@@ -1128,18 +1130,17 @@ pub fn writeMacroInvocationLengthPrefixedWithParams(
 pub fn writeUserMacroInvocationAtAddressWithParams(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
-    addr: u8,
+    addr: usize,
     params: []const ion.macro.Param,
     args_by_param: []const []const value.Element,
     options: Options,
 ) IonError!void {
     // Writes an unqualified (non-length-prefixed) e-expression whose address is encoded directly
-    // in the opcode byte (0x00..0x3F) and whose arguments are encoded using the same signature-
-    // driven encoding as the length-prefixed form, just without the outer args length.
+    // in the opcode bytes and whose arguments are encoded using the same signature-driven encoding
+    // as the length-prefixed form, just without the outer args length.
     //
     // This corresponds to `binary11.readUserMacroInvocationAt` for user-defined macros.
-    if (addr > 0x3F) return IonError.InvalidIon;
-    try appendByte(out, allocator, addr);
+    try writeEExpAddress(out, allocator, addr);
     try encodeArgBindings(allocator, out, params, args_by_param, options);
 }
 
@@ -1186,6 +1187,36 @@ fn encodeArgBindings(
     options: Options,
 ) IonError!void {
     return encodeLengthPrefixedArgBindings(allocator, out, params, args_by_param, options);
+}
+
+fn writeEExpAddress(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, addr: usize) IonError!void {
+    // Match the address encoding forms that `binary11.Decoder.readValueExpr` supports:
+    // - 6-bit: opcode is the address (0x00..0x3F)
+    // - 12-bit: 0x40..0x4F + fixed byte, bias 64
+    // - 20-bit: 0x50..0x5F + fixed u16, bias 4160
+    if (addr <= 0x3F) {
+        try appendByte(out, allocator, @intCast(addr));
+        return;
+    }
+    if (addr >= 64 and addr <= 4159) {
+        const x: usize = addr - 64;
+        const nibble: u8 = @intCast((x >> 8) & 0x0F);
+        const fixed: u8 = @intCast(x & 0xFF);
+        try appendByte(out, allocator, 0x40 | nibble);
+        try appendByte(out, allocator, fixed);
+        return;
+    }
+    if (addr >= 4160 and addr <= 1_052_735) {
+        const y: usize = addr - 4160;
+        const nibble: u8 = @intCast((y >> 16) & 0x0F);
+        const fixed_u16: u16 = @intCast(y & 0xFFFF);
+        try appendByte(out, allocator, 0x50 | nibble);
+        var buf: [2]u8 = undefined;
+        std.mem.writeInt(u16, &buf, fixed_u16, .little);
+        try appendSlice(out, allocator, &buf);
+        return;
+    }
+    return IonError.Unsupported;
 }
 
 fn encodeLengthPrefixedArgBindingsTagged(
