@@ -11,6 +11,7 @@
 const std = @import("std");
 const ion = @import("ion.zig");
 const conformance = @import("conformance/runner.zig");
+const conformance_catalog = @import("conformance/catalog.zig");
 
 fn appendFlexUIntShift1(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged(u8), v: usize) !void {
     const value: u128 = @intCast(v);
@@ -1304,6 +1305,41 @@ test "ion-tests conformance suite (partial)" {
     );
 
     try std.testing.expect(stats.passed + stats.skipped == stats.branches);
+}
+
+test "ion-tests catalog parses (shared symbol tables)" {
+    var cat = try conformance_catalog.loadIonTestsCatalog(std.testing.allocator, "ion-tests/catalog/catalog.ion");
+    defer cat.deinit();
+
+    const empty = cat.lookupSharedSymtab("empty", 1) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), empty.symbols.len);
+
+    const abcs1 = cat.lookupSharedSymtab("abcs", 1) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), abcs1.symbols.len);
+    try std.testing.expect(abcs1.symbols[0] != null);
+    try std.testing.expectEqualStrings("a", abcs1.symbols[0].?);
+
+    const abcs2 = cat.lookupSharedSymtab("abcs", 2) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 2), abcs2.symbols.len);
+    try std.testing.expectEqualStrings("a", abcs2.symbols[0].?);
+    try std.testing.expectEqualStrings("b", abcs2.symbols[1].?);
+
+    const mnop1 = cat.lookupSharedSymtab("mnop", 1) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), mnop1.symbols.len);
+    try std.testing.expectEqualStrings("m", mnop1.symbols[0].?);
+
+    const mnop3 = cat.lookupSharedSymtab("mnop", 3) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 3), mnop3.symbols.len);
+    try std.testing.expectEqualStrings("m", mnop3.symbols[0].?);
+    try std.testing.expectEqualStrings("n", mnop3.symbols[1].?);
+    try std.testing.expectEqualStrings("o", mnop3.symbols[2].?);
+
+    const mnop4 = cat.lookupSharedSymtab("mnop", 4) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 4), mnop4.symbols.len);
+    try std.testing.expect(mnop4.symbols[0] == null);
+    try std.testing.expectEqualStrings("n", mnop4.symbols[1].?);
+    try std.testing.expectEqualStrings("o", mnop4.symbols[2].?);
+    try std.testing.expectEqualStrings("p", mnop4.symbols[3].?);
 }
 
 fn roundtripEq(allocator: std.mem.Allocator, data: []const u8, format1: ion.Format, format2: ion.Format) !void {

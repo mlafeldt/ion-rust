@@ -178,7 +178,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
-- As of 2025-12-26, `cd zig && zig build test --summary all` runs 98 Zig tests; all pass (0 skips).
+- As of 2025-12-26, `cd zig && zig build test --summary all` runs 99 Zig tests; all pass (0 skips).
 
 ### Skip list (currently empty)
 
@@ -226,6 +226,7 @@ The `ion-tests/` repo contains multiple suites. The Zig harness covers the two c
      - To reproduce totals: `cd zig && zig run src/conformance_totals.zig -- --top 15`
 3) Notes / remaining work:
    - Conformance text parsing for Ion 1.1 uses a conformance-only "default module" symbol model (see `ion.parseDocumentWithMacroTableIon11Modules`).
+   - Conformance evaluation consults the `ion-tests` catalog (`ion-tests/catalog/catalog.ion`) when modeling shared symbol table imports in local symbol tables (see `zig/src/conformance/catalog.zig`).
    - The conformance runner's abstract evaluator supports the same system macro subset as the Ion 1.1 text parser (`none`, `values`, `default`, `repeat`, `sum`, `delta`, `meta`, `annotate`, `make_*`, `flatten`) so new conformance cases are less likely to require special-casing.
    - Passing `ion-tests/conformance` does not imply a complete Ion 1.1 implementation; it means the subset exercised by the suite is implemented.
 

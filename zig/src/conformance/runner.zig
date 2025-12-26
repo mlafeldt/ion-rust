@@ -4,6 +4,7 @@ const value = ion.value;
 const denote = @import("denote.zig");
 const tdl_eval = @import("../ion/tdl_eval.zig");
 const shared_module_catalog11 = @import("../ion/shared_module_catalog11.zig");
+const catalog = @import("catalog.zig");
 
 pub const RunError = error{
     InvalidConformanceDsl,
@@ -32,11 +33,7 @@ const Absence = struct {
 };
 
 const SharedSymtabCatalog = struct {
-    const Entry = struct {
-        name: []const u8,
-        version: u32,
-        symbols: []const ?[]const u8,
-    };
+    const Entry = catalog.SharedSymtabEntry;
 
     // Minimal shared symbol table catalog required by the conformance suite.
     // Entries here are referenced by `ion-tests/conformance/local_symtab_imports.ion`.
@@ -88,6 +85,7 @@ const State = struct {
     pending_error: bool = false,
     mactab: ?ion.macro.MacroTable = null,
     case_label: ?[]const u8 = null,
+    ion_tests_catalog: ?*const catalog.Catalog = null,
 
     fn deinit(self: *State, allocator: std.mem.Allocator) void {
         // Nodes are arena-allocated in `evalSeq` and freed all at once; nothing to do here.
@@ -727,6 +725,7 @@ fn applyIstStruct(
     prev_symtab: []const ?[]const u8,
     prev_symtab_max_id: u32,
     elem: value.Element,
+    ion_tests_catalog: ?*const catalog.Catalog,
 ) RunError!void {
     // Only struct-valued `$ion_symbol_table` annotations are symbol tables; other types pass through.
     if (!(elem.value == .@"struct" or (elem.value == .null and elem.value.null == .@"struct"))) return;
@@ -827,11 +826,20 @@ fn applyIstStruct(
 
                 const name = name_opt orelse continue;
 
-                const exact = SharedSymtabCatalog.lookup(name, ver);
+                const exact = if (ion_tests_catalog) |cat|
+                    cat.lookupSharedSymtab(name, ver)
+                else
+                    SharedSymtabCatalog.lookup(name, ver);
                 const requested_max_valid = max_id_opt;
 
                 if (exact == null and requested_max_valid == null) return RunError.InvalidConformanceDsl;
-                const chosen = exact orelse if (requested_max_valid != null) SharedSymtabCatalog.bestForName(name) else null;
+                const chosen = exact orelse if (requested_max_valid != null)
+                    if (ion_tests_catalog) |cat|
+                        cat.bestSharedSymtabForName(name)
+                    else
+                        SharedSymtabCatalog.bestForName(name)
+                else
+                    null;
 
                 if (chosen) |tab| {
                     // If we have an exact match, malformed max_id is ignored and the table's full size is used.
@@ -1870,7 +1878,7 @@ fn evalAbstractDocument(arena: *value.Arena, state: *State, absences: *std.AutoH
                 if (isIstStructTopLevel(symtab.items, symtab_max_id, e)) {
                     const prev_items = a.dupe(?[]const u8, symtab.items) catch return RunError.OutOfMemory;
                     const prev_max = symtab_max_id;
-                    try applyIstStruct(version_ctx, a, &symtab, &symtab_max_id, absences, prev_items, prev_max, e);
+                    try applyIstStruct(version_ctx, a, &symtab, &symtab_max_id, absences, prev_items, prev_max, e, state.ion_tests_catalog);
                     continue;
                 }
                 const expanded = try resolveDelayedInElement(arena, symtab.items, symtab_max_id, absences, e);
@@ -2912,6 +2920,12 @@ pub fn runConformanceFile(allocator: std.mem.Allocator, data: []const u8, stats:
     defer arena.deinit();
     const elements = ion.text.parseTopLevelConformanceDslNoStringConcat(&arena, data) catch return RunError.InvalidConformanceDsl;
 
+    var ion_tests_catalog = catalog.loadIonTestsCatalog(allocator, "ion-tests/catalog/catalog.ion") catch |e| switch (e) {
+        error.OutOfMemory => return RunError.OutOfMemory,
+        else => return RunError.InvalidConformanceDsl,
+    };
+    defer ion_tests_catalog.deinit();
+
     for (elements) |top| {
         if (top.value != .sexp) continue;
         const sx = top.value.sexp;
@@ -2920,10 +2934,12 @@ pub fn runConformanceFile(allocator: std.mem.Allocator, data: []const u8, stats:
         if (std.mem.eql(u8, head, "ion_1_x")) {
             stats.cases += 1;
             var state_10 = State{ .version = .ion_1_0 };
+            state_10.ion_tests_catalog = &ion_tests_catalog;
             defer state_10.deinit(allocator);
             try evalSeq(allocator, stats, &state_10, sx[1..]);
 
             var state_11 = State{ .version = .ion_1_1 };
+            state_11.ion_tests_catalog = &ion_tests_catalog;
             defer state_11.deinit(allocator);
             try evalSeq(allocator, stats, &state_11, sx[1..]);
             continue;
@@ -2933,6 +2949,7 @@ pub fn runConformanceFile(allocator: std.mem.Allocator, data: []const u8, stats:
 
         stats.cases += 1;
         var state = State{ .version = version };
+        state.ion_tests_catalog = &ion_tests_catalog;
         defer state.deinit(allocator);
         try evalSeq(allocator, stats, &state, sx[1..]);
     }
