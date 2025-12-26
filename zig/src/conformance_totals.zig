@@ -1,5 +1,6 @@
 const std = @import("std");
 const conformance = @import("conformance/runner.zig");
+const conformance_catalog = @import("conformance/catalog.zig");
 
 const Entry = struct {
     path: []const u8,
@@ -67,6 +68,9 @@ pub fn main() !void {
     var walker = try dir.walk(gpa);
     defer walker.deinit();
 
+    var cat = try conformance_catalog.loadIonTestsCatalogDefault(gpa);
+    defer cat.deinit();
+
     var totals: conformance.Stats = .{};
     var entries = std.ArrayListUnmanaged(Entry){};
     defer {
@@ -85,7 +89,7 @@ pub fn main() !void {
         defer gpa.free(data);
 
         var st: conformance.Stats = .{};
-        conformance.runConformanceFile(gpa, data, &st) catch |e| {
+        conformance.runConformanceFileWithCatalog(gpa, data, &st, &cat) catch |e| {
             std.debug.print("conformance failed: {s}: {s}\n", .{ full_path, @errorName(e) });
             return e;
         };

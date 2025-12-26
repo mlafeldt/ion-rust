@@ -2914,17 +2914,16 @@ fn evalSeq(gpa: std.mem.Allocator, stats: *Stats, state: *State, items: []const 
     }
 }
 
-pub fn runConformanceFile(allocator: std.mem.Allocator, data: []const u8, stats: *Stats) RunError!void {
+pub fn runConformanceFileWithCatalog(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    stats: *Stats,
+    ion_tests_catalog: *const catalog.Catalog,
+) RunError!void {
     // Parse conformance DSL using Ion text rules *without* adjacent string literal concatenation.
     var arena = value.Arena.init(allocator) catch return RunError.OutOfMemory;
     defer arena.deinit();
     const elements = ion.text.parseTopLevelConformanceDslNoStringConcat(&arena, data) catch return RunError.InvalidConformanceDsl;
-
-    var ion_tests_catalog = catalog.loadIonTestsCatalog(allocator, "ion-tests/catalog/catalog.ion") catch |e| switch (e) {
-        error.OutOfMemory => return RunError.OutOfMemory,
-        else => return RunError.InvalidConformanceDsl,
-    };
-    defer ion_tests_catalog.deinit();
 
     for (elements) |top| {
         if (top.value != .sexp) continue;
@@ -2934,12 +2933,12 @@ pub fn runConformanceFile(allocator: std.mem.Allocator, data: []const u8, stats:
         if (std.mem.eql(u8, head, "ion_1_x")) {
             stats.cases += 1;
             var state_10 = State{ .version = .ion_1_0 };
-            state_10.ion_tests_catalog = &ion_tests_catalog;
+            state_10.ion_tests_catalog = ion_tests_catalog;
             defer state_10.deinit(allocator);
             try evalSeq(allocator, stats, &state_10, sx[1..]);
 
             var state_11 = State{ .version = .ion_1_1 };
-            state_11.ion_tests_catalog = &ion_tests_catalog;
+            state_11.ion_tests_catalog = ion_tests_catalog;
             defer state_11.deinit(allocator);
             try evalSeq(allocator, stats, &state_11, sx[1..]);
             continue;
@@ -2949,8 +2948,17 @@ pub fn runConformanceFile(allocator: std.mem.Allocator, data: []const u8, stats:
 
         stats.cases += 1;
         var state = State{ .version = version };
-        state.ion_tests_catalog = &ion_tests_catalog;
+        state.ion_tests_catalog = ion_tests_catalog;
         defer state.deinit(allocator);
         try evalSeq(allocator, stats, &state, sx[1..]);
     }
+}
+
+pub fn runConformanceFile(allocator: std.mem.Allocator, data: []const u8, stats: *Stats) RunError!void {
+    var ion_tests_catalog = catalog.loadIonTestsCatalogDefault(allocator) catch |e| switch (e) {
+        error.OutOfMemory => return RunError.OutOfMemory,
+        else => return RunError.InvalidConformanceDsl,
+    };
+    defer ion_tests_catalog.deinit();
+    return runConformanceFileWithCatalog(allocator, data, stats, &ion_tests_catalog);
 }

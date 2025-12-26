@@ -1284,17 +1284,21 @@ test "ion-tests 1_1 good roundtrip (lines -> binary_1_1 -> lines)" {
 test "ion-tests conformance suite (partial)" {
     const allocator = std.testing.allocator;
     var stats: conformance.Stats = .{};
+    var cat = try conformance_catalog.loadIonTestsCatalog(std.testing.allocator, "ion-tests/catalog/catalog.ion");
+    defer cat.deinit();
 
     const Runner = struct {
         var stats_ptr: *conformance.Stats = undefined;
+        var cat_ptr: *const conformance_catalog.Catalog = undefined;
         fn run(path: []const u8, data: []const u8) !void {
-            conformance.runConformanceFile(std.testing.allocator, data, stats_ptr) catch |e| {
+            conformance.runConformanceFileWithCatalog(std.testing.allocator, data, stats_ptr, cat_ptr) catch |e| {
                 std.debug.print("conformance failed: {s}: {s}\n", .{ path, @errorName(e) });
                 return e;
             };
         }
     };
     Runner.stats_ptr = &stats;
+    Runner.cat_ptr = &cat;
 
     try walkAndTest(
         allocator,

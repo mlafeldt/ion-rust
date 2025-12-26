@@ -1,5 +1,6 @@
 const std = @import("std");
 const runner = @import("conformance/runner.zig");
+const conformance_catalog = @import("conformance/catalog.zig");
 
 pub fn main() !void {
     var gpa_impl = std.heap.GeneralPurposeAllocator(.{}){};
@@ -18,8 +19,11 @@ pub fn main() !void {
     const data = try std.fs.cwd().readFileAlloc(gpa, path, 128 * 1024 * 1024);
     defer gpa.free(data);
 
+    var cat = try conformance_catalog.loadIonTestsCatalogDefault(gpa);
+    defer cat.deinit();
+
     var stats: runner.Stats = .{};
-    runner.runConformanceFile(gpa, data, &stats) catch |e| {
+    runner.runConformanceFileWithCatalog(gpa, data, &stats, &cat) catch |e| {
         std.debug.print("conformance failed: {s}: {s}\n", .{ path, @errorName(e) });
         std.debug.print("cases={d} branches={d} passed={d} skipped={d}\n", .{ stats.cases, stats.branches, stats.passed, stats.skipped });
         return e;

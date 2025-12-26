@@ -121,6 +121,20 @@ pub fn loadIonTestsCatalog(allocator: std.mem.Allocator, path: []const u8) Catal
     };
 }
 
+pub fn loadIonTestsCatalogDefault(allocator: std.mem.Allocator) CatalogError!Catalog {
+    const candidates = [_][]const u8{
+        "ion-tests/catalog/catalog.ion",
+        "../ion-tests/catalog/catalog.ion",
+    };
+    for (candidates) |path| {
+        return loadIonTestsCatalog(allocator, path) catch |e| switch (e) {
+            CatalogError.FileNotFound => continue,
+            else => return e,
+        };
+    }
+    return CatalogError.FileNotFound;
+}
+
 fn injectIonLiteralBeforeSystemAnnotation(
     allocator: std.mem.Allocator,
     input: []const u8,
