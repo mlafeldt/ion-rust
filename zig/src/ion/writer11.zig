@@ -1943,6 +1943,75 @@ fn writeMacroShapeArg(
             try writeElement(allocator, out, options, args[1]);
             return;
         }
+        if (std.mem.eql(u8, shape.name, "make_string") or
+            std.mem.eql(u8, shape.name, "make_symbol") or
+            std.mem.eql(u8, shape.name, "make_blob"))
+        {
+            // Payload encoding matches the qualified system macro invocation encoding (minus the
+            // leading `0xEF <addr>`):
+            // - 0x00: no args
+            // - 0x01: single tagged value
+            // - 0x02: tagged expression group (FlexUInt length + bytes)
+            if (args.len == 0) {
+                try appendByte(out, allocator, 0x00);
+                return;
+            }
+            if (args.len == 1) {
+                try appendByte(out, allocator, 0x01);
+                try writeElement(allocator, out, options, args[0]);
+                return;
+            }
+
+            try appendByte(out, allocator, 0x02);
+            var payload = std.ArrayListUnmanaged(u8){};
+            defer payload.deinit(allocator);
+            for (args) |a| try writeElement(allocator, &payload, options, a);
+            try writeFlexUIntShift1(out, allocator, payload.items.len);
+            try appendSlice(out, allocator, payload.items);
+            return;
+        }
+        if (std.mem.eql(u8, shape.name, "make_timestamp")) {
+            // Payload encoding matches the qualified system macro invocation encoding (minus the
+            // leading `0xEF <addr>`): 2-byte little-endian presence bitmap, then `<year>` as a
+            // tagged value followed by each present optional arg as a tagged value.
+            if (args.len < 1 or args.len > 7) return IonError.InvalidIon;
+
+            const year = args[0];
+            const month: ?value.Element = if (args.len >= 2) args[1] else null;
+            const day: ?value.Element = if (args.len >= 3) args[2] else null;
+            const hour: ?value.Element = if (args.len >= 4) args[3] else null;
+            const minute: ?value.Element = if (args.len >= 5) args[4] else null;
+            const seconds: ?value.Element = if (args.len >= 6) args[5] else null;
+            const offset: ?value.Element = if (args.len >= 7) args[6] else null;
+
+            const code = struct {
+                fn set(presence: *u16, idx: u4, present: bool) void {
+                    if (!present) return;
+                    presence.* |= (@as(u16, 0b01) << @intCast(@as(u5, idx) * 2));
+                }
+            };
+
+            var presence: u16 = 0;
+            code.set(&presence, 0, month != null);
+            code.set(&presence, 1, day != null);
+            code.set(&presence, 2, hour != null);
+            code.set(&presence, 3, minute != null);
+            code.set(&presence, 4, seconds != null);
+            code.set(&presence, 5, offset != null);
+
+            var pres_bytes: [2]u8 = undefined;
+            std.mem.writeInt(u16, &pres_bytes, presence, .little);
+            try appendSlice(out, allocator, &pres_bytes);
+
+            try writeElement(allocator, out, options, year);
+            if (month) |v| try writeElement(allocator, out, options, v);
+            if (day) |v| try writeElement(allocator, out, options, v);
+            if (hour) |v| try writeElement(allocator, out, options, v);
+            if (minute) |v| try writeElement(allocator, out, options, v);
+            if (seconds) |v| try writeElement(allocator, out, options, v);
+            if (offset) |v| try writeElement(allocator, out, options, v);
+            return;
+        }
         return IonError.Unsupported;
     }
 

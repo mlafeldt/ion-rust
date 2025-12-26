@@ -1151,6 +1151,31 @@ const Decoder = struct {
                 if (b.len != 1) return IonError.InvalidIon;
                 return self.makeDecimalFromTwoInts(a[0].value, b[0].value);
             }
+            // Expand a small set of other qualified system macro shapes using the same payload
+            // encodings as qualified system macro invocations (but without the `0xEF` header).
+            //
+            // This is used by macro-table parameters of type `macro_shape`, where the caller
+            // supplies an s-expression representing the shape's argument list.
+            if (std.mem.eql(u8, shape.name, "make_string")) {
+                const out = try self.expandMakeString();
+                if (out.len != 1) return IonError.InvalidIon;
+                return out[0];
+            }
+            if (std.mem.eql(u8, shape.name, "make_symbol")) {
+                const out = try self.expandMakeSymbol();
+                if (out.len != 1) return IonError.InvalidIon;
+                return out[0];
+            }
+            if (std.mem.eql(u8, shape.name, "make_blob")) {
+                const out = try self.expandMakeBlob();
+                if (out.len != 1) return IonError.InvalidIon;
+                return out[0];
+            }
+            if (std.mem.eql(u8, shape.name, "make_timestamp")) {
+                const out = try self.expandMakeTimestamp();
+                if (out.len != 1) return IonError.InvalidIon;
+                return out[0];
+            }
             return IonError.Unsupported;
         }
 
