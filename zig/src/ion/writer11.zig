@@ -1943,9 +1943,79 @@ fn writeMacroShapeArg(
             try writeElement(allocator, out, options, args[1]);
             return;
         }
+        if (std.mem.eql(u8, shape.name, "make_field")) {
+            // Payload encoding matches the qualified system macro invocation encoding (minus the
+            // leading `0xEF <addr>`): two tagged values back-to-back.
+            //
+            // Note: system macro address 16 is overloaded with `parse_ion`. The decoder selects
+            // `parse_ion` when the first argument is a string/clob/blob, so require a symbol here
+            // for deterministic `make_field` encoding.
+            if (args.len != 2) return IonError.InvalidIon;
+            if (args[0].value != .symbol) return IonError.InvalidIon;
+            try writeElement(allocator, out, options, args[0]);
+            try writeElement(allocator, out, options, args[1]);
+            return;
+        }
+        if (std.mem.eql(u8, shape.name, "annotate")) {
+            // Payload encoding matches the qualified system macro invocation encoding (minus the
+            // leading `0xEF <addr>`):
+            //   <presence> <annotations...> <value>
+            //
+            // Represent the arguments as a sexp of N items:
+            //   (<annotation>... <value>)
+            // where the last element is the value and the preceding elements are annotations.
+            if (args.len == 0) return IonError.InvalidIon;
+
+            const val = args[args.len - 1];
+            const annotations = args[0 .. args.len - 1];
+
+            if (annotations.len == 0) {
+                try appendByte(out, allocator, 0x00);
+            } else if (annotations.len == 1) {
+                try appendByte(out, allocator, 0x01);
+                try writeElement(allocator, out, options, annotations[0]);
+            } else {
+                try appendByte(out, allocator, 0x02);
+                var payload = std.ArrayListUnmanaged(u8){};
+                defer payload.deinit(allocator);
+                for (annotations) |a| try writeElement(allocator, &payload, options, a);
+                try writeFlexUIntShift1(out, allocator, payload.items.len);
+                try appendSlice(out, allocator, payload.items);
+            }
+
+            try writeElement(allocator, out, options, val);
+            return;
+        }
         if (std.mem.eql(u8, shape.name, "make_string") or
             std.mem.eql(u8, shape.name, "make_symbol") or
             std.mem.eql(u8, shape.name, "make_blob"))
+        {
+            // Payload encoding matches the qualified system macro invocation encoding (minus the
+            // leading `0xEF <addr>`):
+            // - 0x00: no args
+            // - 0x01: single tagged value
+            // - 0x02: tagged expression group (FlexUInt length + bytes)
+            if (args.len == 0) {
+                try appendByte(out, allocator, 0x00);
+                return;
+            }
+            if (args.len == 1) {
+                try appendByte(out, allocator, 0x01);
+                try writeElement(allocator, out, options, args[0]);
+                return;
+            }
+
+            try appendByte(out, allocator, 0x02);
+            var payload = std.ArrayListUnmanaged(u8){};
+            defer payload.deinit(allocator);
+            for (args) |a| try writeElement(allocator, &payload, options, a);
+            try writeFlexUIntShift1(out, allocator, payload.items.len);
+            try appendSlice(out, allocator, payload.items);
+            return;
+        }
+        if (std.mem.eql(u8, shape.name, "make_list") or
+            std.mem.eql(u8, shape.name, "make_sexp") or
+            std.mem.eql(u8, shape.name, "make_struct"))
         {
             // Payload encoding matches the qualified system macro invocation encoding (minus the
             // leading `0xEF <addr>`):

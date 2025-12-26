@@ -1171,6 +1171,31 @@ const Decoder = struct {
                 if (out.len != 1) return IonError.InvalidIon;
                 return out[0];
             }
+            if (std.mem.eql(u8, shape.name, "make_list")) {
+                const out = try self.expandMakeSequence(.list);
+                if (out.len != 1) return IonError.InvalidIon;
+                return out[0];
+            }
+            if (std.mem.eql(u8, shape.name, "make_sexp")) {
+                const out = try self.expandMakeSequence(.sexp);
+                if (out.len != 1) return IonError.InvalidIon;
+                return out[0];
+            }
+            if (std.mem.eql(u8, shape.name, "make_struct")) {
+                const out = try self.expandMakeStruct();
+                if (out.len != 1) return IonError.InvalidIon;
+                return out[0];
+            }
+            if (std.mem.eql(u8, shape.name, "make_field")) {
+                const out = try self.expandSystem16();
+                if (out.len != 1) return IonError.InvalidIon;
+                return out[0];
+            }
+            if (std.mem.eql(u8, shape.name, "annotate")) {
+                const out = try self.expandAnnotate();
+                if (out.len != 1) return IonError.InvalidIon;
+                return out[0];
+            }
             if (std.mem.eql(u8, shape.name, "make_timestamp")) {
                 const out = try self.expandMakeTimestamp();
                 if (out.len != 1) return IonError.InvalidIon;
