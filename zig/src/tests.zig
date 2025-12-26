@@ -616,6 +616,148 @@ test "ion 1.1 writer11 can emit qualified system set_macros and add_macros direc
     try std.testing.expect(ion.eq.ionEqElements(elems, &arg_vals));
 }
 
+test "ion 1.1 writer11 can emit qualified system make_string and make_symbol e-expressions" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const parts = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .string = "a" } },
+        .{ .annotations = &.{}, .value = .{ .string = "b" } },
+    };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedMakeString(std.testing.allocator, &out, &parts, .{});
+    try ion.writer11.writeSystemMacroInvocationQualifiedMakeSymbol(std.testing.allocator, &out, &parts, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    try std.testing.expect(elems.len == 2);
+    try std.testing.expect(elems[0].value == .string);
+    try std.testing.expectEqualStrings("ab", elems[0].value.string);
+    try std.testing.expect(elems[1].value == .symbol);
+    try std.testing.expectEqualStrings("ab", elems[1].value.symbol.text.?);
+}
+
+test "ion 1.1 writer11 can emit qualified system make_blob e-expression" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const parts = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .blob = "a" } },
+        .{ .annotations = &.{}, .value = .{ .clob = "b" } },
+    };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedMakeBlob(std.testing.allocator, &out, &parts, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    try std.testing.expect(elems.len == 1);
+    try std.testing.expect(elems[0].value == .blob);
+    try std.testing.expectEqualStrings("ab", elems[0].value.blob);
+}
+
+test "ion 1.1 writer11 can emit qualified system make_list and make_sexp e-expressions" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const list_items_a = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    list_items_a[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
+    list_items_a[1] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } };
+    const list_a: ion.value.Element = .{ .annotations = &.{}, .value = .{ .list = list_items_a } };
+
+    const list_items_b = arena.allocator().alloc(ion.value.Element, 1) catch return ion.IonError.OutOfMemory;
+    list_items_b[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } };
+    const list_b: ion.value.Element = .{ .annotations = &.{}, .value = .{ .list = list_items_b } };
+
+    const seqs = [_]ion.value.Element{ list_a, list_b };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedMakeList(std.testing.allocator, &out, &seqs, .{});
+    try ion.writer11.writeSystemMacroInvocationQualifiedMakeSexp(std.testing.allocator, &out, &seqs, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    try std.testing.expect(elems.len == 2);
+    try std.testing.expect(elems[0].value == .list);
+    try std.testing.expect(elems[1].value == .sexp);
+
+    const expected_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } },
+    };
+
+    try std.testing.expect(ion.eq.ionEqElements(elems[0].value.list, &expected_items));
+    try std.testing.expect(ion.eq.ionEqElements(elems[1].value.sexp, &expected_items));
+}
+
+test "ion 1.1 writer11 can emit qualified system make_struct e-expression" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const a = try ion.value.makeSymbol(&arena, "a");
+    const b = try ion.value.makeSymbol(&arena, "b");
+
+    const st_a_fields = arena.allocator().alloc(ion.value.StructField, 1) catch return ion.IonError.OutOfMemory;
+    st_a_fields[0] = .{ .name = a, .value = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } } };
+    const st_a: ion.value.Element = .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = st_a_fields } } };
+
+    const st_b_fields = arena.allocator().alloc(ion.value.StructField, 1) catch return ion.IonError.OutOfMemory;
+    st_b_fields[0] = .{ .name = b, .value = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } } };
+    const st_b: ion.value.Element = .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = st_b_fields } } };
+
+    const structs = [_]ion.value.Element{ st_a, st_b };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedMakeStruct(std.testing.allocator, &out, &structs, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    try std.testing.expect(elems.len == 1);
+    try std.testing.expect(elems[0].value == .@"struct");
+
+    const expected_fields = arena.allocator().alloc(ion.value.StructField, 2) catch return ion.IonError.OutOfMemory;
+    expected_fields[0] = st_a_fields[0];
+    expected_fields[1] = st_b_fields[0];
+    const expected_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = expected_fields } } };
+    const expected = [_]ion.value.Element{expected_elem};
+    try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
+}
+
+test "ion 1.1 writer11 can emit qualified system parse_ion and make_field e-expressions" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const bytes: ion.value.Element = .{ .annotations = &.{}, .value = .{ .string = "1 2" } };
+
+    const name = try ion.value.makeSymbol(&arena, "a");
+    const name_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .symbol = name } };
+    const val_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 9 } } };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedParseIon(std.testing.allocator, &out, bytes, .{});
+    try ion.writer11.writeSystemMacroInvocationQualifiedMakeField(std.testing.allocator, &out, name_elem, val_elem, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    try std.testing.expect(elems.len == 3);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expect(elems[1].value == .int);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+    try std.testing.expectEqual(@as(i128, 2), elems[1].value.int.small);
+    try std.testing.expect(elems[2].value == .@"struct");
+    try std.testing.expect(elems[2].value.@"struct".fields.len == 1);
+    try std.testing.expectEqualStrings("a", elems[2].value.@"struct".fields[0].name.text.?);
+    try std.testing.expect(elems[2].value.@"struct".fields[0].value.value == .int);
+    try std.testing.expectEqual(@as(i128, 9), elems[2].value.@"struct".fields[0].value.value.int.small);
+}
+
 test "ion 1.1 writer11 can emit length-prefixed user macro with tagless args" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

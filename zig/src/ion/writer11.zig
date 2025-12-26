@@ -1454,6 +1454,99 @@ pub fn writeSystemMacroInvocationQualifiedAddMacrosDirective(
     return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 22, macro_defs, options);
 }
 
+pub fn writeSystemMacroInvocationQualifiedMakeString(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    parts: []const value.Element,
+    options: Options,
+) IonError!void {
+    // (make_string <text*>): system macro address 9.
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 0x09, parts, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedMakeSymbol(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    parts: []const value.Element,
+    options: Options,
+) IonError!void {
+    // (make_symbol <text*>): system macro address 10.
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 0x0A, parts, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedMakeBlob(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    parts: []const value.Element,
+    options: Options,
+) IonError!void {
+    // (make_blob <lob*>): system macro address 13.
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 0x0D, parts, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedMakeList(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    sequences: []const value.Element,
+    options: Options,
+) IonError!void {
+    // (make_list <seq*>): system macro address 14.
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 0x0E, sequences, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedMakeSexp(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    sequences: []const value.Element,
+    options: Options,
+) IonError!void {
+    // (make_sexp <seq*>): system macro address 15.
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 0x0F, sequences, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedMakeStruct(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    structs: []const value.Element,
+    options: Options,
+) IonError!void {
+    // (make_struct <struct-or-field*>): system macro address 17.
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 0x11, structs, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedParseIon(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    bytes: value.Element,
+    options: Options,
+) IonError!void {
+    // (parse_ion <bytes>): system macro address 16.
+    //
+    // Note: address 16 is overloaded with make_field. The decoder selects parse_ion when the
+    // first argument is a string/clob/blob value.
+    try appendByte(out, allocator, 0xEF);
+    try appendByte(out, allocator, 0x10);
+    try writeElement(allocator, out, options, bytes);
+}
+
+pub fn writeSystemMacroInvocationQualifiedMakeField(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    name: value.Element,
+    val: value.Element,
+    options: Options,
+) IonError!void {
+    // (make_field <name> <value>): system macro address 16.
+    //
+    // Note: address 16 is overloaded with parse_ion. The decoder selects make_field when the
+    // first argument is NOT a string/clob/blob; use a symbol for deterministic encoding.
+    if (name.value != .symbol) return IonError.InvalidIon;
+    try appendByte(out, allocator, 0xEF);
+    try appendByte(out, allocator, 0x10);
+    try writeElement(allocator, out, options, name);
+    try writeElement(allocator, out, options, val);
+}
+
 pub fn writeMacroInvocationLengthPrefixedWithParams(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
