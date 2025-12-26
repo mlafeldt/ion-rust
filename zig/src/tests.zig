@@ -396,6 +396,71 @@ test "ion 1.1 writer11 can emit qualified system use e-expression" {
     try std.testing.expectEqualStrings("b", res.state.user_symbols[1].?);
 }
 
+test "ion 1.1 writer11 can emit qualified system make_decimal e-expression" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const coeff: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 314 } } };
+    const exp: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = -2 } } };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedMakeDecimal(std.testing.allocator, &out, coeff, exp, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    try std.testing.expect(elems.len == 1);
+    try std.testing.expect(elems[0].value == .decimal);
+    try std.testing.expect(!elems[0].value.decimal.is_negative);
+    try std.testing.expect(elems[0].value.decimal.coefficient == .small);
+    try std.testing.expectEqual(@as(i128, 314), elems[0].value.decimal.coefficient.small);
+    try std.testing.expectEqual(@as(i32, -2), elems[0].value.decimal.exponent);
+}
+
+test "ion 1.1 writer11 can emit qualified system make_timestamp e-expression" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const year: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2025 } } };
+    const month: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 12 } } };
+    const day: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 26 } } };
+    const hour: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
+    const minute: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } };
+    const seconds: ion.value.Element = .{ .annotations = &.{}, .value = .{ .decimal = .{ .is_negative = false, .coefficient = .{ .small = 345 }, .exponent = -2 } } };
+    const offset: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 0 } } };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedMakeTimestamp(
+        std.testing.allocator,
+        &out,
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        seconds,
+        offset,
+        .{},
+    );
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    try std.testing.expect(elems.len == 1);
+    try std.testing.expect(elems[0].value == .timestamp);
+    const ts = elems[0].value.timestamp;
+    try std.testing.expectEqual(@as(i32, 2025), ts.year);
+    try std.testing.expectEqual(@as(?u8, 12), ts.month);
+    try std.testing.expectEqual(@as(?u8, 26), ts.day);
+    try std.testing.expectEqual(@as(?u8, 1), ts.hour);
+    try std.testing.expectEqual(@as(?u8, 2), ts.minute);
+    try std.testing.expectEqual(@as(?u8, 3), ts.second);
+    try std.testing.expect(ts.fractional != null);
+    try std.testing.expectEqual(@as(i32, -2), ts.fractional.?.exponent);
+    try std.testing.expectEqual(@as(i128, 45), ts.fractional.?.coefficient.small);
+    try std.testing.expectEqual(@as(?i16, 0), ts.offset_minutes);
+}
+
 test "ion 1.1 writer11 can emit length-prefixed user macro with tagless args" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

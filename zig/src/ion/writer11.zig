@@ -1269,6 +1269,71 @@ pub fn writeSystemMacroInvocationQualifiedAnnotate(
     try writeElement(allocator, out, options, val);
 }
 
+pub fn writeSystemMacroInvocationQualifiedMakeDecimal(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    coefficient: value.Element,
+    exponent: value.Element,
+    options: Options,
+) IonError!void {
+    // (make_decimal <coefficient> <exponent>): system macro address 11.
+    //
+    // Conformance binary encoding is `EF 0B` followed by two *tagged* values back-to-back.
+    try appendByte(out, allocator, 0xEF);
+    try appendByte(out, allocator, 0x0B);
+    try writeElement(allocator, out, options, coefficient);
+    try writeElement(allocator, out, options, exponent);
+}
+
+pub fn writeSystemMacroInvocationQualifiedMakeTimestamp(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    year: value.Element,
+    month: ?value.Element,
+    day: ?value.Element,
+    hour: ?value.Element,
+    minute: ?value.Element,
+    seconds: ?value.Element,
+    offset: ?value.Element,
+    options: Options,
+) IonError!void {
+    // (make_timestamp <year> [<month> [<day> [<hour> <minute> [<seconds> [<offset>]]]]]):
+    // system macro address 12.
+    //
+    // Conformance binary encoding uses a 2-byte (little-endian) packed presence code for optional
+    // args, then emits `<year>` as a tagged value, followed by each present optional arg as a
+    // tagged value. The decoder also accepts optional args as a 1-element expression group, but
+    // this writer uses the simple single-value form.
+    const code = struct {
+        fn set(p: *u16, idx: u4, present: bool) void {
+            if (!present) return;
+            p.* |= (@as(u16, 0b01) << @intCast(@as(u5, idx) * 2));
+        }
+    };
+
+    var presence: u16 = 0;
+    code.set(&presence, 0, month != null);
+    code.set(&presence, 1, day != null);
+    code.set(&presence, 2, hour != null);
+    code.set(&presence, 3, minute != null);
+    code.set(&presence, 4, seconds != null);
+    code.set(&presence, 5, offset != null);
+
+    try appendByte(out, allocator, 0xEF);
+    try appendByte(out, allocator, 0x0C);
+    var pres_bytes: [2]u8 = undefined;
+    std.mem.writeInt(u16, &pres_bytes, presence, .little);
+    try appendSlice(out, allocator, &pres_bytes);
+
+    try writeElement(allocator, out, options, year);
+    if (month) |v| try writeElement(allocator, out, options, v);
+    if (day) |v| try writeElement(allocator, out, options, v);
+    if (hour) |v| try writeElement(allocator, out, options, v);
+    if (minute) |v| try writeElement(allocator, out, options, v);
+    if (seconds) |v| try writeElement(allocator, out, options, v);
+    if (offset) |v| try writeElement(allocator, out, options, v);
+}
+
 pub fn writeMacroInvocationLengthPrefixedWithParams(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
