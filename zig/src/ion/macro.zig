@@ -68,6 +68,15 @@ pub const MacroTable = struct {
         return self.macros[addr];
     }
 
+    pub fn addressForName(self: *const MacroTable, name: []const u8) ?usize {
+        for (self.macros, 0..) |m, idx| {
+            if (m.name) |n| {
+                if (std.mem.eql(u8, n, name)) return idx;
+            }
+        }
+        return null;
+    }
+
     pub fn macroForName(self: *const MacroTable, name: []const u8) ?Macro {
         for (self.macros) |m| {
             if (m.name) |n| {

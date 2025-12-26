@@ -812,6 +812,51 @@ test "ion 1.1 writer11 can emit length-prefixed user macro with tagless args" {
     try std.testing.expect(ion.eq.ionEqElements(elems, &arg_vals));
 }
 
+test "ion 1.1 writer11 can emit user macro by name (unqualified + length-prefixed)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Macro at address 7:
+    //   (macro m (flex_uint::x*) (% x))
+    const body_sym_percent = try ion.value.makeSymbol(&arena, "%");
+    const body_sym_x = try ion.value.makeSymbol(&arena, "x");
+    const body_sx_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    body_sx_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_percent } };
+    body_sx_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_x } };
+    const body_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = body_sx_items } };
+
+    const macro_params = [_]ion.macro.Param{.{ .ty = .flex_uint, .card = .zero_or_many, .name = "x", .shape = null }};
+    const macro_body = [_]ion.value.Element{body_elem};
+
+    const macros = try std.testing.allocator.alloc(ion.macro.Macro, 8);
+    defer std.testing.allocator.free(macros);
+    @memset(macros, .{ .name = null, .params = &.{}, .body = &.{} });
+    macros[7] = .{ .name = "m", .params = @constCast(macro_params[0..]), .body = &macro_body };
+    const mactab: ion.macro.MacroTable = .{ .macros = macros };
+
+    const arg_vals = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 4 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 5 } } },
+    };
+    const args_by_param = [_][]const ion.value.Element{&arg_vals};
+
+    // Unqualified call by name.
+    var out0 = std.ArrayListUnmanaged(u8){};
+    defer out0.deinit(std.testing.allocator);
+    try out0.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeUserMacroInvocationUnqualifiedByNameWithParams(std.testing.allocator, &out0, &mactab, "m", args_by_param[0..], .{});
+    const elems0 = try ion.binary11.parseTopLevelWithMacroTable(&arena, out0.items, &mactab);
+    try std.testing.expect(ion.eq.ionEqElements(elems0, &arg_vals));
+
+    // Length-prefixed call by name.
+    var out1 = std.ArrayListUnmanaged(u8){};
+    defer out1.deinit(std.testing.allocator);
+    try out1.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeUserMacroInvocationLengthPrefixedByNameWithParams(std.testing.allocator, &out1, &mactab, "m", args_by_param[0..], .{});
+    const elems1 = try ion.binary11.parseTopLevelWithMacroTable(&arena, out1.items, &mactab);
+    try std.testing.expect(ion.eq.ionEqElements(elems1, &arg_vals));
+}
+
 test "ion 1.1 writer11 can encode macro_shape args (system $ion::make_decimal shape)" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

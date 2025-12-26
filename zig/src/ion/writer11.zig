@@ -1608,6 +1608,32 @@ pub fn writeUserMacroInvocationAtAddressWithParams(
     try encodeArgBindings(allocator, out, params, args_by_param, options);
 }
 
+pub fn writeUserMacroInvocationUnqualifiedByNameWithParams(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    tab: *const ion.macro.MacroTable,
+    name: []const u8,
+    args_by_param: []const []const value.Element,
+    options: Options,
+) IonError!void {
+    const addr = tab.addressForName(name) orelse return IonError.Unsupported;
+    const m = tab.macroForAddress(addr) orelse return IonError.Unsupported;
+    try writeUserMacroInvocationAtAddressWithParams(allocator, out, addr, m.params, args_by_param, options);
+}
+
+pub fn writeUserMacroInvocationLengthPrefixedByNameWithParams(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    tab: *const ion.macro.MacroTable,
+    name: []const u8,
+    args_by_param: []const []const value.Element,
+    options: Options,
+) IonError!void {
+    const addr = tab.addressForName(name) orelse return IonError.Unsupported;
+    const m = tab.macroForAddress(addr) orelse return IonError.Unsupported;
+    try writeMacroInvocationLengthPrefixedWithParams(allocator, out, addr, m.params, args_by_param, options);
+}
+
 fn encodeSingleVariadicTaggedArgBindings(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
