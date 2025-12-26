@@ -352,6 +352,50 @@ test "ion 1.1 writer11 can emit qualified system default e-expression" {
     try std.testing.expect(ion.eq.ionEqElements(elems, &out_vals));
 }
 
+test "ion 1.1 writer11 can emit qualified system annotate e-expression" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ann_text = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .string = "x" } },
+        .{ .annotations = &.{}, .value = .{ .string = "y" } },
+    };
+    const val: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 7 } } };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedAnnotate(std.testing.allocator, &out, &ann_text, val, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    try std.testing.expect(elems.len == 1);
+
+    const sx = try ion.value.makeSymbol(&arena, "x");
+    const sy = try ion.value.makeSymbol(&arena, "y");
+    const anns = arena.allocator().alloc(ion.value.Symbol, 2) catch return ion.IonError.OutOfMemory;
+    anns[0] = sx;
+    anns[1] = sy;
+
+    const expected = [_]ion.value.Element{.{ .annotations = anns, .value = .{ .int = .{ .small = 7 } } }};
+    try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
+}
+
+test "ion 1.1 writer11 can emit qualified system use e-expression" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedUse(std.testing.allocator, &out, "abcs", 2, .{});
+
+    const res = try ion.binary11.parseTopLevelWithState(&arena, out.items);
+    try std.testing.expect(res.elements.len == 0);
+    try std.testing.expect(res.state.user_symbols.len == 2);
+    try std.testing.expectEqualStrings("a", res.state.user_symbols[0].?);
+    try std.testing.expectEqualStrings("b", res.state.user_symbols[1].?);
+}
+
 test "ion 1.1 writer11 can emit length-prefixed user macro with tagless args" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

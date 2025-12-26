@@ -1211,6 +1211,64 @@ pub fn writeSystemMacroInvocationQualifiedDefault(
     try code.emit(b_code, out, allocator, options, b);
 }
 
+pub fn writeSystemMacroInvocationQualifiedUse(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    key: []const u8,
+    version: ?u32,
+    options: Options,
+) IonError!void {
+    // (use <catalog_key> [<version>]): system macro address 23.
+    //
+    // Conformance binary encoding begins with a 1-byte presence code for the optional version:
+    //   0 => absent (defaults to 1)
+    //   1 => tagged integer value
+    try appendByte(out, allocator, 0xEF);
+    try appendByte(out, allocator, 23);
+    try appendByte(out, allocator, if (version == null) 0x00 else 0x01);
+
+    const key_elem: value.Element = .{ .annotations = &.{}, .value = .{ .string = key } };
+    try writeElement(allocator, out, options, key_elem);
+
+    if (version) |v| {
+        const ver_elem: value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = @intCast(v) } } };
+        try writeElement(allocator, out, options, ver_elem);
+    }
+}
+
+pub fn writeSystemMacroInvocationQualifiedAnnotate(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    annotations: []const value.Element,
+    val: value.Element,
+    options: Options,
+) IonError!void {
+    // (annotate <annotations-expr> <value-expr>): system macro address 8.
+    //
+    // Conformance binary encoding begins with a 1-byte presence code for the annotations arg:
+    //   0 => empty annotations group
+    //   1 => single tagged value (one annotation)
+    //   2 => expression group of tagged values (multiple annotations)
+    try appendByte(out, allocator, 0xEF);
+    try appendByte(out, allocator, 0x08);
+
+    if (annotations.len == 0) {
+        try appendByte(out, allocator, 0x00);
+    } else if (annotations.len == 1) {
+        try appendByte(out, allocator, 0x01);
+        try writeElement(allocator, out, options, annotations[0]);
+    } else {
+        try appendByte(out, allocator, 0x02);
+        var payload = std.ArrayListUnmanaged(u8){};
+        defer payload.deinit(allocator);
+        for (annotations) |e| try writeElement(allocator, &payload, options, e);
+        try writeFlexUIntShift1(out, allocator, payload.items.len);
+        try appendSlice(out, allocator, payload.items);
+    }
+
+    try writeElement(allocator, out, options, val);
+}
+
 pub fn writeMacroInvocationLengthPrefixedWithParams(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),

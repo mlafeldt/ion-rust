@@ -152,7 +152,7 @@ Key properties:
   - Exposed via `ion.serializeDocument(..., .binary_1_1, ...)` for regression tests/ad-hoc tooling; the main corpus/conformance harness does not currently roundtrip through binary Ion 1.1.
   - Provides low-level helpers for emitting conformance-driven Ion 1.1 binary e-expressions:
     - Length-prefixed e-expressions (`0xF5`) for system macros like `values`/`default` and for directive-like invocations (`set_symbols`, `add_symbols`, `set_macros`, `add_macros`, `use`).
-    - Qualified system macro invocations (`0xEF`) for a small subset of system macros (currently including `values`, `default`, and `sum`).
+    - Qualified system macro invocations (`0xEF`) for a small subset of system macros (currently including `values`, `default`, `sum`, `annotate`, and `use`).
     - Unqualified user macro invocations using 6-bit / 12-bit / 20-bit address encodings (`0x00..0x5F`).
   - Limitations:
     - It does not attempt to preserve/roundtrip Ion 1.1 macros from text input (the DOM model represents expanded values, not macro ASTs).
@@ -175,7 +175,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
-- As of 2025-12-26, `cd zig && zig build test --summary all` runs 81 Zig tests; all pass (0 skips).
+- As of 2025-12-26, `cd zig && zig build test --summary all` runs 83 Zig tests; all pass (0 skips).
 
 ### Skip list (currently empty)
 
