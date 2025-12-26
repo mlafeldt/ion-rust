@@ -461,6 +461,53 @@ test "ion 1.1 writer11 can emit qualified system make_timestamp e-expression" {
     try std.testing.expectEqual(@as(?i16, 0), ts.offset_minutes);
 }
 
+test "ion 1.1 writer11 can emit qualified system repeat e-expression" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const count: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } };
+    const exprs = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 7 } } },
+    };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedRepeat(std.testing.allocator, &out, count, &exprs, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    const expected = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 7 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 7 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 7 } } },
+    };
+    try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
+}
+
+test "ion 1.1 writer11 can emit qualified system delta e-expression" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const deltas = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+    };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedDelta(std.testing.allocator, &out, &deltas, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    const expected = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 4 } } },
+    };
+    try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
+}
+
 test "ion 1.1 writer11 can emit length-prefixed user macro with tagless args" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

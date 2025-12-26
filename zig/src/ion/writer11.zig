@@ -1334,6 +1334,58 @@ pub fn writeSystemMacroInvocationQualifiedMakeTimestamp(
     if (offset) |v| try writeElement(allocator, out, options, v);
 }
 
+pub fn writeSystemMacroInvocationQualifiedRepeat(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    count: value.Element,
+    exprs: []const value.Element,
+    options: Options,
+) IonError!void {
+    // (repeat <n> <expr>): system macro address 4.
+    //
+    // Conformance binary encoding begins with a 1-byte presence code for the repetition count,
+    // then encodes the repeated expression. The decoder accepts both:
+    // - a single tagged value, OR
+    // - a presence code (0/1/2) followed by a tagged value or expression group.
+    //
+    // This writer always uses the explicit 1-byte presence code for the repeated expression to
+    // avoid ambiguity when the first byte of the expression could be 0, 1, or 2.
+    try appendByte(out, allocator, 0xEF);
+    try appendByte(out, allocator, 0x04);
+
+    // Count: always encode as a single tagged value.
+    try appendByte(out, allocator, 0x01);
+    try writeElement(allocator, out, options, count);
+
+    // Repeated expression(s): encode as presence + either single tagged value or tagged group.
+    if (exprs.len == 0) {
+        try appendByte(out, allocator, 0x00);
+        return;
+    }
+    if (exprs.len == 1) {
+        try appendByte(out, allocator, 0x01);
+        try writeElement(allocator, out, options, exprs[0]);
+        return;
+    }
+
+    try appendByte(out, allocator, 0x02);
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    for (exprs) |e| try writeElement(allocator, &payload, options, e);
+    try writeFlexUIntShift1(out, allocator, payload.items.len);
+    try appendSlice(out, allocator, payload.items);
+}
+
+pub fn writeSystemMacroInvocationQualifiedDelta(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    deltas: []const value.Element,
+    options: Options,
+) IonError!void {
+    // (delta <deltas*>): system macro address 6.
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 0x06, deltas, options);
+}
+
 pub fn writeMacroInvocationLengthPrefixedWithParams(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
