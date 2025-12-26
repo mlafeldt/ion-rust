@@ -436,6 +436,88 @@ test "ion 1.1 writer11 can emit unqualified user macro invocation (non-length-pr
     try std.testing.expect(ion.eq.ionEqElements(elems, &arg_vals));
 }
 
+test "ion 1.1 writer11 can emit add_symbols and use directives" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+
+    try ion.writer11.writeAddSymbolsDirectiveText(std.testing.allocator, &out, &.{ "x", "y" });
+    try ion.writer11.writeUseDirective(std.testing.allocator, &out, "abcs", 2);
+
+    const res = try ion.binary11.parseTopLevelWithState(&arena, out.items);
+    try std.testing.expect(res.elements.len == 0);
+    try std.testing.expect(res.state.user_symbols.len == 4);
+    try std.testing.expectEqualStrings("x", res.state.user_symbols[0].?);
+    try std.testing.expectEqualStrings("y", res.state.user_symbols[1].?);
+    try std.testing.expectEqualStrings("a", res.state.user_symbols[2].?);
+    try std.testing.expectEqualStrings("b", res.state.user_symbols[3].?);
+}
+
+test "ion 1.1 writer11 can emit set_macros and add_macros directives" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Macro def helper to build: (macro <name> (<params...>) <body>)
+    const mkMacroDef = struct {
+        fn run(arena_: *ion.value.Arena, name: []const u8, param: ion.value.Element, body: ion.value.Element) ion.IonError!ion.value.Element {
+            const name_sym = try ion.value.makeSymbol(arena_, name);
+            const head_sym = try ion.value.makeSymbol(arena_, "macro");
+            const params_items = arena_.allocator().alloc(ion.value.Element, 1) catch return ion.IonError.OutOfMemory;
+            params_items[0] = param;
+            const params_sx: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = params_items } };
+
+            const items = arena_.allocator().alloc(ion.value.Element, 4) catch return ion.IonError.OutOfMemory;
+            items[0] = .{ .annotations = &.{}, .value = .{ .symbol = head_sym } };
+            items[1] = .{ .annotations = &.{}, .value = .{ .symbol = name_sym } };
+            items[2] = params_sx;
+            items[3] = body;
+            return .{ .annotations = &.{}, .value = .{ .sexp = items } };
+        }
+    }.run;
+
+    // Build body: (% x)
+    const percent_sym = try ion.value.makeSymbol(&arena, "%");
+    const x_sym = try ion.value.makeSymbol(&arena, "x");
+    const body_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    body_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = percent_sym } };
+    body_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = x_sym } };
+    const body_expr: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = body_items } };
+
+    // Param: flex_uint::x*
+    const param_x_anns = [_]ion.value.Symbol{ion.value.makeSymbolId(null, @as(?[]const u8, "flex_uint"))};
+    const param_x: ion.value.Element = .{
+        .annotations = @constCast(param_x_anns[0..]),
+        .value = .{ .symbol = ion.value.makeSymbolId(null, @as(?[]const u8, "x*")) },
+    };
+
+    const def_a = try mkMacroDef(&arena, "a", param_x, body_expr);
+    const def_b = try mkMacroDef(&arena, "b", param_x, body_expr);
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+
+    // Set macros (one macro => address 0), then add another (address 1).
+    try ion.writer11.writeSetMacrosDirective(std.testing.allocator, &out, &.{def_a});
+    try ion.writer11.writeAddMacrosDirective(std.testing.allocator, &out, &.{def_b});
+
+    const macro_params = [_]ion.macro.Param{.{ .ty = .flex_uint, .card = .zero_or_many, .name = "x", .shape = null }};
+    const arg_vals = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 7 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 8 } } },
+    };
+    const args_by_param = [_][]const ion.value.Element{&arg_vals};
+
+    // Invoke macro at address 1 (the added macro).
+    try ion.writer11.writeUserMacroInvocationAtAddressWithParams(std.testing.allocator, &out, 1, macro_params[0..], args_by_param[0..], .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    try std.testing.expect(ion.eq.ionEqElements(elems, &arg_vals));
+}
+
 test "ion-tests equiv groups" {
     const allocator = std.testing.allocator;
     const skip = try concatSkipLists(allocator, &.{ &global_skip_list, &equivs_skip_list });

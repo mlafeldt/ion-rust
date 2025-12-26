@@ -83,11 +83,65 @@ pub fn writeBinary11SelfContained(allocator: std.mem.Allocator, doc: []const val
     return out.toOwnedSlice(allocator) catch return IonError.OutOfMemory;
 }
 
+pub fn writeSetSymbolsDirectiveText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), texts: []const []const u8) IonError!void {
+    return writeSymbolsDirectiveText(allocator, out, 19, texts);
+}
+
+pub fn writeAddSymbolsDirectiveText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), texts: []const []const u8) IonError!void {
+    return writeSymbolsDirectiveText(allocator, out, 20, texts);
+}
+
+pub fn writeUseDirective(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), key: []const u8, version: ?u32) IonError!void {
+    // (use <catalog_key> [<version>]) as a length-prefixed system macro invocation (addr 23).
+    const params = [_]ion.macro.Param{
+        .{ .ty = .tagged, .card = .one, .name = "key", .shape = null },
+        .{ .ty = .tagged, .card = .zero_or_one, .name = "version", .shape = null },
+    };
+
+    const key_elem: value.Element = .{ .annotations = &.{}, .value = .{ .string = key } };
+    const key_list = [_]value.Element{key_elem};
+
+    var ver_list: [1]value.Element = undefined;
+    const ver_slice: []const value.Element = if (version) |v| blk: {
+        ver_list[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = @intCast(v) } } };
+        break :blk ver_list[0..1];
+    } else &.{};
+
+    const args_by_param = [_][]const value.Element{ key_list[0..], ver_slice };
+    try writeSystemMacroInvocationLengthPrefixedWithParams(allocator, out, 23, params[0..], args_by_param[0..], .{});
+}
+
+pub fn writeSetMacrosDirective(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), macro_defs: []const value.Element) IonError!void {
+    // `set_macros` uses address 21 (overloaded with `meta` in conformance). The decoder selects
+    // `set_macros` when all args are macro defs.
+    if (macro_defs.len != 0 and !allArgsAreMacroDefs(macro_defs)) return IonError.InvalidIon;
+    try writeSystemMacroInvocationLengthPrefixedTaggedVariadicWithOptions(allocator, out, 21, macro_defs, .{});
+}
+
+pub fn writeAddMacrosDirective(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), macro_defs: []const value.Element) IonError!void {
+    // (add_macros <macro_def*>) is address 22.
+    if (macro_defs.len != 0 and !allArgsAreMacroDefs(macro_defs)) return IonError.InvalidIon;
+    try writeSystemMacroInvocationLengthPrefixedTaggedVariadicWithOptions(allocator, out, 22, macro_defs, .{});
+}
+
 fn writeElement(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, e: value.Element) IonError!void {
     if (e.annotations.len != 0) {
         try writeAnnotationsSequence(allocator, out, options, e.annotations);
     }
     try writeValue(allocator, out, options, e.value);
+}
+
+fn allArgsAreMacroDefs(args: []const value.Element) bool {
+    for (args) |d| {
+        if (d.annotations.len != 0) return false;
+        if (d.value != .sexp) return false;
+        const sx = d.value.sexp;
+        if (sx.len == 0) return false;
+        if (sx[0].value != .symbol) return false;
+        const head = sx[0].value.symbol.text orelse return false;
+        if (!std.mem.eql(u8, head, "macro")) return false;
+    }
+    return true;
 }
 
 fn writeValue(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, v: value.Value) IonError!void {
@@ -995,6 +1049,15 @@ fn writeSetSymbolsDirective(allocator: std.mem.Allocator, out: *std.ArrayListUnm
     }
 
     try writeSystemMacroInvocationLengthPrefixedTaggedVariadic(allocator, out, 19, elems.items);
+}
+
+fn writeSymbolsDirectiveText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), addr: u8, texts: []const []const u8) IonError!void {
+    var elems = std.ArrayListUnmanaged(value.Element){};
+    defer elems.deinit(allocator);
+    for (texts) |t| {
+        elems.append(allocator, .{ .annotations = &.{}, .value = .{ .string = t } }) catch return IonError.OutOfMemory;
+    }
+    try writeSystemMacroInvocationLengthPrefixedTaggedVariadic(allocator, out, addr, elems.items);
 }
 
 pub fn writeSystemMacroInvocationLengthPrefixedTaggedVariadic(
