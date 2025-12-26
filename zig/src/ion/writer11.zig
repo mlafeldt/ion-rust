@@ -1104,6 +1104,113 @@ pub fn writeSystemMacroInvocationLengthPrefixedWithParams(
     return writeMacroInvocationLengthPrefixedWithParams(allocator, out, addr, params, args_by_param, options);
 }
 
+pub fn writeSystemMacroInvocationQualifiedTaggedGroup(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    addr: u8,
+    args: []const value.Element,
+    options: Options,
+) IonError!void {
+    // Qualified system macro invocation (0xEF <addr>) using the conformance-style argument
+    // encodings that `binary11.readSystemMacroInvocationAt` expects for many system macros.
+    //
+    // For the common `(<name> <expr*>)` case, conformance uses a 1-byte presence code:
+    //   0 => empty / elided group
+    //   1 => single tagged value
+    //   2 => expression group of tagged values
+    //
+    // This is distinct from the length-prefixed `0xF5` form; both are supported by the decoder.
+    try appendByte(out, allocator, 0xEF);
+    try appendByte(out, allocator, addr);
+
+    if (args.len == 0) {
+        try appendByte(out, allocator, 0x00);
+        return;
+    }
+    if (args.len == 1) {
+        try appendByte(out, allocator, 0x01);
+        try writeElement(allocator, out, options, args[0]);
+        return;
+    }
+
+    try appendByte(out, allocator, 0x02);
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    for (args) |e| try writeElement(allocator, &payload, options, e);
+    try writeFlexUIntShift1(out, allocator, payload.items.len);
+    try appendSlice(out, allocator, payload.items);
+}
+
+pub fn writeSystemMacroInvocationQualifiedValues(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    args: []const value.Element,
+    options: Options,
+) IonError!void {
+    // (values <expr*>): system macro address 1.
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 1, args, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedSum(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    a: value.Element,
+    b: value.Element,
+    options: Options,
+) IonError!void {
+    // (sum <a> <b>): system macro address 7.
+    // Conformance binary encoding is `EF 07` followed by two *tagged* values.
+    try appendByte(out, allocator, 0xEF);
+    try appendByte(out, allocator, 0x07);
+    try writeElement(allocator, out, options, a);
+    try writeElement(allocator, out, options, b);
+}
+
+pub fn writeSystemMacroInvocationQualifiedDefault(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    a: []const value.Element,
+    b: []const value.Element,
+    options: Options,
+) IonError!void {
+    // (default <a> <b*>): system macro address 2.
+    //
+    // Conformance binary encoding begins with a 1-byte packed presence code:
+    //   bits 0..1 => first arg (a)
+    //   bits 2..3 => second arg (b)
+    //   00 absent, 01 single tagged value, 10 expression group, 11 invalid.
+    const code = struct {
+        fn groupLen(n: usize) u2 {
+            return if (n == 0) 0b00 else if (n == 1) 0b01 else 0b10;
+        }
+
+        fn emit(d: u2, dst: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, opts: Options, vals: []const value.Element) IonError!void {
+            switch (d) {
+                0b00 => {},
+                0b01 => try writeElement(alloc, dst, opts, vals[0]),
+                0b10 => {
+                    var payload = std.ArrayListUnmanaged(u8){};
+                    defer payload.deinit(alloc);
+                    for (vals) |e| try writeElement(alloc, &payload, opts, e);
+                    try writeFlexUIntShift1(dst, alloc, payload.items.len);
+                    try appendSlice(dst, alloc, payload.items);
+                },
+                else => return IonError.InvalidIon,
+            }
+        }
+    };
+
+    const a_code: u2 = code.groupLen(a.len);
+    const b_code: u2 = code.groupLen(b.len);
+    const p: u8 = @as(u8, a_code) | (@as(u8, b_code) << 2);
+
+    try appendByte(out, allocator, 0xEF);
+    try appendByte(out, allocator, 0x02);
+    try appendByte(out, allocator, p);
+    try code.emit(a_code, out, allocator, options, a);
+    try code.emit(b_code, out, allocator, options, b);
+}
+
 pub fn writeMacroInvocationLengthPrefixedWithParams(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
