@@ -122,7 +122,7 @@ Key properties:
     - Minimal module mutation modeling:
       - tracks `set_symbols`/`add_symbols` text for optional post-parse SID resolution (via `parseTopLevelWithState(...)`), and
       - applies `set_macros`/`add_macros` to the active macro table so subsequent e-expressions decode against the updated table, and
-      - applies `use` using the minimal conformance shared module catalog (symbols only).
+      - applies `use` using the minimal conformance shared module catalog (symbols only; aligned with `ion-tests/catalog/catalog.ion`).
   - Not implemented:
     - Full Ion 1.1 module/symbol resolution for symbol IDs (symbol IDs are preserved but typically not resolved to text).
       - Optional helpers (intentionally opt-in so tests can keep stable output representations when desired):

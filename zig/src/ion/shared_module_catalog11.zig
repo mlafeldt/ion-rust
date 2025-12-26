@@ -16,6 +16,7 @@ pub const Entry = struct {
 const entries = [_]Entry{
     .{ .name = "abcs", .version = 1, .symbols = &.{"a"} },
     .{ .name = "abcs", .version = 2, .symbols = &.{ "a", "b" } },
+    // Keep these aligned with the shared symbol table definitions in `ion-tests/catalog/catalog.ion`.
     .{ .name = "mnop", .version = 1, .symbols = &.{"m"} },
 };
 

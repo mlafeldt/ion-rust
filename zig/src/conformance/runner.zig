@@ -44,7 +44,9 @@ const SharedSymtabCatalog = struct {
         .{ .name = "empty", .version = 1, .symbols = &.{} },
         .{ .name = "abcs", .version = 1, .symbols = &.{"a"} },
         .{ .name = "abcs", .version = 2, .symbols = &.{ "a", "b" } },
-        .{ .name = "mnop", .version = 1, .symbols = &.{ "m", "n", "o", "p" } },
+        // Keep these aligned with `ion-tests/catalog/catalog.ion`.
+        .{ .name = "mnop", .version = 1, .symbols = &.{"m"} },
+        .{ .name = "mnop", .version = 3, .symbols = &.{ "m", "n", "o" } },
         // v4 has a gap in the first slot (as referenced by conformance comments).
         .{ .name = "mnop", .version = 4, .symbols = &.{ null, "n", "o", "p" } },
     };
