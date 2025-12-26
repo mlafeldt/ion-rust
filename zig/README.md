@@ -18,6 +18,8 @@ Key properties:
 1) Run everything (corpus + conformance): `cd zig && zig build test --summary all`
    - Note: `zig/build.zig` defaults tests to `-Doptimize=ReleaseFast` for performance. For debugging: `zig build test -Doptimize=Debug`.
    - To run a subset of tests by name: `zig build test -Dtest-filter="<substring>"`
+   - Run only conformance: `zig build conformance`
+   - Run only writer11: `zig build writer11`
 2) Show conformance totals: `cd zig && zig run src/conformance_totals.zig`
 3) Debug a single conformance file: `cd zig && zig run src/conformance_debug.zig -- ../ion-tests/conformance/demos/metaprogramming.ion`
 4) Trace conformance skips/mismatches (useful when iterating):

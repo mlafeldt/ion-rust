@@ -29,4 +29,23 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run ion-tests against the Zig harness");
     test_step.dependOn(&run.step);
+
+    // Convenience steps for faster iteration.
+    const conformance_tests = b.addTest(.{
+        .root_module = root_mod,
+        .filters = &.{"conformance suite"},
+    });
+    const conformance_run = b.addRunArtifact(conformance_tests);
+    conformance_run.setCwd(b.path(".."));
+    const conformance_step = b.step("conformance", "Run only the conformance suite test");
+    conformance_step.dependOn(&conformance_run.step);
+
+    const writer11_tests = b.addTest(.{
+        .root_module = root_mod,
+        .filters = &.{"writer11"},
+    });
+    const writer11_run = b.addRunArtifact(writer11_tests);
+    writer11_run.setCwd(b.path(".."));
+    const writer11_step = b.step("writer11", "Run only the Ion 1.1 writer11 tests");
+    writer11_step.dependOn(&writer11_run.step);
 }
