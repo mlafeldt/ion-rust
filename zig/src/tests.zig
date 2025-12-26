@@ -917,6 +917,83 @@ test "ion 1.1 writer11 can encode macro_shape args (system $ion::make_decimal sh
     try std.testing.expect(elems.len == 1 and ion.eq.ionEqElements(elems, &.{expected}));
 }
 
+test "ion 1.1 writer11 can encode nested macro_shape args (user shape contains macro_shape)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const body_sym_percent = try ion.value.makeSymbol(&arena, "%");
+
+    // Macro at address 2:
+    //   (macro inner ($ion::make_decimal::d) (% d))
+    const body_sym_d = try ion.value.makeSymbol(&arena, "d");
+    const inner_body_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    inner_body_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_percent } };
+    inner_body_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_d } };
+    const inner_body_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = inner_body_items } };
+
+    const shape_decimal: ion.macro.MacroShape = .{ .module = "$ion", .name = "make_decimal" };
+    const inner_params = [_]ion.macro.Param{.{ .ty = .macro_shape, .card = .one, .name = "d", .shape = shape_decimal }};
+    const inner_body = [_]ion.value.Element{inner_body_elem};
+
+    // Macro at address 1:
+    //   (macro outer (inner::x) (% x))
+    const body_sym_x = try ion.value.makeSymbol(&arena, "x");
+    const outer_body_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    outer_body_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_percent } };
+    outer_body_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_x } };
+    const outer_body_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = outer_body_items } };
+
+    const shape_inner: ion.macro.MacroShape = .{ .module = null, .name = "inner" };
+    const outer_params = [_]ion.macro.Param{.{ .ty = .macro_shape, .card = .one, .name = "x", .shape = shape_inner }};
+    const outer_body = [_]ion.value.Element{outer_body_elem};
+
+    const macro_defs = try std.testing.allocator.alloc(ion.macro.Macro, 3);
+    defer std.testing.allocator.free(macro_defs);
+    macro_defs[0] = .{ .name = null, .params = &.{}, .body = &.{} };
+    macro_defs[1] = .{ .name = "outer", .params = @constCast(outer_params[0..]), .body = &outer_body };
+    macro_defs[2] = .{ .name = "inner", .params = @constCast(inner_params[0..]), .body = &inner_body };
+    const mactab: ion.macro.MacroTable = .{ .macros = macro_defs };
+
+    // Encode x as a sexp containing the shape "inner"'s argument list, which is (d).
+    // That argument d is itself a macro shape `$ion::make_decimal`, encoded by passing a sexp
+    // containing (coeff exp).
+    const decimal_args_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    decimal_args_items[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 12 } } };
+    decimal_args_items[1] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = -2 } } };
+    const decimal_args_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = decimal_args_items } };
+
+    const inner_args_items = arena.allocator().alloc(ion.value.Element, 1) catch return ion.IonError.OutOfMemory;
+    inner_args_items[0] = decimal_args_elem;
+    const inner_arg_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = inner_args_items } };
+    const args_by_param = [_][]const ion.value.Element{&.{inner_arg_elem}};
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeMacroInvocationLengthPrefixedWithParams(
+        std.testing.allocator,
+        &out,
+        1,
+        outer_params[0..],
+        args_by_param[0..],
+        .{ .mactab = &mactab },
+    );
+
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, out.items, &mactab);
+
+    const expected: ion.value.Element = .{
+        .annotations = &.{},
+        .value = .{
+            .decimal = .{
+                .is_negative = false,
+                .coefficient = .{ .small = 12 },
+                .exponent = -2,
+            },
+        },
+    };
+    try std.testing.expect(elems.len == 1 and ion.eq.ionEqElements(elems, &.{expected}));
+}
+
 test "ion 1.1 writer11 can encode macro_shape args (system $ion::make_string shape)" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

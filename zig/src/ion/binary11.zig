@@ -1218,7 +1218,11 @@ const Decoder = struct {
                     if (ve.len != 1) return IonError.InvalidIon;
                     break :blk ve[0];
                 },
-                .macro_shape => return IonError.Unsupported,
+                .macro_shape => blk: {
+                    const sub_shape = p.shape orelse return IonError.InvalidIon;
+                    const elem = try self.readMacroShapeValueExpr(sub_shape);
+                    break :blk elem;
+                },
                 else => blk: {
                     var cursor = self.i;
                     const v = try readTaglessFrom(self.arena, self.input, &cursor, p.ty);
