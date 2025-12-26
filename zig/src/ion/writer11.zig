@@ -1386,6 +1386,74 @@ pub fn writeSystemMacroInvocationQualifiedDelta(
     return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 0x06, deltas, options);
 }
 
+pub fn writeSystemMacroInvocationQualifiedFlatten(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    sequences: []const value.Element,
+    options: Options,
+) IonError!void {
+    // (flatten <sequence*>): system macro address 19 (overloaded with set_symbols in conformance).
+    //
+    // If all args are unannotated text values, the decoder will treat address 19 as `set_symbols`.
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 19, sequences, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedSetSymbolsDirectiveText(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    texts: []const []const u8,
+    options: Options,
+) IonError!void {
+    // (set_symbols <text*>): system macro address 19 (overloaded with flatten in conformance).
+    //
+    // The decoder distinguishes set_symbols vs flatten by argument shape: if all args are
+    // unannotated text values (string or symbol-with-text), it treats address 19 as set_symbols.
+    var elems = std.ArrayListUnmanaged(value.Element){};
+    defer elems.deinit(allocator);
+    for (texts) |t| {
+        elems.append(allocator, .{ .annotations = &.{}, .value = .{ .string = t } }) catch return IonError.OutOfMemory;
+    }
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 19, elems.items, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedAddSymbolsDirectiveText(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    texts: []const []const u8,
+    options: Options,
+) IonError!void {
+    // (add_symbols <text*>): system macro address 20.
+    var elems = std.ArrayListUnmanaged(value.Element){};
+    defer elems.deinit(allocator);
+    for (texts) |t| {
+        elems.append(allocator, .{ .annotations = &.{}, .value = .{ .string = t } }) catch return IonError.OutOfMemory;
+    }
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 20, elems.items, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedSetMacrosDirective(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    macro_defs: []const value.Element,
+    options: Options,
+) IonError!void {
+    // Conformance uses system macro address 21 for both `meta` and `set_macros`. The decoder
+    // selects `set_macros` when all args are macro defs.
+    if (macro_defs.len != 0 and !allArgsAreMacroDefs(macro_defs)) return IonError.InvalidIon;
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 21, macro_defs, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedAddMacrosDirective(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    macro_defs: []const value.Element,
+    options: Options,
+) IonError!void {
+    // (add_macros <macro_def*>): system macro address 22.
+    if (macro_defs.len != 0 and !allArgsAreMacroDefs(macro_defs)) return IonError.InvalidIon;
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 22, macro_defs, options);
+}
+
 pub fn writeMacroInvocationLengthPrefixedWithParams(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
