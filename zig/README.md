@@ -17,6 +17,7 @@ Key properties:
 
 1) Run everything (corpus + conformance): `cd zig && zig build test --summary all`
    - Note: `zig/build.zig` defaults tests to `-Doptimize=ReleaseFast` for performance. For debugging: `zig build test -Doptimize=Debug`.
+   - To run a subset of tests by name: `zig build test -Dtest-filter="<substring>"`
 2) Show conformance totals: `cd zig && zig run src/conformance_totals.zig`
 3) Debug a single conformance file: `cd zig && zig run src/conformance_debug.zig -- ../ion-tests/conformance/demos/metaprogramming.ion`
 4) Trace conformance skips/mismatches (useful when iterating):
@@ -152,7 +153,7 @@ Key properties:
   - Exposed via `ion.serializeDocument(..., .binary_1_1, ...)` for regression tests/ad-hoc tooling; the main corpus/conformance harness does not currently roundtrip through binary Ion 1.1.
   - Provides low-level helpers for emitting conformance-driven Ion 1.1 binary e-expressions:
     - Length-prefixed e-expressions (`0xF5`) for system macros like `values`/`default` and for directive-like invocations (`set_symbols`, `add_symbols`, `set_macros`, `add_macros`, `use`).
-    - Qualified system macro invocations (`0xEF`) for a small subset of system macros (currently including `values`, `default`, `repeat`, `delta`, `sum`, `annotate`, `make_string`, `make_symbol`, `make_decimal`, `make_timestamp`, `make_blob`, `make_list`, `make_sexp`, `parse_ion`, `make_field`, `make_struct`, `flatten`, `set_symbols`, `add_symbols`, `set_macros`, `add_macros`, and `use`).
+    - Qualified system macro invocations (`0xEF`) for a small subset of system macros (currently including `none`, `values`, `default`, `repeat`, `delta`, `sum`, `annotate`, `make_string`, `make_symbol`, `make_decimal`, `make_timestamp`, `make_blob`, `make_list`, `make_sexp`, `parse_ion`, `make_field`, `make_struct`, `flatten`, `set_symbols`, `add_symbols`, `meta`, `set_macros`, `add_macros`, and `use`).
     - Unqualified user macro invocations using 6-bit / 12-bit / 20-bit address encodings (`0x00..0x5F`).
   - Limitations:
     - It does not attempt to preserve/roundtrip Ion 1.1 macros from text input (the DOM model represents expanded values, not macro ASTs).
@@ -175,7 +176,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
   - The same checks are also run for `ion-tests/iontestdata_1_1` (text only for roundtrip).
-- As of 2025-12-26, `cd zig && zig build test --summary all` runs 95 Zig tests; all pass (0 skips).
+- As of 2025-12-26, `cd zig && zig build test --summary all` runs 96 Zig tests; all pass (0 skips).
 
 ### Skip list (currently empty)
 

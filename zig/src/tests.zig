@@ -758,6 +758,22 @@ test "ion 1.1 writer11 can emit qualified system parse_ion and make_field e-expr
     try std.testing.expectEqual(@as(i128, 9), elems[2].value.@"struct".fields[0].value.value.int.small);
 }
 
+test "ion 1.1 writer11 can emit qualified system none and meta e-expressions" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const meta_args = [_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } }};
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedNone(std.testing.allocator, &out);
+    try ion.writer11.writeSystemMacroInvocationQualifiedMeta(std.testing.allocator, &out, &meta_args, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    try std.testing.expect(elems.len == 0);
+}
+
 test "ion 1.1 writer11 can emit length-prefixed user macro with tagless args" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

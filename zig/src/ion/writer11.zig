@@ -1547,6 +1547,27 @@ pub fn writeSystemMacroInvocationQualifiedMakeField(
     try writeElement(allocator, out, options, val);
 }
 
+pub fn writeSystemMacroInvocationQualifiedNone(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) IonError!void {
+    // (none): system macro address 0.
+    //
+    // Decoder expands address 0 without consuming any argument bytes.
+    try appendByte(out, allocator, 0xEF);
+    try appendByte(out, allocator, 0x00);
+}
+
+pub fn writeSystemMacroInvocationQualifiedMeta(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    args: []const value.Element,
+    options: Options,
+) IonError!void {
+    // (meta <expr*>): system macro address 21 (overloaded with set_macros in conformance).
+    //
+    // The decoder disambiguates address 21: if all args are macro defs, it treats it as set_macros;
+    // otherwise it treats it as meta. This writer does not attempt to validate the meta payload.
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 21, args, options);
+}
+
 pub fn writeMacroInvocationLengthPrefixedWithParams(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
