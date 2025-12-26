@@ -1259,6 +1259,27 @@ test "ion-tests 1_1 good roundtrip (text lines)" {
     );
 }
 
+test "ion-tests 1_1 good roundtrip (lines -> binary_1_1 -> lines)" {
+    const allocator = std.testing.allocator;
+    const skip = try concatSkipLists(allocator, &.{ &global_skip_list, &round_trip_skip_list });
+    defer allocator.free(skip);
+
+    try walkAndTest(
+        allocator,
+        "ion-tests/iontestdata_1_1/good",
+        &.{".ion"},
+        skip,
+        struct {
+            fn run(path: []const u8, data: []const u8) !void {
+                roundtripEq(std.testing.allocator, data, .binary_1_1, .text_lines) catch |e| {
+                    std.debug.print("roundtrip failed: {s} (formats lines->binary_1_1->lines): {s}\n", .{ path, @errorName(e) });
+                    return e;
+                };
+            }
+        }.run,
+    );
+}
+
 test "ion-tests conformance suite (partial)" {
     const allocator = std.testing.allocator;
     var stats: conformance.Stats = .{};
@@ -1291,7 +1312,7 @@ fn roundtripEq(allocator: std.mem.Allocator, data: []const u8, format1: ion.Form
 
     const b1 = try ion.serializeDocument(allocator, format1, src.elements);
     defer allocator.free(b1);
-    var d1 = try ion.parseDocument(allocator, b1);
+    var d1 = try parseDocumentForRoundtrip(allocator, b1);
     defer d1.deinit();
 
     const b2 = try ion.serializeDocument(allocator, format2, d1.elements);
@@ -1315,6 +1336,25 @@ fn roundtripEq(allocator: std.mem.Allocator, data: []const u8, format1: ion.Form
         }
         return error.RoundTripFailed;
     }
+}
+
+fn parseDocumentForRoundtrip(allocator: std.mem.Allocator, bytes: []const u8) !ion.Document {
+    // `serializeDocument(.binary_1_1, ...)` currently emits a self-contained Ion 1.1 binary stream
+    // with a minimal `set_symbols` prelude. `binary11` tracks that module state separately and
+    // requires an explicit resolver pass to materialize symbol texts.
+    //
+    // We keep the core parser behavior (conformance-driven) unchanged, and only apply the resolver
+    // here so roundtrip tests validate byte<->DOM<->text parity.
+    if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA) {
+        var arena = try ion.value.Arena.init(allocator);
+        errdefer arena.deinit();
+
+        const res = try ion.binary11.parseTopLevelWithState(&arena, bytes);
+        try ion.value.resolveDefaultModuleSymbols11(&arena, res.elements, res.state.user_symbols, res.state.system_loaded);
+        return .{ .arena = arena, .elements = res.elements };
+    }
+
+    return ion.parseDocument(allocator, bytes);
 }
 
 fn hasAnnotation(elem: ion.value.Element, text: []const u8) bool {

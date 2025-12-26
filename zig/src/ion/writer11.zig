@@ -2001,6 +2001,8 @@ fn collectUserSymbolTexts(
         fn run(sym: value.Symbol) IonError!void {
             if (sym.text != null) return;
             if (sym.sid) |sid| {
+                // `$0` is a well-known "unknown symbol" sentinel and does not require text.
+                if (sid == 0) return;
                 // Allow SID-only system symbols; everything else requires text for self-contained output.
                 if (sid > 0 and sid <= symtab.SystemSymtab11.max_id) return;
                 return IonError.InvalidIon;
