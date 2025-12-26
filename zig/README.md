@@ -361,7 +361,7 @@ to this section with an issue link.
 
 ## Notes on ion-java Ion 1.1 (opcode table mismatch)
 
-The `amazon-ion/ion-java` repository contains an Ion 1.1 opcode table (`/tmp/ion-java/src/main/java/com/amazon/ion/impl/bin/OpCodes.java`) that does not match the Ion 1.1 binary model used by ion-rust and exercised by `ion-tests`.
+The `amazon-ion/ion-java` repository contains an Ion 1.1 opcode table (`src/main/java/com/amazon/ion/impl/bin/OpCodes.java`) that does not match the Ion 1.1 binary model used by ion-rust and exercised by `ion-tests`.
 
 Examples:
 
