@@ -3760,12 +3760,14 @@ fn readFlexSym(
     cursor: *usize,
     variant_override: ?symtab.SystemSymtab11Variant,
 ) IonError!FlexSymDecoded {
-    const v = try readFlexInt(input, cursor);
+    const v = try readFlexIntI64(input, cursor);
     if (v > 0) {
-        return .{ .symbol = value.makeSymbolId(@intCast(@as(u32, @intCast(v))), null) };
+        if (v > std.math.maxInt(u32)) return IonError.InvalidIon;
+        return .{ .symbol = value.makeSymbolId(@intCast(v), null) };
     }
     if (v < 0) {
-        const len: usize = @intCast(@as(i64, -@as(i64, v)));
+        const negated = std.math.negate(v) catch return IonError.InvalidIon;
+        const len: usize = std.math.cast(usize, negated) orelse return IonError.InvalidIon;
         if (cursor.* + len > input.len) return IonError.Incomplete;
         const b = input[cursor.* .. cursor.* + len];
         cursor.* += len;
@@ -4352,57 +4354,41 @@ fn readFlexUInt(input: []const u8, cursor: *usize) IonError!usize {
 }
 
 fn readFlexInt(input: []const u8, cursor: *usize) IonError!i32 {
+    const v64 = try readFlexIntI64(input, cursor);
+    if (v64 < std.math.minInt(i32) or v64 > std.math.maxInt(i32)) return IonError.InvalidIon;
+    return @intCast(v64);
+}
+
+fn readFlexIntI64(input: []const u8, cursor: *usize) IonError!i64 {
+    // ion-rust represents FlexInt values as i64 and caps serialized sizes at 10 bytes.
     const shift = try detectFlexShift(input, cursor);
-    // ion-rust caps supported serialized FlexInt size at 10 bytes (same primitive as FlexUInt).
     if (shift > 10) return IonError.InvalidIon;
     if (shift == 0) return IonError.InvalidIon;
     if (cursor.* + shift > input.len) return IonError.Incomplete;
     const raw = input[cursor.* .. cursor.* + shift];
     cursor.* += shift;
 
-    const negative = (raw[raw.len - 1] & 0x80) != 0;
-    const byte_shift: usize = shift / 8;
-    const bit_shift: u4 = @intCast(shift % 8);
+    var buf: [16]u8 = .{0} ** 16;
+    @memcpy(buf[0..raw.len], raw);
+    const u = std.mem.readInt(u128, @as(*const [16]u8, @ptrCast(buf[0..16].ptr)), .little);
+    const shifted: u128 = u >> @intCast(shift);
 
-    var low64: u64 = 0;
-    var out_idx: usize = 0;
-    while (out_idx < 8) : (out_idx += 1) {
-        const src = byte_shift + out_idx;
-        const b0: u16 = if (src < raw.len) raw[src] else 0;
-        const b1: u16 = if (bit_shift != 0 and src + 1 < raw.len) raw[src + 1] else 0;
-        const ob: u8 = if (bit_shift == 0) blk: {
-            break :blk @intCast(b0);
-        } else blk: {
-            const combined: u16 = (b0 >> bit_shift) | (b1 << (@as(u4, 8) - bit_shift));
-            break :blk @intCast(combined & 0xFF);
-        };
-        low64 |= (@as(u64, ob) << @intCast(out_idx * 8));
+    const sign_bit_set = (raw[raw.len - 1] & 0x80) != 0;
+    if (!sign_bit_set) {
+        if (shifted > @as(u128, std.math.maxInt(i64))) return IonError.InvalidIon;
+        return @intCast(shifted);
     }
 
-    // If the shifted value's natural bit width is < 64, apply sign-extension for negative values.
-    const width_bits = std.math.mul(usize, shift, 7) catch return IonError.InvalidIon;
-    if (negative and width_bits < 64) {
-        low64 |= (~@as(u64, 0)) << @intCast(width_bits);
-    }
+    if (shifted > @as(u128, std.math.maxInt(u64))) return IonError.InvalidIon;
+    const unsigned64: u64 = @intCast(shifted);
+    if (unsigned64 == 0) return IonError.InvalidIon;
 
-    // Validate that any remaining high bits (above bit 63 after shifting) match sign extension.
-    const overflow_bit = std.math.add(usize, shift, 64) catch return IonError.InvalidIon;
-    if (overflow_bit < raw.len * 8) {
-        const start_byte = overflow_bit / 8;
-        const start_bit: u3 = @intCast(overflow_bit % 8);
-        const mask: u8 = (@as(u8, 0xFF) << start_bit);
-        if (!negative) {
-            if ((raw[start_byte] & mask) != 0) return IonError.InvalidIon;
-            for (raw[start_byte + 1 ..]) |b| if (b != 0) return IonError.InvalidIon;
-        } else {
-            if ((raw[start_byte] & mask) != mask) return IonError.InvalidIon;
-            for (raw[start_byte + 1 ..]) |b| if (b != 0xFF) return IonError.InvalidIon;
-        }
-    }
-
-    const v64: i64 = @bitCast(low64);
-    if (v64 < std.math.minInt(i32) or v64 > std.math.maxInt(i32)) return IonError.InvalidIon;
-    return @intCast(v64);
+    // Sign-extend based on the highest bit set in the shifted value, matching ion-rust's
+    // `FlexInt::read()` algorithm.
+    const leading_zeros: u6 = @intCast(@clz(unsigned64));
+    const mi: i64 = @bitCast(@as(u64, 1) << 63);
+    const mask: i64 = mi >> leading_zeros;
+    return (@as(i64, @bitCast(unsigned64)) | mask);
 }
 
 fn readFlexUIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!value.Int {
