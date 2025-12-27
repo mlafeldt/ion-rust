@@ -4263,6 +4263,54 @@ test "ion 1.1 binary resolve_user_symbols resolves E4 annotation symbol addresse
     try std.testing.expectEqual(@as(i128, 1), doc.elements[0].value.int.small);
 }
 
+test "ion 1.1 binary strict_flex rejects tagless FlexUInt(2) quirk (0B 00)" {
+    const allocator = std.testing.allocator;
+
+    var tab_arena = try ion.value.Arena.init(allocator);
+    defer tab_arena.deinit();
+
+    const params = try tab_arena.allocator().alloc(ion.macro.Param, 1);
+    params[0] = .{ .ty = .flex_uint, .card = .zero_or_many, .name = "n", .shape = null };
+
+    const body = try tab_arena.allocator().alloc(ion.value.Element, 1);
+    body[0] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%n") } };
+
+    const macros = try tab_arena.allocator().alloc(ion.macro.Macro, 65);
+    @memset(macros, ion.macro.Macro{ .name = null, .params = &.{}, .body = &.{} });
+    macros[64] = .{ .name = null, .params = params, .body = body };
+    const tab = ion.macro.MacroTable{ .macros = macros };
+
+    // Invoke macro address 64 via length-prefixed e-expression (0xF5) with a tagless argument
+    // group containing FlexUInt(2) encoded non-canonically as `0B 00`.
+    //
+    // Arg bindings:
+    // - single variadic param => 1 bitmap byte
+    // - grouping=0b10 => 0x02
+    // - expression group total_len=2 => FlexUInt(2) canonical 0x05
+    // - payload: 0B 00 (non-minimal encoding of value 2)
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA,
+        0xF5,
+        0x81, // FlexUInt(64)
+        0x09, // FlexUInt(args_len=4)
+        0x02, // bitmap: grouping=0b10 (group)
+        0x05, // FlexUInt(total_len=2)
+        0x0B, 0x00, // non-minimal FlexUInt(2)
+    };
+
+    {
+        var doc = try ion.parseDocumentBinary11WithOptions(allocator, bytes, .{ .mactab = &tab });
+        defer doc.deinit();
+        try std.testing.expectEqual(@as(usize, 1), doc.elements.len);
+        try std.testing.expect(doc.elements[0].value == .int);
+        try std.testing.expectEqual(@as(i128, 2), doc.elements[0].value.int.small);
+    }
+    try std.testing.expectError(
+        ion.IonError.InvalidIon,
+        ion.parseDocumentBinary11WithOptions(allocator, bytes, .{ .mactab = &tab, .strict_flex = true }),
+    );
+}
+
 test "ion 1.1 binary e-expression 12-bit address (minimal)" {
     // Minimal coverage for the EExpressionWith12BitAddress encoding (0x40..0x4F).
     // This uses a synthetic user macro at address 64 that expands to its single argument.
