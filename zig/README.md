@@ -191,6 +191,7 @@ Key properties:
   - `good/` roundtrip through a format matrix (binary/text variants)
 - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
 - As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `179/179` tests).
+- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `180/180` tests).
 
 ### Skip list (currently empty)
 
@@ -351,6 +352,7 @@ Below is a tighter checklist for "spec completeness" work. These are not require
    - [ ] Audit remaining value opcodes and edge cases against ion-rust's Ion 1.1 binary reader/writer:
      - [x] Ensure unknown/reserved opcodes surface as `InvalidIon` (not `Unsupported`).
      - [x] Fix `minInt(i128)` overflow in Ion 1.1 decimal decoding (decode as a BigInt magnitude).
+     - [x] Align FlexUInt/FlexInt size limits with ion-rust (reject encodings over 10 bytes).
      - [ ] Validate canonical vs non-canonical encodings where the spec distinguishes them.
      - [ ] Verify all container forms (short/long/delimited) and annotation wrappers across nesting.
    - Relevant files: `zig/src/ion/binary11.zig`, `zig/src/ion/writer11.zig`, `src/lazy/binary/raw/v1_1/reader.rs`, `src/lazy/encoder/binary/v1_1/value_writer.rs`.

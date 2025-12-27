@@ -1740,6 +1740,24 @@ test "ion 1.1 binary11 rejects unknown/reserved opcode as InvalidIon" {
     try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, &bytes));
 }
 
+test "ion 1.1 binary11 rejects FlexUInt/FlexInt encodings over 10 bytes" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Long decimal opcode F7 with payload length 11 and exponent encoded as an 11-byte FlexInt.
+    //
+    // FlexUInt(11) = (11<<1)|1 = 0x17. The payload is 11 bytes of exponent only (no coefficient bytes).
+    // An 11-byte FlexInt(0) can be encoded as 0x00,0x00,0x01 followed by 8 zeros.
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA,
+        0xF7, 0x17, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00,
+    };
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes));
+}
+
 test "ion 1.1 writer11 can emit canonical qualified meta/flatten/parse_ion helpers" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
@@ -3878,22 +3896,23 @@ test "ion 1.1 binary NOP padding (EC/ED)" {
 
 test "ion 1.1 binary decimals accept large FlexInt encodings" {
     // Conformance uses non-minimal FlexInt encodings (e.g. exponent=0 encoded in multiple bytes).
-    // Keep a regression test that exercises `shift > 16` so we don't accidentally reintroduce
-    // small fixed caps in FlexInt/FlexUInt decoding.
+    // Keep a regression test that exercises a multi-byte encoding so we don't accidentally
+    // reintroduce small fixed caps in FlexInt/FlexUInt decoding.
+    //
+    // ion-rust caps supported serialized FlexInt/FlexUInt sizes at 10 bytes, so this test uses a
+    // 9-byte encoding (still very non-minimal for exponent=0).
 
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
 
     // Long decimal:
-    //   F7 <flexuint payload_len=17> <FlexInt(0) encoded with shift=17 bytes>
+    //   F7 <flexuint payload_len=9> <FlexInt(0) encoded with shift=9 bytes>
     //
-    // FlexUInt(17) with minimal 1-byte encoding: (17<<1)|1 = 0x23.
-    // FlexInt(0) with shift=17: only the tag bit set at bit 16 => byte[2]=0x01, others 0.
+    // FlexUInt(9) with minimal 1-byte encoding: (9<<1)|1 = 0x13.
+    // FlexInt(0) with shift=9: tag bit set at bit 8 => bytes[0]=0x00, bytes[1]=0x01, rest 0.
     const bytes = &[_]u8{
         0xE0, 0x01, 0x01, 0xEA,
-        0xF7, 0x23, 0x00, 0x00,
-        0x01, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
+        0xF7, 0x13, 0x00, 0x01,
         0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00,
     };
@@ -4005,8 +4024,8 @@ test "ion 1.1 binary e-expression FlexSym inline symbols (tagless group)" {
 }
 
 test "ion 1.1 binary e-expression FlexUInt big value" {
-    // Exercises FlexUInt values that exceed `usize` and `i128`, which can appear in macro arg
-    // positions for `.flex_uint` parameters.
+    // ion-rust caps supported serialized FlexUInt size at 10 bytes. A FlexUInt encoding with a
+    // larger shift should be rejected as invalid.
 
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
@@ -4031,13 +4050,7 @@ test "ion 1.1 binary e-expression FlexUInt big value" {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08,
     };
     const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0x40, 0x00 } ++ flex;
-    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab);
-    try std.testing.expectEqual(@as(usize, 1), elems.len);
-    try std.testing.expect(elems[0].value == .int);
-    try std.testing.expect(elems[0].value.int == .big);
-    const bi = elems[0].value.int.big;
-    try std.testing.expect(bi.toConst().positive);
-    try std.testing.expectEqual(@as(usize, 129), bi.toConst().bitCountAbs());
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevelWithMacroTable(&arena, bytes, &tab));
 }
 
 test "ion 1.1 binary e-expression bitmap with 2 variadic params" {

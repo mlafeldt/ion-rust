@@ -4310,6 +4310,8 @@ fn typeCodeToIonType(tc: u8) ?value.IonType {
 
 fn readFlexUInt(input: []const u8, cursor: *usize) IonError!usize {
     const shift = try detectFlexShift(input, cursor);
+    // ion-rust caps supported serialized FlexUInt size at 10 bytes.
+    if (shift > 10) return IonError.InvalidIon;
     if (shift == 0) return IonError.InvalidIon;
     if (cursor.* + shift > input.len) return IonError.Incomplete;
     const raw = input[cursor.* .. cursor.* + shift];
@@ -4346,8 +4348,8 @@ fn readFlexUInt(input: []const u8, cursor: *usize) IonError!usize {
         const start_byte = overflow_bit / 8;
         const start_bit: u3 = @intCast(overflow_bit % 8);
         const mask: u8 = (@as(u8, 0xFF) << start_bit);
-        if ((raw[start_byte] & mask) != 0) return IonError.Unsupported;
-        for (raw[start_byte + 1 ..]) |b| if (b != 0) return IonError.Unsupported;
+        if ((raw[start_byte] & mask) != 0) return IonError.InvalidIon;
+        for (raw[start_byte + 1 ..]) |b| if (b != 0) return IonError.InvalidIon;
     }
 
     return out;
@@ -4355,6 +4357,8 @@ fn readFlexUInt(input: []const u8, cursor: *usize) IonError!usize {
 
 fn readFlexInt(input: []const u8, cursor: *usize) IonError!i32 {
     const shift = try detectFlexShift(input, cursor);
+    // ion-rust caps supported serialized FlexInt size at 10 bytes (same primitive as FlexUInt).
+    if (shift > 10) return IonError.InvalidIon;
     if (shift == 0) return IonError.InvalidIon;
     if (cursor.* + shift > input.len) return IonError.Incomplete;
     const raw = input[cursor.* .. cursor.* + shift];
@@ -4392,21 +4396,22 @@ fn readFlexInt(input: []const u8, cursor: *usize) IonError!i32 {
         const start_bit: u3 = @intCast(overflow_bit % 8);
         const mask: u8 = (@as(u8, 0xFF) << start_bit);
         if (!negative) {
-            if ((raw[start_byte] & mask) != 0) return IonError.Unsupported;
-            for (raw[start_byte + 1 ..]) |b| if (b != 0) return IonError.Unsupported;
+            if ((raw[start_byte] & mask) != 0) return IonError.InvalidIon;
+            for (raw[start_byte + 1 ..]) |b| if (b != 0) return IonError.InvalidIon;
         } else {
-            if ((raw[start_byte] & mask) != mask) return IonError.Unsupported;
-            for (raw[start_byte + 1 ..]) |b| if (b != 0xFF) return IonError.Unsupported;
+            if ((raw[start_byte] & mask) != mask) return IonError.InvalidIon;
+            for (raw[start_byte + 1 ..]) |b| if (b != 0xFF) return IonError.InvalidIon;
         }
     }
 
     const v64: i64 = @bitCast(low64);
-    if (v64 < std.math.minInt(i32) or v64 > std.math.maxInt(i32)) return IonError.Unsupported;
+    if (v64 < std.math.minInt(i32) or v64 > std.math.maxInt(i32)) return IonError.InvalidIon;
     return @intCast(v64);
 }
 
 fn readFlexUIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!value.Int {
     const shift = try detectFlexShift(input, cursor);
+    if (shift > 10) return IonError.InvalidIon;
     if (shift == 0) return IonError.InvalidIon;
     if (cursor.* + shift > input.len) return IonError.Incomplete;
     const raw = input[cursor.* .. cursor.* + shift];
@@ -4430,6 +4435,7 @@ fn readFlexUIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize) Ion
 
 fn readFlexIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!value.Int {
     const shift = try detectFlexShift(input, cursor);
+    if (shift > 10) return IonError.InvalidIon;
     if (shift == 0) return IonError.InvalidIon;
     if (cursor.* + shift > input.len) return IonError.Incomplete;
     const raw = input[cursor.* .. cursor.* + shift];
