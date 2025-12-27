@@ -2361,7 +2361,8 @@ fn writeMacroShapeArg(
             std.mem.eql(u8, shape.name, "make_string") or
             std.mem.eql(u8, shape.name, "make_symbol") or
             std.mem.eql(u8, shape.name, "make_blob") or
-            std.mem.eql(u8, shape.name, "flatten"))
+            std.mem.eql(u8, shape.name, "flatten") or
+            std.mem.eql(u8, shape.name, "delta"))
         {
             // Payload encoding matches the qualified system macro invocation encoding (minus the
             // leading `0xEF <addr>`):
@@ -2384,6 +2385,17 @@ fn writeMacroShapeArg(
             for (args) |a| try writeElement(allocator, &payload, options, a);
             try writeFlexUIntShift1(out, allocator, payload.items.len);
             try appendSlice(out, allocator, payload.items);
+            return;
+        }
+        if (std.mem.eql(u8, shape.name, "repeat")) {
+            // Payload encoding matches the qualified system macro invocation encoding (minus the
+            // leading `0xEF <addr>`): a presence byte and tagged value for `<n>`, followed by a
+            // single tagged value expression for `<expr>`.
+            if (args.len != 2) return IonError.InvalidIon;
+
+            try appendByte(out, allocator, 0x01);
+            try writeElement(allocator, out, options, args[0]);
+            try writeElement(allocator, out, options, args[1]);
             return;
         }
         if (std.mem.eql(u8, shape.name, "make_list") or

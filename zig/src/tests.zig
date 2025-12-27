@@ -2001,6 +2001,75 @@ test "ion 1.1 writer11/binary11 support macro_shape args for $ion::flatten" {
     try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
 }
 
+test "ion 1.1 writer11/binary11 support macro_shape args for $ion::repeat and $ion::delta" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const body_sym_percent = try ion.value.makeSymbol(&arena, "%");
+    const body_sym_x = try ion.value.makeSymbol(&arena, "x");
+    const body_sx_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    body_sx_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_percent } };
+    body_sx_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_x } };
+    const body_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = body_sx_items } };
+
+    const p_repeat = ion.macro.Param{ .ty = .macro_shape, .card = .zero_or_many, .name = "x", .shape = .{ .module = "$ion", .name = "repeat" } };
+    const p_delta = ion.macro.Param{ .ty = .macro_shape, .card = .zero_or_many, .name = "x", .shape = .{ .module = "$ion", .name = "delta" } };
+
+    const macro_body = [_]ion.value.Element{body_elem};
+
+    const macro_defs = try std.testing.allocator.alloc(ion.macro.Macro, 3);
+    defer std.testing.allocator.free(macro_defs);
+    macro_defs[0] = .{ .name = null, .params = &.{}, .body = &.{} };
+    macro_defs[1] = .{ .name = "rep", .params = @constCast((&[_]ion.macro.Param{p_repeat})[0..]), .body = &macro_body };
+    macro_defs[2] = .{ .name = "del", .params = @constCast((&[_]ion.macro.Param{p_delta})[0..]), .body = &macro_body };
+    const mactab: ion.macro.MacroTable = .{ .macros = macro_defs };
+
+    const int3: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } };
+    const int7: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 7 } } };
+    const repeat_args = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    repeat_args[0] = int3;
+    repeat_args[1] = int7;
+    const repeat_arg: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = repeat_args } };
+
+    const deltas = arena.allocator().alloc(ion.value.Element, 3) catch return ion.IonError.OutOfMemory;
+    deltas[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
+    deltas[1] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
+    deltas[2] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } };
+    const delta_arg: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = deltas } };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+
+    try ion.writer11.writeMacroInvocationLengthPrefixedWithParams(
+        std.testing.allocator,
+        &out,
+        1,
+        &.{p_repeat},
+        &.{&.{repeat_arg}},
+        .{ .mactab = &mactab },
+    );
+    try ion.writer11.writeMacroInvocationLengthPrefixedWithParams(
+        std.testing.allocator,
+        &out,
+        2,
+        &.{p_delta},
+        &.{&.{delta_arg}},
+        .{ .mactab = &mactab },
+    );
+
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, out.items, &mactab);
+    const expected = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 7 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 7 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 7 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 4 } } },
+    };
+    try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
+}
+
 test "ion 1.1 writer11 can emit user macro by name (unqualified + length-prefixed)" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

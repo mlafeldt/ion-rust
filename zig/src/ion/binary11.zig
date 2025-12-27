@@ -1526,6 +1526,12 @@ const Decoder = struct {
             if (std.mem.eql(u8, shape.name, "annotate")) {
                 return self.expandAnnotate();
             }
+            if (std.mem.eql(u8, shape.name, "repeat")) {
+                return self.expandRepeat();
+            }
+            if (std.mem.eql(u8, shape.name, "delta")) {
+                return self.expandDelta();
+            }
             if (std.mem.eql(u8, shape.name, "make_timestamp")) {
                 return self.expandMakeTimestamp();
             }
