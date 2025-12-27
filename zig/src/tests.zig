@@ -777,6 +777,53 @@ test "ion 1.1 writer11 float opcode selection" {
     try std.testing.expect(ion.eq.ionEqElements(doc_inf, parsed_inf.elements));
 }
 
+test "ion 1.1 writer11 encodes signed zero floats distinctly" {
+    const allocator = std.testing.allocator;
+
+    const doc_pos = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .float = 0.0 },
+    }};
+    const bytes_pos = try ion.writer11.writeBinary11WithOptions(allocator, doc_pos, .{});
+    defer allocator.free(bytes_pos);
+    try std.testing.expect(bytes_pos.len >= 5);
+    try std.testing.expect(bytes_pos[4] == 0x6A);
+    var parsed_pos = try ion.parseDocument(allocator, bytes_pos);
+    defer parsed_pos.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_pos, parsed_pos.elements));
+
+    const neg_zero: f64 = @bitCast(@as(u64, 0x8000_0000_0000_0000));
+    const doc_neg = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .float = neg_zero },
+    }};
+    const bytes_neg = try ion.writer11.writeBinary11WithOptions(allocator, doc_neg, .{});
+    defer allocator.free(bytes_neg);
+    try std.testing.expect(bytes_neg.len >= 5);
+    try std.testing.expect(bytes_neg[4] != 0x6A);
+    var parsed_neg = try ion.parseDocument(allocator, bytes_neg);
+    defer parsed_neg.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_neg, parsed_neg.elements));
+}
+
+test "ion 1.1 writer11 encodes integer zero with 0x60" {
+    const allocator = std.testing.allocator;
+
+    const doc = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .int = .{ .small = 0 } },
+    }};
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{});
+    defer allocator.free(bytes);
+
+    try std.testing.expect(bytes.len >= 5);
+    try std.testing.expect(bytes[4] == 0x60);
+
+    var parsed = try ion.parseDocument(allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
+}
+
 test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
     const elems = &[_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } }, // $ion
