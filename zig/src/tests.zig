@@ -4376,6 +4376,12 @@ test "ion 1.1 binary ion-rust signature-driven qualified repeat with empty expr 
     );
 }
 
+test "ion 1.1 binary rejects bare delimited container close (F0)" {
+    const allocator = std.testing.allocator;
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xF0 };
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.parseDocumentBinary11WithOptions(allocator, bytes, .{}));
+}
+
 test "ion 1.1 binary strict_flex rejects tagless FlexUInt(2) quirk (0B 00)" {
     const allocator = std.testing.allocator;
 

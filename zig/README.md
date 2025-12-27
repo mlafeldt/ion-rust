@@ -190,7 +190,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
 - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
-- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `197/197` tests).
+- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `198/198` tests).
 
 ### Skip list (currently empty)
 
@@ -355,15 +355,31 @@ Below is a tighter checklist for "spec completeness" work. These are not require
    - Relevant files: `zig/src/ion/writer11.zig`, `zig/src/ion/writer.zig`, `zig/src/ion/text.zig`.
 
 4) Ion 1.1 binary (spec completeness audit)
-   - [ ] Audit remaining value opcodes and edge cases against ion-rust's Ion 1.1 binary reader/writer:
-     - [x] Ensure unknown/reserved opcodes surface as `InvalidIon` (not `Unsupported`).
-     - [x] Fix `minInt(i128)` overflow in Ion 1.1 decimal decoding (decode as a BigInt magnitude).
-     - [x] Align FlexUInt/FlexInt size limits with ion-rust (reject encodings over 10 bytes).
-     - [x] Decode FlexInt as i64 for FlexSym (match ion-rust's FlexInt range; reject out-of-range values).
-     - [x] Writer emits canonical FlexUInt/FlexInt encodings (matches ion-rust regression vectors).
-     - [x] Add a `strict_flex` option to reject non-minimal FlexUInt/FlexInt encodings (opt-in; conformance stays lenient).
-     - [ ] Validate canonical vs non-canonical encodings where the spec distinguishes them (beyond `strict_flex`).
-     - [ ] Verify all container forms (short/long/delimited) and annotation wrappers across nesting (partially covered by tests; not an exhaustive audit).
+   - Goal: "ion-rust canonical" Ion 1.1 binary compatibility (decode what ion-rust writes, and reject what ion-rust rejects), while keeping conformance-friendly decoding as the default.
+   - Audit checklist (tracked by tests; do not consider this done until each item has a regression test):
+     - Opcode table / reserved opcodes:
+       - [x] Unknown/reserved opcodes surface as `InvalidIon` (not `Unsupported`).
+       - [x] `0xD1` short-struct reserved is rejected.
+       - [x] `0xF0` delimited container close is rejected when it appears as a value expression (outside a delimited container context).
+     - Flex encodings (FlexUInt/FlexInt/FlexSym):
+       - [x] Align FlexUInt/FlexInt size limits with ion-rust (reject encodings over 10 bytes).
+       - [x] Decode FlexInt as i64 for FlexSym (match ion-rust's FlexInt range; reject out-of-range values).
+       - [x] `strict_flex` option rejects non-minimal FlexUInt/FlexInt encodings (opt-in; conformance stays lenient).
+       - [ ] Validate other "canonical vs non-canonical" distinctions beyond Flex minimality (if/when the spec distinguishes them).
+     - Containers:
+       - [ ] Exhaustive nesting coverage for list/sexp/struct in all 3 encodings: short (B0..DF), long (FB/FC/FD), and delimited (F1/F2/F3 ... F0).
+       - [ ] Struct field-name encoding forms (FlexSym field names vs other forms) across nesting.
+     - Annotations sequences:
+       - [x] E4/E5/E6 (SID-only) resolution works when `resolve_user_symbols = true`.
+       - [x] E7/E8/E9 (FlexSym) resolution works when `resolve_user_symbols = true`.
+       - [ ] Add "deep nesting" coverage: annotations on containers containing annotated children.
+     - System symbol addresses:
+       - [x] `0xEE` SystemSymbolAddress matches ion-rust + is selectable via `sys_symtab11_variant`.
+       - [ ] Roundtrip coverage for system symbols inside annotations and field names in Ion 1.1 binary.
+     - E-expressions / system macros:
+       - [x] Length-prefixed system macro invocations (`0xF5`) decode using the spec signature-driven argument encoding.
+       - [x] When `sys_symtab11_variant = .ion_rust`, qualified system macro invocations (`0xEF <addr> ...`) decode using the spec signature-driven argument encoding (matches ion-rust writer output).
+       - [ ] Extend writer11 to emit signature-driven args for all qualified system macros under `sys_symtab11_variant = .ion_rust` (not just a subset like `repeat`).
    - Relevant files: `zig/src/ion/binary11.zig`, `zig/src/ion/writer11.zig`, `src/lazy/binary/raw/v1_1/reader.rs`, `src/lazy/encoder/binary/v1_1/value_writer.rs`.
 
 5) Reader architecture (streaming/lazy)
