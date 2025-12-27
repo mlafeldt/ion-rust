@@ -269,6 +269,106 @@ test "ion 1.1 binary can infer ion-rust system symbols from module head" {
     try std.testing.expectEqualStrings("module", res.elements[0].value.symbol.text orelse return error.TestExpectedEqual);
 }
 
+test "ion 1.1 writer11 can emit delimited tagged argument groups" {
+    const allocator = std.testing.allocator;
+
+    // macro pass(vals*) => %vals
+    var params = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "vals", .shape = null }};
+    const body = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%vals") } },
+    };
+    var macros = [_]ion.macro.Macro{.{
+        .name = "pass",
+        .params = params[0..],
+        .body = body[0..],
+    }};
+    const tab = ion.macro.MacroTable{ .base_addr = ion.macro.system_macro_count, .macros = macros[0..] };
+
+    const args = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+    };
+    const args_by_param = [_][]const ion.value.Element{args[0..]};
+
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(allocator);
+    try bytes.appendSlice(allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeUserMacroInvocationLengthPrefixedByNameWithParams(
+        allocator,
+        &bytes,
+        &tab,
+        "pass",
+        args_by_param[0..],
+        .{ .arg_group_encoding = .delimited },
+    );
+
+    var arena = try ion.value.Arena.init(allocator);
+    defer arena.deinit();
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes.items, &tab);
+
+    try std.testing.expectEqual(@as(usize, 2), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expect(elems[1].value == .int);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+    try std.testing.expectEqual(@as(i128, 2), elems[1].value.int.small);
+}
+
+test "ion 1.1 writer11 can emit delimited tagless argument groups" {
+    const allocator = std.testing.allocator;
+
+    // macro pass_i8(vals*) => ((.$ion::values %) vals)
+    var params = [_]ion.macro.Param{.{ .ty = .int8, .card = .zero_or_many, .name = "vals", .shape = null }};
+    var inner_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, ".values") } },
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%") } },
+    };
+    const inner = ion.value.Element{ .annotations = &.{}, .value = .{ .sexp = inner_items[0..] } };
+    var outer_items = [_]ion.value.Element{
+        inner,
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "vals") } },
+    };
+    const outer = ion.value.Element{ .annotations = &.{}, .value = .{ .sexp = outer_items[0..] } };
+    const body = [_]ion.value.Element{outer};
+
+    var macros = [_]ion.macro.Macro{.{
+        .name = "pass_i8",
+        .params = params[0..],
+        .body = body[0..],
+    }};
+    const tab = ion.macro.MacroTable{ .base_addr = ion.macro.system_macro_count, .macros = macros[0..] };
+
+    const args = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } },
+    };
+    const args_by_param = [_][]const ion.value.Element{args[0..]};
+
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(allocator);
+    try bytes.appendSlice(allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeUserMacroInvocationLengthPrefixedByNameWithParams(
+        allocator,
+        &bytes,
+        &tab,
+        "pass_i8",
+        args_by_param[0..],
+        .{ .arg_group_encoding = .delimited },
+    );
+
+    var arena = try ion.value.Arena.init(allocator);
+    defer arena.deinit();
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, bytes.items, &tab);
+
+    try std.testing.expectEqual(@as(usize, 3), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expect(elems[1].value == .int);
+    try std.testing.expect(elems[2].value == .int);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+    try std.testing.expectEqual(@as(i128, 2), elems[1].value.int.small);
+    try std.testing.expectEqual(@as(i128, 3), elems[2].value.int.small);
+}
+
 test "zig ion serializeDocument binary_1_1 roundtrips values" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

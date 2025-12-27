@@ -48,6 +48,18 @@ pub const Options = struct {
     /// Both forms are valid Ion 1.1 binary. Delimited is the default because it avoids buffering
     /// the container body in memory before writing.
     container_encoding: enum { delimited, length_prefixed } = .delimited,
+
+    /// Controls how argument groups (presence code `0b10`) are encoded inside length-prefixed
+    /// e-expressions (`0xF5`) and unqualified user macro invocations.
+    ///
+    /// - `.length_prefixed` writes a FlexUInt length followed by a contiguous payload.
+    /// - `.delimited` writes FlexUInt(0) and then uses the spec delimited forms:
+    ///   - tagged groups end with `0xF0`
+    ///   - tagless groups are chunked (`<flexuint chunk_len> <chunk_bytes>* <flexuint 0>`)
+    ///
+    /// Both forms are valid Ion 1.1. The delimited form is useful for streaming emitters and for
+    /// exercising decoder paths that only appear in delimited group encodings.
+    arg_group_encoding: enum { length_prefixed, delimited } = .length_prefixed,
 };
 
 pub fn writeBinary11(allocator: std.mem.Allocator, doc: []const value.Element) IonError![]u8 {
@@ -1886,12 +1898,34 @@ fn encodeLengthPrefixedArgBindings(
             0b00 => {},
             0b01 => try writeArgValue(allocator, out, options, p, args[0]),
             0b10 => {
-                // Use a length-prefixed group payload (not the delimited/chunked form).
-                var payload = std.ArrayListUnmanaged(u8){};
-                defer payload.deinit(allocator);
-                for (args) |e| try writeArgValue(allocator, &payload, options, p, e);
-                try writeFlexUIntShift1(out, allocator, payload.items.len);
-                try appendSlice(out, allocator, payload.items);
+                switch (options.arg_group_encoding) {
+                    .length_prefixed => {
+                        var payload = std.ArrayListUnmanaged(u8){};
+                        defer payload.deinit(allocator);
+                        for (args) |e| try writeArgValue(allocator, &payload, options, p, e);
+                        try writeFlexUIntShift1(out, allocator, payload.items.len);
+                        try appendSlice(out, allocator, payload.items);
+                    },
+                    .delimited => {
+                        // FlexUInt(0) selects the delimited forms:
+                        // - tagged groups terminate with `0xF0`
+                        // - tagless groups use chunked encoding terminated by FlexUInt(0)
+                        try writeFlexUIntShift1(out, allocator, 0);
+
+                        if (p.ty == .tagged) {
+                            for (args) |e| try writeArgValue(allocator, out, options, p, e);
+                            try appendByte(out, allocator, 0xF0);
+                            continue;
+                        }
+
+                        var payload = std.ArrayListUnmanaged(u8){};
+                        defer payload.deinit(allocator);
+                        for (args) |e| try writeArgValue(allocator, &payload, options, p, e);
+                        try writeFlexUIntShift1(out, allocator, payload.items.len);
+                        try appendSlice(out, allocator, payload.items);
+                        try writeFlexUIntShift1(out, allocator, 0);
+                    },
+                }
             },
             else => return IonError.InvalidIon,
         }
@@ -1905,26 +1939,33 @@ fn writeArgValue(
     p: ion.macro.Param,
     e: value.Element,
 ) IonError!void {
-    if (e.annotations.len != 0) return IonError.InvalidIon;
     return switch (p.ty) {
         .tagged => writeElement(allocator, out, options, e),
-        .macro_shape => writeMacroShapeArg(allocator, out, options, p, e),
+        .macro_shape => blk: {
+            if (e.annotations.len != 0) return IonError.InvalidIon;
+            try writeMacroShapeArg(allocator, out, options, p, e);
+            break :blk;
+        },
         .flex_uint => blk: {
+            if (e.annotations.len != 0) return IonError.InvalidIon;
             if (e.value != .int) return IonError.InvalidIon;
             try writeFlexUIntShift1Int(out, allocator, e.value.int);
             break :blk;
         },
         .flex_int => blk: {
+            if (e.annotations.len != 0) return IonError.InvalidIon;
             if (e.value != .int) return IonError.InvalidIon;
             try writeFlexIntShift1Int(out, allocator, e.value.int);
             break :blk;
         },
         .flex_sym => blk: {
+            if (e.annotations.len != 0) return IonError.InvalidIon;
             if (e.value != .symbol) return IonError.InvalidIon;
             try writeFlexSymSymbol(out, allocator, options, e.value.symbol);
             break :blk;
         },
         .uint8, .uint16, .uint32, .uint64 => blk: {
+            if (e.annotations.len != 0) return IonError.InvalidIon;
             if (e.value != .int) return IonError.InvalidIon;
             const u = try intToU64(e.value.int);
             const n: usize = switch (p.ty) {
@@ -1945,6 +1986,7 @@ fn writeArgValue(
             break :blk;
         },
         .int8, .int16, .int32, .int64 => blk: {
+            if (e.annotations.len != 0) return IonError.InvalidIon;
             if (e.value != .int) return IonError.InvalidIon;
             const i = try intToI64(e.value.int);
             const n: usize = switch (p.ty) {
@@ -1965,6 +2007,7 @@ fn writeArgValue(
             break :blk;
         },
         .float16 => blk: {
+            if (e.annotations.len != 0) return IonError.InvalidIon;
             if (e.value != .float) return IonError.InvalidIon;
             const f: f16 = @floatCast(e.value.float);
             var buf: [2]u8 = undefined;
@@ -1973,6 +2016,7 @@ fn writeArgValue(
             break :blk;
         },
         .float32 => blk: {
+            if (e.annotations.len != 0) return IonError.InvalidIon;
             if (e.value != .float) return IonError.InvalidIon;
             const f: f32 = @floatCast(e.value.float);
             var buf: [4]u8 = undefined;
@@ -1981,6 +2025,7 @@ fn writeArgValue(
             break :blk;
         },
         .float64 => blk: {
+            if (e.annotations.len != 0) return IonError.InvalidIon;
             if (e.value != .float) return IonError.InvalidIon;
             var buf: [8]u8 = undefined;
             std.mem.writeInt(u64, &buf, @bitCast(e.value.float), .little);
