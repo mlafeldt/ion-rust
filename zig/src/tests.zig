@@ -4234,6 +4234,35 @@ test "ion 1.1 writer11 length-prefixed containers roundtrip" {
     try std.testing.expect(ion.eq.ionEqElements(&doc, parsed.elements));
 }
 
+test "ion 1.1 binary resolve_user_symbols resolves E4 annotation symbol addresses" {
+    const allocator = std.testing.allocator;
+
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(allocator);
+
+    try bytes.appendSlice(allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    ion.writer11.writeSetSymbolsDirectiveText(allocator, &bytes, &.{"ann"}) catch |e| switch (e) {
+        ion.IonError.OutOfMemory => return ion.IonError.OutOfMemory,
+        else => return e,
+    };
+
+    // AnnotationsSequence (E4 = single symbol address) where the address is FlexUInt(1) = 0x03.
+    try bytes.appendSlice(allocator, &.{ 0xE4, 0x03 });
+    // int(1): 1-byte two's complement.
+    try bytes.appendSlice(allocator, &.{ 0x61, 0x01 });
+
+    var doc = try ion.parseDocumentBinary11WithOptions(allocator, bytes.items, .{ .resolve_user_symbols = true });
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), doc.elements.len);
+    try std.testing.expectEqual(@as(usize, 1), doc.elements[0].annotations.len);
+    try std.testing.expect(doc.elements[0].annotations[0].text != null);
+    try std.testing.expectEqualStrings("ann", doc.elements[0].annotations[0].text.?);
+
+    try std.testing.expect(doc.elements[0].value == .int);
+    try std.testing.expectEqual(@as(i128, 1), doc.elements[0].value.int.small);
+}
+
 test "ion 1.1 binary e-expression 12-bit address (minimal)" {
     // Minimal coverage for the EExpressionWith12BitAddress encoding (0x40..0x4F).
     // This uses a synthetic user macro at address 64 that expands to its single argument.
