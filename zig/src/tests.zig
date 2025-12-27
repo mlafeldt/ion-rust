@@ -264,6 +264,59 @@ test "ion 1.1 writer11 symbol address opcodes at E2/E3 boundary roundtrip" {
     try std.testing.expect(ion.eq.ionEqElements(doc_e3, parsed_e3.elements));
 }
 
+test "ion 1.1 writer11 symbol address opcodes at E1/E2 boundary roundtrip" {
+    const allocator = std.testing.allocator;
+
+    const doc_e1 = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .symbol = .{ .sid = 255, .text = null } },
+    }};
+    const bytes_e1 = try ion.serializeDocument(allocator, .binary_1_1_raw, doc_e1);
+    defer allocator.free(bytes_e1);
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes_e1, &.{0xE1}) != null);
+
+    var parsed_e1 = try ion.parseDocument(allocator, bytes_e1);
+    defer parsed_e1.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_e1, parsed_e1.elements));
+
+    const doc_e2 = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .symbol = .{ .sid = 256, .text = null } },
+    }};
+    const bytes_e2 = try ion.serializeDocument(allocator, .binary_1_1_raw, doc_e2);
+    defer allocator.free(bytes_e2);
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes_e2, &.{0xE2}) != null);
+
+    var parsed_e2 = try ion.parseDocument(allocator, bytes_e2);
+    defer parsed_e2.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_e2, parsed_e2.elements));
+}
+
+test "ion 1.1 writer11 rejects unencodable symbol IDs" {
+    const allocator = std.testing.allocator;
+
+    const max_encodable_sid: u32 = 0x00FF_FFFF + 65_792;
+    const doc_max = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .symbol = .{ .sid = max_encodable_sid, .text = null } },
+    }};
+    const bytes = try ion.serializeDocument(allocator, .binary_1_1_raw, doc_max);
+    defer allocator.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{0xE3}) != null);
+
+    var parsed = try ion.parseDocument(allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_max, parsed.elements));
+
+    const doc_too_big = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .symbol = .{ .sid = max_encodable_sid + 1, .text = null } },
+    }};
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.serializeDocument(allocator, .binary_1_1_raw, doc_too_big));
+}
+
 test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
     const elems = &[_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } }, // $ion
