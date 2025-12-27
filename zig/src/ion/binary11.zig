@@ -1544,6 +1544,9 @@ const Decoder = struct {
             if (std.mem.eql(u8, shape.name, "values")) {
                 return self.expandValues();
             }
+            if (std.mem.eql(u8, shape.name, "default")) {
+                return self.expandDefault();
+            }
             return IonError.Unsupported;
         }
 

@@ -2467,6 +2467,59 @@ fn writeMacroShapeArg(
             if (offset) |v| try writeElement(allocator, out, options, v);
             return;
         }
+        if (std.mem.eql(u8, shape.name, "default")) {
+            // Payload encoding matches the qualified system macro invocation encoding (minus the
+            // leading `0xEF <addr>`): a 1-byte packed presence code followed by the present args.
+            //
+            // Represent the arguments as a sexp of 2 items:
+            //   (<a> <b>)
+            // where each item is either:
+            // - a single (unannotated) value => presence 0b01
+            // - an s-expression of 0+ values => presence 0b10 (tagged expression group)
+            if (args.len != 2) return IonError.InvalidIon;
+
+            const code = struct {
+                fn classify(arg: value.Element) IonError!u2 {
+                    if (arg.annotations.len != 0) return IonError.InvalidIon;
+                    return switch (arg.value) {
+                        .sexp => 0b10,
+                        else => 0b01,
+                    };
+                }
+                fn pack(a: u2, b: u2) u8 {
+                    return @as(u8, a) | (@as(u8, b) << 2);
+                }
+            };
+
+            const a_code = try code.classify(args[0]);
+            const b_code = try code.classify(args[1]);
+            try appendByte(out, allocator, code.pack(a_code, b_code));
+
+            const writeOne = struct {
+                fn run(alloc: std.mem.Allocator, o: *std.ArrayListUnmanaged(u8), opt: Options, arg: value.Element) IonError!void {
+                    if (arg.annotations.len != 0) return IonError.InvalidIon;
+                    if (arg.value == .sexp) return IonError.InvalidIon;
+                    try writeValue(alloc, o, opt, arg.value);
+                }
+            }.run;
+
+            const writeGroup = struct {
+                fn run(alloc: std.mem.Allocator, o: *std.ArrayListUnmanaged(u8), opt: Options, arg: value.Element) IonError!void {
+                    if (arg.annotations.len != 0) return IonError.InvalidIon;
+                    if (arg.value != .sexp) return IonError.InvalidIon;
+                    const group = arg.value.sexp;
+
+                    // Use the spec delimited tagged group form: FlexUInt(0) ... 0xF0.
+                    try writeFlexUIntShift1(o, alloc, 0);
+                    for (group) |g| try writeElement(alloc, o, opt, g);
+                    try appendByte(o, alloc, 0xF0);
+                }
+            }.run;
+
+            if (a_code == 0b01) try writeOne(allocator, out, options, args[0]) else try writeGroup(allocator, out, options, args[0]);
+            if (b_code == 0b01) try writeOne(allocator, out, options, args[1]) else try writeGroup(allocator, out, options, args[1]);
+            return;
+        }
         return IonError.Unsupported;
     }
 

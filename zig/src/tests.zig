@@ -2070,6 +2070,72 @@ test "ion 1.1 writer11/binary11 support macro_shape args for $ion::repeat and $i
     try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
 }
 
+test "ion 1.1 writer11/binary11 support macro_shape args for $ion::default" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const body_sym_percent = try ion.value.makeSymbol(&arena, "%");
+    const body_sym_x = try ion.value.makeSymbol(&arena, "x");
+    const body_sx_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    body_sx_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_percent } };
+    body_sx_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_x } };
+    const body_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = body_sx_items } };
+
+    const p_default = ion.macro.Param{ .ty = .macro_shape, .card = .zero_or_many, .name = "x", .shape = .{ .module = "$ion", .name = "default" } };
+    const macro_body = [_]ion.value.Element{body_elem};
+
+    const macro_defs = try std.testing.allocator.alloc(ion.macro.Macro, 2);
+    defer std.testing.allocator.free(macro_defs);
+    macro_defs[0] = .{ .name = null, .params = &.{}, .body = &.{} };
+    macro_defs[1] = .{ .name = "m", .params = @constCast((&[_]ion.macro.Param{p_default})[0..]), .body = &macro_body };
+    const mactab: ion.macro.MacroTable = .{ .macros = macro_defs };
+
+    // Encode two default macro-shape args:
+    // 1) a = () (empty group), b = (1 2) => default returns b (1 2)
+    // 2) a = (9), b = (1 2) => default returns a (9)
+    const empty_group: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = &.{} } };
+
+    const b_group_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    b_group_items[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
+    b_group_items[1] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } };
+    const b_group: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = b_group_items } };
+
+    const a_group_items = arena.allocator().alloc(ion.value.Element, 1) catch return ion.IonError.OutOfMemory;
+    a_group_items[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 9 } } };
+    const a_group: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = a_group_items } };
+
+    const default1_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    default1_items[0] = empty_group;
+    default1_items[1] = b_group;
+    const default1: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = default1_items } };
+
+    const default2_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    default2_items[0] = a_group;
+    default2_items[1] = b_group;
+    const default2: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = default2_items } };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+
+    try ion.writer11.writeMacroInvocationLengthPrefixedWithParams(
+        std.testing.allocator,
+        &out,
+        1,
+        &.{p_default},
+        &.{&.{ default1, default2 }},
+        .{ .mactab = &mactab },
+    );
+
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, out.items, &mactab);
+    const expected = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 9 } } },
+    };
+    try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
+}
+
 test "ion 1.1 writer11 can emit user macro by name (unqualified + length-prefixed)" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
