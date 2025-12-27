@@ -153,7 +153,11 @@ Key properties:
 - `zig/src/ion/writer11.zig` (experimental / partial)
   - Emits Ion 1.1 IVM and a subset of Ion 1.1 binary value opcodes.
   - Emits lists/sexps/structs using the delimited container opcodes (`F1`/`F2`/`F3`) for simple streaming output.
-  - Exposed via `ion.serializeDocument(..., .binary_1_1, ...)` and exercised by the `iontestdata_1_1` corpus roundtrip (`lines -> binary_1_1 -> lines`); conformance is not roundtripped through binary Ion 1.1.
+  - Exposed via:
+    - `ion.serializeDocument(..., .binary_1_1, ...)` (self-contained prelude when needed)
+    - `ion.serializeDocument(..., .binary_1_1_raw, ...)` (no self-contained prelude)
+    - `ion.serializeDocumentBinary11WithOptions(...)` / `ion.serializeDocumentBinary11SelfContainedWithOptions(...)`
+  - Exercised by the `iontestdata_1_1` corpus roundtrip (`lines -> binary_1_1 -> lines`); conformance is not roundtripped through binary Ion 1.1.
   - For self-contained output it can emit a minimal `$ion::(module ...)` prelude:
     - always includes a symbols clause for user symbols referenced by *address* later in the stream
     - optionally includes a `(macro_table ...)` clause via `writer11.Options.emit_macro_table_prelude`, to make user macro definitions available in-stream
