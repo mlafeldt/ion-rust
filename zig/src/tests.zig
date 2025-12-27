@@ -203,6 +203,42 @@ test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
     try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x01 }) != null);
 }
 
+test "ion 1.1 writer11 can roundtrip length-prefixed containers" {
+    const allocator = std.testing.allocator;
+
+    var arena = try ion.value.Arena.init(allocator);
+    defer arena.deinit();
+
+    const sym_a = try ion.value.makeSymbol(&arena, "a");
+    const sym_b = try ion.value.makeSymbol(&arena, "b");
+
+    const list_items = try arena.allocator().alloc(ion.value.Element, 2);
+    list_items[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
+    list_items[1] = .{ .annotations = &.{}, .value = .{ .string = "hello" } };
+
+    const sexp_items = try arena.allocator().alloc(ion.value.Element, 2);
+    sexp_items[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } };
+    sexp_items[1] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } };
+
+    const struct_fields = try arena.allocator().alloc(ion.value.StructField, 2);
+    struct_fields[0] = .{ .name = sym_a, .value = .{ .annotations = &.{}, .value = .{ .list = list_items } } };
+    struct_fields[1] = .{ .name = sym_b, .value = .{ .annotations = &.{}, .value = .{ .sexp = sexp_items } } };
+
+    const doc = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = struct_fields } } }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{
+        .symbol_encoding = .inline_text_only,
+        .container_encoding = .length_prefixed,
+    });
+    defer allocator.free(bytes);
+
+    var arena2 = try ion.value.Arena.init(allocator);
+    defer arena2.deinit();
+    const parsed = try ion.binary11.parseTopLevel(&arena2, bytes);
+
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
+}
+
 test "ion 1.1 binary FlexSym escape returns system symbol as text" {
     const bytes = &[_]u8{
         0xE0, 0x01, 0x01, 0xEA, // IVM
