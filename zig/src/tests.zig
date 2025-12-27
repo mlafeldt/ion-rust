@@ -4263,6 +4263,63 @@ test "ion 1.1 binary resolve_user_symbols resolves E4 annotation symbol addresse
     try std.testing.expectEqual(@as(i128, 1), doc.elements[0].value.int.small);
 }
 
+test "ion 1.1 binary resolve_user_symbols resolves E5 annotation symbol addresses" {
+    const allocator = std.testing.allocator;
+
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(allocator);
+
+    try bytes.appendSlice(allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    ion.writer11.writeSetSymbolsDirectiveText(allocator, &bytes, &.{ "a", "b", "c" }) catch |e| switch (e) {
+        ion.IonError.OutOfMemory => return ion.IonError.OutOfMemory,
+        else => return e,
+    };
+
+    // AnnotationsSequence (E5 = two symbol addresses):
+    // - SID 1 => FlexUInt(1) = 0x03 => "a"
+    // - SID 3 => FlexUInt(3) = 0x07 => "c"
+    try bytes.appendSlice(allocator, &.{ 0xE5, 0x03, 0x07 });
+    // int(1): 1-byte two's complement.
+    try bytes.appendSlice(allocator, &.{ 0x61, 0x01 });
+
+    var doc = try ion.parseDocumentBinary11WithOptions(allocator, bytes.items, .{ .resolve_user_symbols = true });
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), doc.elements.len);
+    try std.testing.expectEqual(@as(usize, 2), doc.elements[0].annotations.len);
+    try std.testing.expectEqualStrings("a", doc.elements[0].annotations[0].text.?);
+    try std.testing.expectEqualStrings("c", doc.elements[0].annotations[1].text.?);
+}
+
+test "ion 1.1 binary resolve_user_symbols resolves E6 annotation symbol addresses" {
+    const allocator = std.testing.allocator;
+
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(allocator);
+
+    try bytes.appendSlice(allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    ion.writer11.writeSetSymbolsDirectiveText(allocator, &bytes, &.{ "a", "b", "c" }) catch |e| switch (e) {
+        ion.IonError.OutOfMemory => return ion.IonError.OutOfMemory,
+        else => return e,
+    };
+
+    // AnnotationsSequence (E6 = length-prefixed sequence of FlexUInt SIDs).
+    // Payload: FlexUInt(1), FlexUInt(2), FlexUInt(3) => 0x03, 0x05, 0x07.
+    // seq_len=3 => FlexUInt(3) = 0x07.
+    try bytes.appendSlice(allocator, &.{ 0xE6, 0x07, 0x03, 0x05, 0x07 });
+    // int(1): 1-byte two's complement.
+    try bytes.appendSlice(allocator, &.{ 0x61, 0x01 });
+
+    var doc = try ion.parseDocumentBinary11WithOptions(allocator, bytes.items, .{ .resolve_user_symbols = true });
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), doc.elements.len);
+    try std.testing.expectEqual(@as(usize, 3), doc.elements[0].annotations.len);
+    try std.testing.expectEqualStrings("a", doc.elements[0].annotations[0].text.?);
+    try std.testing.expectEqualStrings("b", doc.elements[0].annotations[1].text.?);
+    try std.testing.expectEqualStrings("c", doc.elements[0].annotations[2].text.?);
+}
+
 test "ion 1.1 binary strict_flex rejects tagless FlexUInt(2) quirk (0B 00)" {
     const allocator = std.testing.allocator;
 
