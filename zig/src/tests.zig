@@ -5201,3 +5201,54 @@ test "ion 1.1 binary writer emits short timestamp variants" {
         return error.TestUnexpectedResult;
     }
 }
+
+test "ion 1.1 binary module macro_table clause enables user macro invocation" {
+    var params = [_]ion.macro.Param{
+        .{ .ty = .tagged, .card = .one, .name = "x", .shape = null },
+    };
+
+    var var_ref_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "%x") } },
+    };
+    var body_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .sexp = var_ref_items[0..] } },
+    };
+
+    const m: ion.macro.Macro = .{
+        .name = "id",
+        .params = params[0..],
+        .body = body_items[0..],
+    };
+    var macros = [_]ion.macro.Macro{m};
+    const tab: ion.macro.MacroTable = .{ .base_addr = ion.macro.system_macro_count, .macros = macros[0..] };
+
+    const arg_elem = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 7 } } },
+    };
+    const args_by_param = [_][]const ion.value.Element{arg_elem[0..]};
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeIonSystemModuleDirectivePrelude(std.testing.allocator, &out, &.{}, &tab);
+    try ion.writer11.writeUserMacroInvocationAtAddressWithParams(
+        std.testing.allocator,
+        &out,
+        ion.macro.system_macro_count,
+        params[0..],
+        args_by_param[0..],
+        .{},
+    );
+
+    const bytes = try out.toOwnedSlice(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expectEqual(@as(usize, 1), parsed.len);
+    try std.testing.expect(parsed[0].annotations.len == 0);
+    try std.testing.expect(parsed[0].value == .int);
+    try std.testing.expectEqual(@as(i128, 7), parsed[0].value.int.small);
+}

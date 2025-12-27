@@ -154,6 +154,9 @@ Key properties:
   - Emits Ion 1.1 IVM and a subset of Ion 1.1 binary value opcodes.
   - Emits lists/sexps/structs using the delimited container opcodes (`F1`/`F2`/`F3`) for simple streaming output.
   - Exposed via `ion.serializeDocument(..., .binary_1_1, ...)` and exercised by the `iontestdata_1_1` corpus roundtrip (`lines -> binary_1_1 -> lines`); conformance is not roundtripped through binary Ion 1.1.
+  - For self-contained output it can emit a minimal `$ion::(module ...)` prelude:
+    - always includes a symbols clause for user symbols referenced by *address* later in the stream
+    - optionally includes a `(macro_table ...)` clause via `writer11.Options.emit_macro_table_prelude`, to make user macro definitions available in-stream
   - Provides low-level helpers for emitting conformance-driven Ion 1.1 binary e-expressions:
     - Length-prefixed e-expressions (`0xF5`) for system macros like `values`/`default` and for directive-like invocations (`set_symbols`, `add_symbols`, `set_macros`, `add_macros`, `use`).
     - Qualified system macro invocations (`0xEF`) for a small subset of system macros (currently including `none`, `values`, `default`, `repeat`, `delta`, `sum`, `annotate`, `make_string`, `make_symbol`, `make_decimal`, `make_timestamp`, `make_blob`, `make_list`, `make_sexp`, `parse_ion`, `make_field`, `make_struct`, `flatten`, `set_symbols`, `add_symbols`, `meta`, `set_macros`, `add_macros`, and `use`).
@@ -180,7 +183,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
 - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
-- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `154/154` tests).
+- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `155/155` tests).
 
 ### Skip list (currently empty)
 

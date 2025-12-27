@@ -39,6 +39,16 @@ pub const Options = struct {
     /// When absent, writing `macro_shape` arguments is unsupported.
     mactab: ?*const ion.macro.MacroTable = null,
 
+    /// When emitting a self-contained stream (via `writeBinary11SelfContainedWithOptions`),
+    /// controls whether the module directive prelude includes a `(macro_table ...)` clause
+    /// derived from `mactab`.
+    ///
+    /// This is primarily useful for producing standalone binaries that can be decoded without
+    /// providing an out-of-band macro table. Note that `writer11` still writes *values*, not a
+    /// macro AST; this prelude only makes user macro definitions available to the binary reader
+    /// during decoding of e-expressions that follow.
+    emit_macro_table_prelude: bool = false,
+
     /// Controls which container encodings the writer emits.
     ///
     /// - `.delimited` emits streaming-friendly delimited containers (`0xF1`/`0xF2`/`0xF3` ... `0xF0`).
@@ -83,6 +93,10 @@ pub fn writeBinary11WithOptions(allocator: std.mem.Allocator, doc: []const value
 }
 
 pub fn writeBinary11SelfContained(allocator: std.mem.Allocator, doc: []const value.Element) IonError![]u8 {
+    return writeBinary11SelfContainedWithOptions(allocator, doc, .{});
+}
+
+pub fn writeBinary11SelfContainedWithOptions(allocator: std.mem.Allocator, doc: []const value.Element, options: Options) IonError![]u8 {
     // Emit a minimal `$ion::(module ...)` prelude so non-system symbols can be encoded by address
     // without external module context.
     //
@@ -102,20 +116,24 @@ pub fn writeBinary11SelfContained(allocator: std.mem.Allocator, doc: []const val
     // Ion 1.1 IVM: E0 01 01 EA
     try appendSlice(&out, allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
 
-    if (user_texts.items.len != 0) {
-        try writeModuleDirectivePrelude(allocator, &out, user_texts.items);
+    if (user_texts.items.len != 0 or (options.emit_macro_table_prelude and options.mactab != null)) {
+        const tab = if (options.emit_macro_table_prelude) options.mactab else null;
+        try writeIonSystemModuleDirectivePrelude(allocator, &out, user_texts.items, tab);
     }
 
-    const opts: Options = .{ .symbol_encoding = .addresses, .user_symbol_ids = &map };
+    var opts = options;
+    opts.symbol_encoding = .addresses;
+    opts.user_symbol_ids = &map;
     for (doc) |e| try writeElement(allocator, &out, opts, e);
 
     return out.toOwnedSlice(allocator) catch return IonError.OutOfMemory;
 }
 
-fn writeModuleDirectivePrelude(
+pub fn writeIonSystemModuleDirectivePrelude(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
     user_symbol_texts: []const []const u8,
+    mactab: ?*const ion.macro.MacroTable,
 ) IonError!void {
     // `$ion::(module _ (<symbols-clause> _ <text-or-null>*))`
     //
@@ -131,6 +149,136 @@ fn writeModuleDirectivePrelude(
     const sym_symbols: value.Symbol = value.makeSymbolId(null, symbols_clause_name);
     const sym_underscore: value.Symbol = value.makeSymbolId(null, "_");
 
+    var macro_table_clause_items: ?[]value.Element = null;
+    defer if (macro_table_clause_items) |items| allocator.free(items);
+
+    var param_name_bufs = std.ArrayListUnmanaged([]u8){};
+    defer {
+        for (param_name_bufs.items) |b| allocator.free(b);
+        param_name_bufs.deinit(allocator);
+    }
+    var ann_bufs = std.ArrayListUnmanaged([]value.Symbol){};
+    defer {
+        for (ann_bufs.items) |b| allocator.free(b);
+        ann_bufs.deinit(allocator);
+    }
+    const MacroAllocs = struct {
+        macro_items: []value.Element,
+        param_items: []value.Element,
+    };
+    var macro_allocs = std.ArrayListUnmanaged(MacroAllocs){};
+    defer {
+        for (macro_allocs.items) |a| {
+            allocator.free(a.macro_items);
+            allocator.free(a.param_items);
+        }
+        macro_allocs.deinit(allocator);
+    }
+
+    const macro_table_clause = if (mactab) |tab| blk: {
+        if (tab.macros.len == 0) break :blk null;
+
+        const mkParamName = struct {
+            fn run(allocator0: std.mem.Allocator, bufs: *std.ArrayListUnmanaged([]u8), name: []const u8, card: ion.macro.Cardinality) IonError![]const u8 {
+                const suffix: ?u8 = switch (card) {
+                    .one => null,
+                    .zero_or_one => '?',
+                    .zero_or_many => '*',
+                    .one_or_many => '+',
+                };
+                const extra: usize = if (suffix != null) 1 else 0;
+                const buf = allocator0.alloc(u8, name.len + extra) catch return IonError.OutOfMemory;
+                std.mem.copyForwards(u8, buf[0..name.len], name);
+                if (suffix) |c| buf[name.len] = c;
+                bufs.append(allocator0, buf) catch return IonError.OutOfMemory;
+                return buf;
+            }
+        }.run;
+
+        const mkParamAnnotations = struct {
+            fn run(allocator0: std.mem.Allocator, bufs: *std.ArrayListUnmanaged([]value.Symbol), p: ion.macro.Param) IonError![]const value.Symbol {
+                const ty_name: ?[]const u8 = switch (p.ty) {
+                    .tagged => null,
+                    .macro_shape => null,
+                    .flex_sym => "flex_sym",
+                    .flex_uint => "flex_uint",
+                    .flex_int => "flex_int",
+                    .uint8 => "uint8",
+                    .uint16 => "uint16",
+                    .uint32 => "uint32",
+                    .uint64 => "uint64",
+                    .int8 => "int8",
+                    .int16 => "int16",
+                    .int32 => "int32",
+                    .int64 => "int64",
+                    .float16 => "float16",
+                    .float32 => "float32",
+                    .float64 => "float64",
+                };
+
+                if (ty_name) |t| {
+                    const buf = allocator0.alloc(value.Symbol, 1) catch return IonError.OutOfMemory;
+                    buf[0] = value.makeSymbolId(null, t);
+                    bufs.append(allocator0, buf) catch return IonError.OutOfMemory;
+                    return buf;
+                }
+
+                if (p.ty == .macro_shape) {
+                    const shape = p.shape orelse return IonError.InvalidIon;
+                    if (shape.module) |m| {
+                        const buf = allocator0.alloc(value.Symbol, 2) catch return IonError.OutOfMemory;
+                        buf[0] = value.makeSymbolId(null, m);
+                        buf[1] = value.makeSymbolId(null, shape.name);
+                        bufs.append(allocator0, buf) catch return IonError.OutOfMemory;
+                        return buf;
+                    }
+                    const buf = allocator0.alloc(value.Symbol, 1) catch return IonError.OutOfMemory;
+                    buf[0] = value.makeSymbolId(null, shape.name);
+                    bufs.append(allocator0, buf) catch return IonError.OutOfMemory;
+                    return buf;
+                }
+
+                return &.{};
+            }
+        }.run;
+
+        var macro_defs = std.ArrayListUnmanaged(value.Element){};
+        defer macro_defs.deinit(allocator);
+
+        for (tab.macros) |m| {
+            const param_items = allocator.alloc(value.Element, m.params.len) catch return IonError.OutOfMemory;
+            for (m.params, 0..) |p, i| {
+                const pn = try mkParamName(allocator, &param_name_bufs, p.name, p.card);
+                const anns = try mkParamAnnotations(allocator, &ann_bufs, p);
+                param_items[i] = .{
+                    .annotations = @constCast(anns),
+                    .value = .{ .symbol = value.makeSymbolId(null, pn) },
+                };
+            }
+            const params_elem: value.Element = .{ .annotations = &.{}, .value = .{ .sexp = param_items } };
+
+            const macro_items = allocator.alloc(value.Element, 3 + m.body.len) catch return IonError.OutOfMemory;
+            macro_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, "macro") } };
+            macro_items[1] = if (m.name) |nm|
+                .{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, nm) } }
+            else
+                .{ .annotations = &.{}, .value = .{ .null = .null } };
+            macro_items[2] = params_elem;
+            for (m.body, 0..) |b, i| macro_items[3 + i] = b;
+
+            macro_allocs.append(allocator, .{ .macro_items = macro_items, .param_items = param_items }) catch return IonError.OutOfMemory;
+            macro_defs.append(allocator, .{ .annotations = &.{}, .value = .{ .sexp = macro_items } }) catch return IonError.OutOfMemory;
+        }
+
+        const clause_items = allocator.alloc(value.Element, 2 + macro_defs.items.len) catch return IonError.OutOfMemory;
+        macro_table_clause_items = clause_items;
+        clause_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, "macro_table") } };
+        clause_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = sym_underscore } };
+        for (macro_defs.items, 0..) |d, i| clause_items[2 + i] = d;
+
+        break :blk value.Element{ .annotations = &.{}, .value = .{ .sexp = clause_items } };
+    } else null;
+
     const clause_items = allocator.alloc(value.Element, 2 + user_symbol_texts.len) catch return IonError.OutOfMemory;
     defer allocator.free(clause_items);
     clause_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = sym_symbols } };
@@ -140,11 +288,17 @@ fn writeModuleDirectivePrelude(
     }
     const clause_elem: value.Element = .{ .annotations = &.{}, .value = .{ .sexp = clause_items } };
 
-    const module_items = allocator.alloc(value.Element, 3) catch return IonError.OutOfMemory;
+    const clause_count: usize = if (macro_table_clause != null) 2 else 1;
+    const module_items = allocator.alloc(value.Element, 2 + clause_count) catch return IonError.OutOfMemory;
     defer allocator.free(module_items);
     module_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = sym_module } };
     module_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = sym_underscore } };
-    module_items[2] = clause_elem;
+    var idx: usize = 2;
+    if (macro_table_clause) |mc| {
+        module_items[idx] = mc;
+        idx += 1;
+    }
+    module_items[idx] = clause_elem;
 
     const elem: value.Element = .{ .annotations = @constCast(ann[0..]), .value = .{ .sexp = module_items } };
 
