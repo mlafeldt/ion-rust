@@ -239,6 +239,39 @@ test "ion 1.1 writer11 can roundtrip length-prefixed containers" {
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
 }
 
+test "ion 1.1 writer11 uses SID-only annotation sequence encoding when possible" {
+    const allocator = std.testing.allocator;
+
+    // Two SID-only system symbols => E5 + FlexUInt(sid0) + FlexUInt(sid1)
+    var anns = [_]ion.value.Symbol{
+        .{ .sid = 1, .text = null }, // $ion
+        .{ .sid = 2, .text = null }, // $ion_1_0
+    };
+    const doc = &[_]ion.value.Element{.{ .annotations = anns[0..], .value = .{ .int = .{ .small = 1 } } }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{ .symbol_encoding = .addresses });
+    defer allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{0xE5}) != null);
+}
+
+test "ion 1.1 writer11 can write SID-only system annotations in inline-text mode" {
+    const allocator = std.testing.allocator;
+
+    // In inline-text mode, SID-only system symbols are rewritten to text and then encoded using
+    // FlexSym inline text annotation wrappers.
+    var anns = [_]ion.value.Symbol{
+        .{ .sid = 1, .text = null }, // $ion
+        .{ .sid = 2, .text = null }, // $ion_1_0
+    };
+    const doc = &[_]ion.value.Element{.{ .annotations = anns[0..], .value = .{ .int = .{ .small = 1 } } }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{ .symbol_encoding = .inline_text_only });
+    defer allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{0xE8}) != null);
+}
+
 test "ion 1.1 binary FlexSym escape returns system symbol as text" {
     const bytes = &[_]u8{
         0xE0, 0x01, 0x01, 0xEA, // IVM
