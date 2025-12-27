@@ -232,6 +232,38 @@ test "ion.serializeDocumentBinary11WithOptions controls container encoding" {
     try std.testing.expect(prefixed[4] != 0xF1);
 }
 
+test "ion 1.1 writer11 symbol address opcodes at E2/E3 boundary roundtrip" {
+    const allocator = std.testing.allocator;
+
+    const doc_e2 = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .symbol = .{ .sid = 65_791, .text = null } },
+    }};
+    const bytes_e2 = try ion.serializeDocument(allocator, .binary_1_1_raw, doc_e2);
+    defer allocator.free(bytes_e2);
+
+    // E2 uses a 2-byte little-endian payload, biased by 256.
+    try std.testing.expect(std.mem.indexOf(u8, bytes_e2, &.{0xE2}) != null);
+
+    var parsed_e2 = try ion.parseDocument(allocator, bytes_e2);
+    defer parsed_e2.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_e2, parsed_e2.elements));
+
+    const doc_e3 = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .symbol = .{ .sid = 65_792, .text = null } },
+    }};
+    const bytes_e3 = try ion.serializeDocument(allocator, .binary_1_1_raw, doc_e3);
+    defer allocator.free(bytes_e3);
+
+    // E3 uses a 3-byte little-endian payload, biased by 65,792.
+    try std.testing.expect(std.mem.indexOf(u8, bytes_e3, &.{0xE3}) != null);
+
+    var parsed_e3 = try ion.parseDocument(allocator, bytes_e3);
+    defer parsed_e3.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_e3, parsed_e3.elements));
+}
+
 test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
     const elems = &[_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } }, // $ion
