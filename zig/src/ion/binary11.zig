@@ -232,9 +232,9 @@ const Decoder = struct {
             }
 
             if ((head_text != null and std.mem.eql(u8, head_text.?, "symbol_table")) or head_sid == 15) {
-                // ion-rust uses `symbol_table` (address 15) in the module directive; ion-tests does
-                // not include it in its system symbol table, so we key off the SID.
-                self.sys_symtab11_variant_override = .ion_rust;
+                // Ion-rust includes `symbol_table` in its Ion 1.1 system symbol table (SID 15).
+                // Ion-tests does not, so only infer the ion-rust variant when the SID is present.
+                if (head_sid != null and head_sid.? == 15) self.sys_symtab11_variant_override = .ion_rust;
                 var i: usize = 1;
                 var append = false;
                 if (csx.len >= 2 and csx[1].annotations.len == 0 and csx[1].value == .symbol) {
@@ -662,6 +662,56 @@ const Decoder = struct {
                 const out = arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
                 out[0] = v;
                 return out;
+            }
+        }.run;
+
+        const mkIonModuleDirectiveWithSymbolTableList = struct {
+            fn run(
+                arena: *value.Arena,
+                allocator: std.mem.Allocator,
+                append: bool,
+                args: []const value.Element,
+            ) IonError![]value.Element {
+                // Build: $ion::(module _ (symbol_table [_? [<text>...]] ) (macro_table _))
+                // using the same shape as ion-rust's system macro templates (`symbol_table [..]`,
+                // `symbol_table _ [..]`, `macro_table _`).
+                const list_items = allocator.alloc(value.Element, args.len) catch return IonError.OutOfMemory;
+                for (args, 0..) |e, idx| {
+                    if (e.annotations.len != 0) return IonError.InvalidIon;
+                    const t: []const u8 = switch (e.value) {
+                        .string => |s| s,
+                        .symbol => |s| s.text orelse return IonError.InvalidIon,
+                        else => return IonError.InvalidIon,
+                    };
+                    list_items[idx] = .{ .annotations = &.{}, .value = .{ .string = t } };
+                }
+                const list_elem: value.Element = .{ .annotations = &.{}, .value = .{ .list = list_items } };
+
+                const symbol_table_clause_items = allocator.alloc(value.Element, if (append) 3 else 2) catch return IonError.OutOfMemory;
+                symbol_table_clause_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, "symbol_table") } };
+                if (append) {
+                    symbol_table_clause_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, "_") } };
+                    symbol_table_clause_items[2] = list_elem;
+                } else {
+                    symbol_table_clause_items[1] = list_elem;
+                }
+                const symbol_table_clause: value.Element = .{ .annotations = &.{}, .value = .{ .sexp = symbol_table_clause_items } };
+
+                const macro_table_clause_items = allocator.alloc(value.Element, 2) catch return IonError.OutOfMemory;
+                macro_table_clause_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, "macro_table") } };
+                macro_table_clause_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, "_") } };
+                const macro_table_clause: value.Element = .{ .annotations = &.{}, .value = .{ .sexp = macro_table_clause_items } };
+
+                const module_items = allocator.alloc(value.Element, 4) catch return IonError.OutOfMemory;
+                module_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, "module") } };
+                module_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, "_") } };
+                module_items[2] = symbol_table_clause;
+                module_items[3] = macro_table_clause;
+
+                const anns = allocator.alloc(value.Symbol, 1) catch return IonError.OutOfMemory;
+                anns[0] = value.makeSymbolId(null, "$ion");
+
+                return mkOne(arena, .{ .annotations = anns, .value = .{ .sexp = module_items } });
             }
         }.run;
 
@@ -1133,8 +1183,9 @@ const Decoder = struct {
                 }
                 if (all_text) {
                     if (self.invoke_ctx != .top) return IonError.InvalidIon;
-                    try self.setIon11UserSymbolsFromTextArgs(args);
-                    break :blk &.{}; // set_symbols produces nothing
+                    // Make this spec-like: emit a `$ion::(module ...)` value and let the top-level
+                    // parser apply it as a module directive.
+                    break :blk try mkIonModuleDirectiveWithSymbolTableList(self.arena, self.arena.allocator(), false, args);
                 }
                 break :blk try flatten(self.arena, args);
             },
@@ -1152,8 +1203,7 @@ const Decoder = struct {
                         else => return IonError.InvalidIon,
                     }
                 }
-                try self.addIon11UserSymbolsFromTextArgs(args);
-                break :blk &.{};
+                break :blk try mkIonModuleDirectiveWithSymbolTableList(self.arena, self.arena.allocator(), true, args);
             },
             21 => blk: {
                 if (self.invoke_ctx != .top) return IonError.InvalidIon;
