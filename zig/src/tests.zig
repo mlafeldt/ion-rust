@@ -5252,3 +5252,66 @@ test "ion 1.1 binary module macro_table clause enables user macro invocation" {
     try std.testing.expect(parsed[0].value == .int);
     try std.testing.expectEqual(@as(i128, 7), parsed[0].value.int.small);
 }
+
+test "ion 1.1 binary e-expression F5: meta produces no values" {
+    const args = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+    };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationLengthPrefixedTaggedVariadic(
+        std.testing.allocator,
+        &out,
+        3, // meta
+        args[0..],
+    );
+
+    const bytes = try out.toOwnedSlice(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expectEqual(@as(usize, 0), parsed.len);
+}
+
+test "ion 1.1 binary e-expression F5: flatten concatenates sequences" {
+    var list_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+    };
+    var sexp_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 4 } } },
+    };
+    const seqs = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .list = list_items[0..] } },
+        .{ .annotations = &.{}, .value = .{ .sexp = sexp_items[0..] } },
+    };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationLengthPrefixedTaggedVariadic(
+        std.testing.allocator,
+        &out,
+        5, // flatten
+        seqs[0..],
+    );
+
+    const bytes = try out.toOwnedSlice(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expectEqual(@as(usize, 4), parsed.len);
+    for (parsed, 0..) |e, i| {
+        try std.testing.expect(e.annotations.len == 0);
+        try std.testing.expect(e.value == .int);
+        try std.testing.expectEqual(@as(i128, @intCast(i + 1)), e.value.int.small);
+    }
+}

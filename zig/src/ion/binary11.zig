@@ -594,6 +594,15 @@ const Decoder = struct {
                 if (sub.i != sub.input.len) return IonError.InvalidIon;
                 break :blk if (bindings[0].values.len != 0) bindings[0].values else bindings[1].values;
             },
+            3 => blk: {
+                // Signature: (meta <expr*>)
+                //
+                // `meta` produces no values.
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "expr", .shape = null }};
+                _ = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                break :blk &.{};
+            },
             4 => blk: {
                 const p = [_]ion.macro.Param{
                     .{ .ty = .tagged, .card = .one, .name = "n", .shape = null },
@@ -614,6 +623,13 @@ const Decoder = struct {
                     out.appendSlice(self.arena.allocator(), body) catch return IonError.OutOfMemory;
                 }
                 break :blk out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+            },
+            5 => blk: {
+                // Signature: (flatten <sequence*>)
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "sequence", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                break :blk try flatten(self.arena, bindings[0].values);
             },
             6 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "deltas", .shape = null }};
