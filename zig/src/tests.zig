@@ -207,6 +207,31 @@ test "zig ion serializeDocument binary_1_1_raw does not emit module prelude" {
     try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x0F }) == null);
 }
 
+test "ion.serializeDocumentBinary11WithOptions controls container encoding" {
+    const allocator = std.testing.allocator;
+
+    var items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+    };
+    const elems = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .list = items[0..] },
+    }};
+
+    const delimited = try ion.serializeDocumentBinary11WithOptions(allocator, elems, .{ .container_encoding = .delimited });
+    defer allocator.free(delimited);
+    try std.testing.expectEqualSlices(u8, &.{ 0xE0, 0x01, 0x01, 0xEA }, delimited[0..4]);
+    try std.testing.expect(delimited.len >= 5);
+    try std.testing.expectEqual(@as(u8, 0xF1), delimited[4]);
+
+    const prefixed = try ion.serializeDocumentBinary11WithOptions(allocator, elems, .{ .container_encoding = .length_prefixed });
+    defer allocator.free(prefixed);
+    try std.testing.expectEqualSlices(u8, &.{ 0xE0, 0x01, 0x01, 0xEA }, prefixed[0..4]);
+    try std.testing.expect(prefixed.len >= 5);
+    try std.testing.expect(prefixed[4] != 0xF1);
+}
+
 test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
     const elems = &[_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } }, // $ion

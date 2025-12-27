@@ -234,3 +234,15 @@ pub fn serializeDocument(allocator: Allocator, format: Format, doc: []const valu
         .text_compact, .text_lines, .text_pretty => try writer.writeText(allocator, doc),
     };
 }
+
+/// Serializes a sequence of top-level Ion elements as Ion 1.1 binary using `writer11` options.
+///
+/// This writes values (not macros/e-expressions). If you want deterministic self-contained output,
+/// use `serializeDocument(..., .binary_1_1, ...)` or call `writer11.writeBinary11SelfContained`.
+pub fn serializeDocumentBinary11WithOptions(
+    allocator: Allocator,
+    doc: []const value.Element,
+    options: writer11.Options,
+) IonError![]u8 {
+    return writer11.writeBinary11WithOptions(allocator, doc, options);
+}
