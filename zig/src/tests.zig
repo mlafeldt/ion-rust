@@ -302,6 +302,20 @@ test "ion 1.1 writer11 can write SID-only system annotations in inline-text mode
     try std.testing.expect(std.mem.indexOf(u8, bytes, &.{0xE8}) != null);
 }
 
+test "ion.serializeDocument(.binary_1_1_raw) allows SID-only user symbols" {
+    const allocator = std.testing.allocator;
+
+    const doc = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 200, .text = null } } }};
+
+    const bytes = try ion.serializeDocument(allocator, .binary_1_1_raw, doc);
+    defer allocator.free(bytes);
+
+    var parsed_doc = try ion.parseDocument(allocator, bytes);
+    defer parsed_doc.deinit();
+
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed_doc.elements));
+}
+
 test "ion 1.1 binary FlexSym escape returns system symbol as text" {
     const bytes = &[_]u8{
         0xE0, 0x01, 0x01, 0xEA, // IVM

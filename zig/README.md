@@ -38,11 +38,12 @@ Key properties:
   - `parseDocumentWithMacroTableIon11Modules(allocator, bytes, mactab)`:
     - Conformance-runner-only entrypoint for parsing Ion 1.1 *text* using the conformance suite's "default module" symbol model.
   - `serializeDocument(allocator, format, elements)`:
-    - Supports `Format.binary` (Ion 1.0), `Format.binary_1_1` (Ion 1.1, experimental), and text formats (compact/lines/pretty).
+    - Supports `Format.binary` (Ion 1.0), `Format.binary_1_1` (Ion 1.1, experimental), `Format.binary_1_1_raw` (Ion 1.1, non-self-contained), and text formats (compact/lines/pretty).
     - `Format.binary_1_1` emits a self-contained stream:
       - It emits a minimal module prelude (`$ion::(module _ (symbols _ ...))`) for any non-system symbol text present in the document, then emits subsequent symbol references by *address* (E1..E3 / FlexSym positive) instead of inline text.
       - It rejects SID-only non-system symbols (including in annotations and field names), because those cannot be serialized deterministically without external module state.
       - Known Ion 1.1 system symbols are emitted using `0xEE` (SystemSymbolAddress).
+    - `Format.binary_1_1_raw` does not emit a module prelude and does not attempt to make the output self-contained. It is valid Ion 1.1 binary, but symbol addresses may rely on external module state.
   - `Document` owns an arena and a slice of parsed `Element`s; `deinit()` frees the arena.
 
 ### Data model
@@ -179,7 +180,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
 - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
-- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `128/128` tests).
+- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `129/129` tests).
 
 ### Skip list (currently empty)
 

@@ -209,6 +209,11 @@ pub const Format = enum(u32) {
     /// It emits values (not macros/e-expressions), and may emit a minimal module prelude
     /// (`set_symbols`) so non-system symbols can be encoded by address in a self-contained stream.
     binary_1_1 = 4,
+    /// Ion 1.1 binary without forcing a self-contained module prelude.
+    ///
+    /// This is useful for writing bytes that rely on external module state (for example: SID-only
+    /// user symbols). When in doubt, prefer `binary_1_1`.
+    binary_1_1_raw = 5,
     /// Ion text (writer currently shares implementation; formatting is not distinguished).
     text_compact = 1,
     /// Ion text (writer currently shares implementation; formatting is not distinguished).
@@ -224,6 +229,7 @@ pub fn serializeDocument(allocator: Allocator, format: Format, doc: []const valu
     return switch (format) {
         .binary => try writer.writeBinary(allocator, doc),
         .binary_1_1 => try writer11.writeBinary11SelfContained(allocator, doc),
+        .binary_1_1_raw => try writer11.writeBinary11WithOptions(allocator, doc, .{ .symbol_encoding = .addresses }),
         .text_compact, .text_lines, .text_pretty => try writer.writeText(allocator, doc),
     };
 }
