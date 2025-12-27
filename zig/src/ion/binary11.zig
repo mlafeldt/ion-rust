@@ -84,11 +84,20 @@ const Decoder = struct {
     mactab_local_set: bool = false,
     invoke_ctx: InvokeCtx = .nested,
     module_state: ModuleState11 = .{},
+    sys_symtab11_variant_override: ?symtab.SystemSymtab11Variant = null,
 
     fn pushInvokeCtx(self: *Decoder, next: InvokeCtx) InvokeCtx {
         const prev = self.invoke_ctx;
         self.invoke_ctx = next;
         return prev;
+    }
+
+    fn systemSymtab11TextForAddr(self: *const Decoder, addr: u32) ?[]const u8 {
+        const v = self.sys_symtab11_variant_override orelse symtab.systemSymtab11Variant();
+        return switch (v) {
+            .ion_tests => symtab.SystemSymtab11.textForSid(addr),
+            .ion_rust => symtab.SystemSymtab11IonRust.textForSid(addr),
+        };
     }
 
     fn currentMacroTable(self: *const Decoder) ?*const MacroTable {
@@ -114,14 +123,21 @@ const Decoder = struct {
 
     fn isIonSystemModuleDirective(_: *const Decoder, elem: value.Element) bool {
         if (elem.annotations.len != 1) return false;
-        const ann = elem.annotations[0].text orelse return false;
-        if (!std.mem.eql(u8, ann, "$ion")) return false;
+        const ann0 = elem.annotations[0];
+        if (ann0.text) |ann| {
+            if (!std.mem.eql(u8, ann, "$ion")) return false;
+        } else {
+            if (ann0.sid != 1) return false;
+        }
         if (elem.value != .sexp) return false;
         const sx = elem.value.sexp;
         if (sx.len < 2) return false;
         if (sx[0].annotations.len != 0 or sx[0].value != .symbol) return false;
-        const head = sx[0].value.symbol.text orelse return false;
-        return std.mem.eql(u8, head, "module");
+        const head_sym = sx[0].value.symbol;
+        if (head_sym.text) |t| return std.mem.eql(u8, t, "module");
+        const sid = head_sym.sid orelse return false;
+        // ion-tests uses `module` at address 15, ion-rust uses address 16.
+        return sid == 15 or sid == 16;
     }
 
     fn applyIonSystemModuleDirective(self: *Decoder, elem: value.Element) IonError!void {
@@ -132,20 +148,33 @@ const Decoder = struct {
         var base_addr: usize = 0;
         var symbols: []const value.Element = &.{};
 
+        // Infer system symbol table variant from the module directive head.
+        // This helps decode Ion 1.1 binary streams produced by ion-rust, which assigns `module`
+        // address 16 (ion-tests uses 15).
+        if (sx.len >= 1 and sx[0].value == .symbol) {
+            const head_sym = sx[0].value.symbol;
+            if (head_sym.sid) |sid| {
+                if (sid == 16) self.sys_symtab11_variant_override = .ion_rust;
+                if (sid == 15) self.sys_symtab11_variant_override = .ion_tests;
+            }
+        }
+
         for (sx[2..]) |clause_elem| {
             if (clause_elem.annotations.len != 0 or clause_elem.value != .sexp) continue;
             const csx = clause_elem.value.sexp;
             if (csx.len == 0) continue;
             if (csx[0].annotations.len != 0 or csx[0].value != .symbol) continue;
-            const head = csx[0].value.symbol.text orelse continue;
+            const head_sym = csx[0].value.symbol;
+            const head_sid = head_sym.sid;
+            const head_text = head_sym.text;
 
-            if (std.mem.eql(u8, head, "macros")) {
+            if (head_text != null and std.mem.eql(u8, head_text.?, "macros")) {
                 defs = csx[1..];
                 base_addr = 0;
                 continue;
             }
 
-            if (std.mem.eql(u8, head, "macro_table")) {
+            if ((head_text != null and std.mem.eql(u8, head_text.?, "macro_table")) or head_sid == 14) {
                 base_addr = ion.macro.system_macro_count;
 
                 // Common upstream encoding: (macro_table _ <macro_def>...)
@@ -159,10 +188,22 @@ const Decoder = struct {
                 continue;
             }
 
-            if (std.mem.eql(u8, head, "symbols") or std.mem.eql(u8, head, "symbol_table")) {
+            if ((head_text != null and std.mem.eql(u8, head_text.?, "symbols")) or head_sid == 7) {
                 // Expected forms:
                 // - (symbols _ <text-or-null>...)
                 // - (symbol_table _ <text-or-null>...)
+                if (csx.len >= 3) {
+                    symbols = csx[2..];
+                } else {
+                    symbols = &.{};
+                }
+                continue;
+            }
+
+            if ((head_text != null and std.mem.eql(u8, head_text.?, "symbol_table")) or head_sid == 15) {
+                // ion-rust uses `symbol_table` (address 15) in the module directive; ion-tests does
+                // not include it in its system symbol table, so we key off the SID.
+                self.sys_symtab11_variant_override = .ion_rust;
                 if (csx.len >= 3) {
                     symbols = csx[2..];
                 } else {
@@ -340,12 +381,12 @@ const Decoder = struct {
                 if (j != bytes.len) return IonError.InvalidIon;
             },
             0xE7 => {
-                const sym = try readFlexSymSymbol(self.arena, self.input, &self.i);
+                const sym = try readFlexSymSymbol(self.arena, self.input, &self.i, self.sys_symtab11_variant_override);
                 out.append(self.arena.allocator(), sym) catch return IonError.OutOfMemory;
             },
             0xE8 => {
-                const a = try readFlexSymSymbol(self.arena, self.input, &self.i);
-                const b = try readFlexSymSymbol(self.arena, self.input, &self.i);
+                const a = try readFlexSymSymbol(self.arena, self.input, &self.i, self.sys_symtab11_variant_override);
+                const b = try readFlexSymSymbol(self.arena, self.input, &self.i, self.sys_symtab11_variant_override);
                 out.append(self.arena.allocator(), a) catch return IonError.OutOfMemory;
                 out.append(self.arena.allocator(), b) catch return IonError.OutOfMemory;
             },
@@ -357,7 +398,7 @@ const Decoder = struct {
 
                 var j: usize = 0;
                 while (j < bytes.len) {
-                    const sym = try readFlexSymSymbol(self.arena, bytes, &j);
+                    const sym = try readFlexSymSymbol(self.arena, bytes, &j, self.sys_symtab11_variant_override);
                     out.append(self.arena.allocator(), sym) catch return IonError.OutOfMemory;
                 }
                 if (j != bytes.len) return IonError.InvalidIon;
@@ -390,7 +431,14 @@ const Decoder = struct {
         const args_bytes = self.input[self.i .. self.i + args_len];
         self.i += args_len;
 
-        var sub = Decoder{ .arena = self.arena, .input = args_bytes, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
+        var sub = Decoder{
+            .arena = self.arena,
+            .input = args_bytes,
+            .i = 0,
+            .mactab = self.currentMacroTable(),
+            .invoke_ctx = .nested,
+            .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+        };
 
         if (self.currentMacroTable()) |tab| {
             if (tab.macroForAddress(addr)) |m| {
@@ -1322,7 +1370,7 @@ const Decoder = struct {
                 },
                 else => blk: {
                     var cursor = self.i;
-                    const v = try readTaglessFrom(self.arena, self.input, &cursor, p.ty);
+                    const v = try readTaglessFrom(self.arena, self.input, &cursor, p.ty, self.sys_symtab11_variant_override);
                     self.i = cursor;
                     const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
                     one[0] = .{ .annotations = &.{}, .value = v };
@@ -1339,7 +1387,14 @@ const Decoder = struct {
         const total_len = try readFlexUInt(self.input, &self.i);
         if (total_len != 0) {
             const payload = try self.readBytes(total_len);
-            var sub = Decoder{ .arena = self.arena, .input = payload, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
+            var sub = Decoder{
+                .arena = self.arena,
+                .input = payload,
+                .i = 0,
+                .mactab = self.currentMacroTable(),
+                .invoke_ctx = .nested,
+                .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+            };
             var out = std.ArrayListUnmanaged(value.Element){};
             errdefer out.deinit(self.arena.allocator());
             while (sub.i < sub.input.len) {
@@ -1358,7 +1413,14 @@ const Decoder = struct {
             const chunk_len = try readFlexUInt(self.input, &self.i);
             if (chunk_len == 0) break;
             const chunk = try self.readBytes(chunk_len);
-            var sub = Decoder{ .arena = self.arena, .input = chunk, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
+            var sub = Decoder{
+                .arena = self.arena,
+                .input = chunk,
+                .i = 0,
+                .mactab = self.currentMacroTable(),
+                .invoke_ctx = .nested,
+                .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+            };
             while (sub.i < sub.input.len) {
                 const produced = try sub.readMacroShapeValues(shape);
                 out.appendSlice(self.arena.allocator(), produced) catch return IonError.OutOfMemory;
@@ -1373,7 +1435,14 @@ const Decoder = struct {
         const total_len = try readFlexUInt(self.input, &self.i);
         if (total_len != 0) {
             const payload = try self.readBytes(total_len);
-            var sub = Decoder{ .arena = self.arena, .input = payload, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
+            var sub = Decoder{
+                .arena = self.arena,
+                .input = payload,
+                .i = 0,
+                .mactab = self.currentMacroTable(),
+                .invoke_ctx = .nested,
+                .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+            };
             var out = std.ArrayListUnmanaged(value.Element){};
             errdefer out.deinit(self.arena.allocator());
             while (sub.i < sub.input.len) {
@@ -2711,7 +2780,7 @@ const Decoder = struct {
                 break :blk .{ .int = n };
             },
             .flex_sym => blk: {
-                const sym = try readFlexSymSymbol(self.arena, self.input, &self.i);
+                const sym = try readFlexSymSymbol(self.arena, self.input, &self.i, self.sys_symtab11_variant_override);
                 break :blk .{ .symbol = sym };
             },
             .uint8 => blk: {
@@ -2808,7 +2877,7 @@ const Decoder = struct {
         }
 
         while (cursor < payload.len) {
-            const v = readTaglessFrom(self.arena, payload, &cursor, ty) catch |e| switch (e) {
+            const v = readTaglessFrom(self.arena, payload, &cursor, ty, self.sys_symtab11_variant_override) catch |e| switch (e) {
                 // The expression group length prefix promised that the full payload is present. Any
                 // attempt to read beyond the payload is a structural error, not an EOF of the
                 // enclosing stream.
@@ -2853,7 +2922,7 @@ const Decoder = struct {
             const chunk = try self.readBytes(chunk_len);
             var cursor: usize = 0;
             while (cursor < chunk.len) {
-                const v = readTaglessFrom(self.arena, chunk, &cursor, ty) catch |e| switch (e) {
+                const v = readTaglessFrom(self.arena, chunk, &cursor, ty, self.sys_symtab11_variant_override) catch |e| switch (e) {
                     // If a tagless value is split across chunk boundaries, the encoding is invalid.
                     IonError.Incomplete => return IonError.InvalidIon,
                     else => return e,
@@ -3029,7 +3098,14 @@ const Decoder = struct {
         if (op >= 0xB0 and op <= 0xBF) {
             const len: usize = op - 0xB0;
             const body = try self.readBytes(len);
-            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
+            var sub = Decoder{
+                .arena = self.arena,
+                .input = body,
+                .i = 0,
+                .mactab = self.currentMacroTable(),
+                .invoke_ctx = .nested,
+                .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+            };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
             while (sub.i < sub.input.len) {
@@ -3043,7 +3119,14 @@ const Decoder = struct {
         if (op >= 0xC0 and op <= 0xCF) {
             const len: usize = op - 0xC0;
             const body = try self.readBytes(len);
-            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
+            var sub = Decoder{
+                .arena = self.arena,
+                .input = body,
+                .i = 0,
+                .mactab = self.currentMacroTable(),
+                .invoke_ctx = .nested,
+                .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+            };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
             while (sub.i < sub.input.len) {
@@ -3058,7 +3141,7 @@ const Decoder = struct {
             if (op == 0xD1) return IonError.InvalidIon; // reserved
             const len: usize = op - 0xD0;
             const body = try self.readBytes(len);
-            const st = try parseStructBody(self.arena, body, self.currentMacroTable());
+            const st = try parseStructBody(self.arena, body, self.currentMacroTable(), self.sys_symtab11_variant_override);
             return value.Value{ .@"struct" = st };
         }
 
@@ -3088,7 +3171,7 @@ const Decoder = struct {
         if (op == 0xEE) {
             const b = try self.readBytes(1);
             const addr: u32 = b[0];
-            const sys_text = symtab.systemSymtab11TextForSid(addr) orelse return IonError.InvalidIon;
+            const sys_text = self.systemSymtab11TextForAddr(addr) orelse return IonError.InvalidIon;
             // System symbol addresses live in a separate address space from symbol IDs. Return the
             // symbol as text so callers don't have to interpret the address as an SID.
             const t = try self.arena.dupe(sys_text);
@@ -3174,7 +3257,14 @@ const Decoder = struct {
         if (op == 0xFB) {
             const len = try readFlexUInt(self.input, &self.i);
             const body = try self.readBytes(len);
-            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
+            var sub = Decoder{
+                .arena = self.arena,
+                .input = body,
+                .i = 0,
+                .mactab = self.currentMacroTable(),
+                .invoke_ctx = .nested,
+                .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+            };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
             while (sub.i < sub.input.len) {
@@ -3188,7 +3278,14 @@ const Decoder = struct {
         if (op == 0xFC) {
             const len = try readFlexUInt(self.input, &self.i);
             const body = try self.readBytes(len);
-            var sub = Decoder{ .arena = self.arena, .input = body, .i = 0, .mactab = self.currentMacroTable(), .invoke_ctx = .nested };
+            var sub = Decoder{
+                .arena = self.arena,
+                .input = body,
+                .i = 0,
+                .mactab = self.currentMacroTable(),
+                .invoke_ctx = .nested,
+                .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+            };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
             while (sub.i < sub.input.len) {
@@ -3202,7 +3299,7 @@ const Decoder = struct {
         if (op == 0xFD) {
             const len = try readFlexUInt(self.input, &self.i);
             const body = try self.readBytes(len);
-            const st = try parseStructBody(self.arena, body, self.currentMacroTable());
+            const st = try parseStructBody(self.arena, body, self.currentMacroTable(), self.sys_symtab11_variant_override);
             return value.Value{ .@"struct" = st };
         }
 
@@ -3244,7 +3341,7 @@ const Decoder = struct {
             return value.Value{ .sexp = items.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory };
         }
         if (op == 0xF3) {
-            const st = try parseStructDelimited(self.arena, self.input, &self.i, self.currentMacroTable());
+            const st = try parseStructDelimited(self.arena, self.input, &self.i, self.currentMacroTable(), self.sys_symtab11_variant_override);
             return value.Value{ .@"struct" = st };
         }
 
@@ -3297,7 +3394,20 @@ const FlexSymDecoded = union(enum) {
     end_delimited, // DelimitedContainerClose (0xF0) encoded via FlexSym escape.
 };
 
-fn readFlexSym(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!FlexSymDecoded {
+fn systemSymtab11TextForAddrVariant(addr: u32, variant_override: ?symtab.SystemSymtab11Variant) ?[]const u8 {
+    const v = variant_override orelse symtab.systemSymtab11Variant();
+    return switch (v) {
+        .ion_tests => symtab.SystemSymtab11.textForSid(addr),
+        .ion_rust => symtab.SystemSymtab11IonRust.textForSid(addr),
+    };
+}
+
+fn readFlexSym(
+    arena: *value.Arena,
+    input: []const u8,
+    cursor: *usize,
+    variant_override: ?symtab.SystemSymtab11Variant,
+) IonError!FlexSymDecoded {
     const v = try readFlexInt(input, cursor);
     if (v > 0) {
         return .{ .symbol = value.makeSymbolId(@intCast(@as(u32, @intCast(v))), null) };
@@ -3319,9 +3429,7 @@ fn readFlexSym(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!
         0x60 => .{ .symbol = value.makeSymbolId(0, null) },
         0x61...0xE0 => blk: {
             const addr: u32 = @intCast(esc - 0x60);
-            const sys_text = symtab.systemSymtab11TextForSid(addr) orelse return IonError.InvalidIon;
-            // Match `0xEE` behavior: system symbol addresses are a distinct address space, so
-            // represent them as text rather than as an SID.
+            const sys_text = systemSymtab11TextForAddrVariant(addr, variant_override) orelse return IonError.InvalidIon;
             const t = try arena.dupe(sys_text);
             break :blk .{ .symbol = value.makeSymbolId(addr, t) };
         },
@@ -3330,16 +3438,33 @@ fn readFlexSym(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!
     };
 }
 
-fn readFlexSymSymbol(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!value.Symbol {
-    const d = try readFlexSym(arena, input, cursor);
+fn readFlexSymSymbol(
+    arena: *value.Arena,
+    input: []const u8,
+    cursor: *usize,
+    variant_override: ?symtab.SystemSymtab11Variant,
+) IonError!value.Symbol {
+    const d = try readFlexSym(arena, input, cursor, variant_override);
     return switch (d) {
         .symbol => |s| s,
         .end_delimited => return IonError.InvalidIon,
     };
 }
 
-fn parseStructBody(arena: *value.Arena, body: []const u8, mactab: ?*const MacroTable) IonError!value.Struct {
-    var d = Decoder{ .arena = arena, .input = body, .i = 0, .mactab = mactab, .invoke_ctx = .nested };
+fn parseStructBody(
+    arena: *value.Arena,
+    body: []const u8,
+    mactab: ?*const MacroTable,
+    variant_override: ?symtab.SystemSymtab11Variant,
+) IonError!value.Struct {
+    var d = Decoder{
+        .arena = arena,
+        .input = body,
+        .i = 0,
+        .mactab = mactab,
+        .invoke_ctx = .nested,
+        .sys_symtab11_variant_override = variant_override,
+    };
     var fields = std.ArrayListUnmanaged(value.StructField){};
     errdefer fields.deinit(arena.allocator());
 
@@ -3359,7 +3484,7 @@ fn parseStructBody(arena: *value.Arena, body: []const u8, mactab: ?*const MacroT
                 name_sym = value.makeSymbolId(@intCast(id), null);
             },
             .flex_sym => {
-                const dec = try readFlexSym(arena, d.input, &d.i);
+                const dec = try readFlexSym(arena, d.input, &d.i, variant_override);
                 switch (dec) {
                     .symbol => |s| name_sym = s,
                     .end_delimited => return IonError.InvalidIon,
@@ -3381,15 +3506,28 @@ fn parseStructBody(arena: *value.Arena, body: []const u8, mactab: ?*const MacroT
     return .{ .fields = fields.toOwnedSlice(arena.allocator()) catch return IonError.OutOfMemory };
 }
 
-fn parseStructDelimited(arena: *value.Arena, input: []const u8, cursor: *usize, mactab: ?*const MacroTable) IonError!value.Struct {
-    var d = Decoder{ .arena = arena, .input = input, .i = cursor.*, .mactab = mactab, .invoke_ctx = .nested };
+fn parseStructDelimited(
+    arena: *value.Arena,
+    input: []const u8,
+    cursor: *usize,
+    mactab: ?*const MacroTable,
+    variant_override: ?symtab.SystemSymtab11Variant,
+) IonError!value.Struct {
+    var d = Decoder{
+        .arena = arena,
+        .input = input,
+        .i = cursor.*,
+        .mactab = mactab,
+        .invoke_ctx = .nested,
+        .sys_symtab11_variant_override = variant_override,
+    };
     defer cursor.* = d.i;
 
     var fields = std.ArrayListUnmanaged(value.StructField){};
     errdefer fields.deinit(arena.allocator());
 
     while (true) {
-        const dec = try readFlexSym(arena, d.input, &d.i);
+        const dec = try readFlexSym(arena, d.input, &d.i, variant_override);
         switch (dec) {
             .end_delimited => break,
             .symbol => |name_sym| {
@@ -3691,7 +3829,13 @@ fn daysInMonth(year: i32, month: u8) u8 {
     };
 }
 
-fn readTaglessFrom(arena: *value.Arena, payload: []const u8, cursor: *usize, ty: ion.macro.ParamType) IonError!value.Value {
+fn readTaglessFrom(
+    arena: *value.Arena,
+    payload: []const u8,
+    cursor: *usize,
+    ty: ion.macro.ParamType,
+    variant_override: ?symtab.SystemSymtab11Variant,
+) IonError!value.Value {
     var i = cursor.*;
     defer cursor.* = i;
 
@@ -3715,7 +3859,7 @@ fn readTaglessFrom(arena: *value.Arena, payload: []const u8, cursor: *usize, ty:
             break :blk .{ .int = n };
         },
         .flex_sym => blk: {
-            const sym = try readFlexSymSymbol(arena, payload, &i);
+            const sym = try readFlexSymSymbol(arena, payload, &i, variant_override);
             break :blk .{ .symbol = sym };
         },
         .uint8 => blk: {
