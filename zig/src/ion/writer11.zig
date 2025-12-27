@@ -346,14 +346,42 @@ pub fn writeIonSystemModuleDirectivePrelude(
 }
 
 pub fn writeSetSymbolsDirectiveText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), texts: []const []const u8) IonError!void {
-    return writeSymbolsDirectiveText(allocator, out, 19, texts);
+    return writeSetSymbolsDirectiveTextWithOptions(allocator, out, texts, .{});
+}
+
+pub fn writeSetSymbolsDirectiveTextWithOptions(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    texts: []const []const u8,
+    options: Options,
+) IonError!void {
+    return writeSymbolsDirectiveTextWithOptions(allocator, out, 19, texts, options);
 }
 
 pub fn writeAddSymbolsDirectiveText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), texts: []const []const u8) IonError!void {
-    return writeSymbolsDirectiveText(allocator, out, 20, texts);
+    return writeAddSymbolsDirectiveTextWithOptions(allocator, out, texts, .{});
+}
+
+pub fn writeAddSymbolsDirectiveTextWithOptions(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    texts: []const []const u8,
+    options: Options,
+) IonError!void {
+    return writeSymbolsDirectiveTextWithOptions(allocator, out, 20, texts, options);
 }
 
 pub fn writeUseDirective(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), key: []const u8, version: ?u32) IonError!void {
+    return writeUseDirectiveWithOptions(allocator, out, key, version, .{});
+}
+
+pub fn writeUseDirectiveWithOptions(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    key: []const u8,
+    version: ?u32,
+    options: Options,
+) IonError!void {
     // (use <catalog_key> [<version>]) as a length-prefixed system macro invocation (addr 23).
     const params = [_]ion.macro.Param{
         .{ .ty = .tagged, .card = .one, .name = "key", .shape = null },
@@ -370,20 +398,38 @@ pub fn writeUseDirective(allocator: std.mem.Allocator, out: *std.ArrayListUnmana
     } else &.{};
 
     const args_by_param = [_][]const value.Element{ key_list[0..], ver_slice };
-    try writeSystemMacroInvocationLengthPrefixedWithParams(allocator, out, 23, params[0..], args_by_param[0..], .{});
+    try writeSystemMacroInvocationLengthPrefixedWithParams(allocator, out, 23, params[0..], args_by_param[0..], options);
 }
 
 pub fn writeSetMacrosDirective(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), macro_defs: []const value.Element) IonError!void {
+    return writeSetMacrosDirectiveWithOptions(allocator, out, macro_defs, .{});
+}
+
+pub fn writeSetMacrosDirectiveWithOptions(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    macro_defs: []const value.Element,
+    options: Options,
+) IonError!void {
     // `set_macros` uses address 21 (overloaded with `meta` in conformance). The decoder selects
     // `set_macros` when all args are macro defs.
     if (macro_defs.len != 0 and !allArgsAreMacroDefs(macro_defs)) return IonError.InvalidIon;
-    try writeSystemMacroInvocationLengthPrefixedTaggedVariadicWithOptions(allocator, out, 21, macro_defs, .{});
+    try writeSystemMacroInvocationLengthPrefixedTaggedVariadicWithOptions(allocator, out, 21, macro_defs, options);
 }
 
 pub fn writeAddMacrosDirective(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), macro_defs: []const value.Element) IonError!void {
+    return writeAddMacrosDirectiveWithOptions(allocator, out, macro_defs, .{});
+}
+
+pub fn writeAddMacrosDirectiveWithOptions(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    macro_defs: []const value.Element,
+    options: Options,
+) IonError!void {
     // (add_macros <macro_def*>) is address 22.
     if (macro_defs.len != 0 and !allArgsAreMacroDefs(macro_defs)) return IonError.InvalidIon;
-    try writeSystemMacroInvocationLengthPrefixedTaggedVariadicWithOptions(allocator, out, 22, macro_defs, .{});
+    try writeSystemMacroInvocationLengthPrefixedTaggedVariadicWithOptions(allocator, out, 22, macro_defs, options);
 }
 
 fn writeElement(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, e: value.Element) IonError!void {
@@ -1331,13 +1377,19 @@ fn writeSetSymbolsDirective(allocator: std.mem.Allocator, out: *std.ArrayListUnm
     try writeSystemMacroInvocationLengthPrefixedTaggedVariadic(allocator, out, 19, elems.items);
 }
 
-fn writeSymbolsDirectiveText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), addr: u8, texts: []const []const u8) IonError!void {
+fn writeSymbolsDirectiveTextWithOptions(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    addr: u8,
+    texts: []const []const u8,
+    options: Options,
+) IonError!void {
     var elems = std.ArrayListUnmanaged(value.Element){};
     defer elems.deinit(allocator);
     for (texts) |t| {
         elems.append(allocator, .{ .annotations = &.{}, .value = .{ .string = t } }) catch return IonError.OutOfMemory;
     }
-    try writeSystemMacroInvocationLengthPrefixedTaggedVariadic(allocator, out, addr, elems.items);
+    try writeSystemMacroInvocationLengthPrefixedTaggedVariadicWithOptions(allocator, out, addr, elems.items, options);
 }
 
 pub fn writeSystemMacroInvocationLengthPrefixedTaggedVariadic(
