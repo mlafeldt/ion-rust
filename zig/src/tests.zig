@@ -4320,6 +4320,36 @@ test "ion 1.1 binary resolve_user_symbols resolves E6 annotation symbol addresse
     try std.testing.expectEqualStrings("c", doc.elements[0].annotations[2].text.?);
 }
 
+test "ion 1.1 binary ion-rust signature-driven qualified repeat with empty expr parses" {
+    const allocator = std.testing.allocator;
+
+    // System macro invocation:
+    //   repeat (addr 4)
+    // Signature (ion-rust): (n expr*)
+    // Encoding (signature-driven qualified):
+    //   EF 04
+    //   bitmap byte for `expr*` grouping: 0b00 (empty)
+    //   tagged `n`: int(2)
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA,
+        0xEF, 0x04, 0x00, 0x61,
+        0x02,
+    };
+
+    {
+        var doc = try ion.parseDocumentBinary11WithOptions(allocator, bytes, .{ .sys_symtab11_variant = .ion_rust });
+        defer doc.deinit();
+        try std.testing.expectEqual(@as(usize, 0), doc.elements.len);
+    }
+
+    // Under the conformance (`ion-tests`) system symbol table variant, the qualified invocation
+    // uses a different argument encoding and this should be rejected.
+    try std.testing.expectError(
+        ion.IonError.InvalidIon,
+        ion.parseDocumentBinary11WithOptions(allocator, bytes, .{ .sys_symtab11_variant = .ion_tests }),
+    );
+}
+
 test "ion 1.1 binary strict_flex rejects tagless FlexUInt(2) quirk (0B 00)" {
     const allocator = std.testing.allocator;
 

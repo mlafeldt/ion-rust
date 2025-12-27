@@ -596,7 +596,7 @@ const Decoder = struct {
 
         // No active macro table: the only valid targets are system macros.
         if (addr > std.math.maxInt(u8)) return IonError.InvalidIon;
-        return self.expandSystemMacroLengthPrefixed(@intCast(addr), &sub);
+        return self.expandSystemMacroLengthPrefixed(@intCast(addr), &sub, true);
     }
 
     fn emptyElems() []value.Element {
@@ -618,7 +618,7 @@ const Decoder = struct {
         return bindings[0].values;
     }
 
-    fn expandSystemMacroLengthPrefixed(self: *Decoder, addr: u8, sub: *Decoder) IonError![]value.Element {
+    fn expandSystemMacroLengthPrefixed(self: *Decoder, addr: u8, sub: *Decoder, require_end: bool) IonError![]value.Element {
         // Note: Conformance uses the system macro addresses documented in `readSystemMacroInvocationAt`.
         // Do not assume Ion-rust's internal system macro table address layout here.
 
@@ -803,13 +803,13 @@ const Decoder = struct {
 
         return switch (addr) {
             0 => blk: {
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 break :blk &.{};
             },
             1 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "x", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 break :blk bindings[0].values;
             },
             2 => blk: {
@@ -818,7 +818,7 @@ const Decoder = struct {
                     .{ .ty = .tagged, .card = .zero_or_many, .name = "default_expr", .shape = null },
                 };
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 break :blk if (bindings[0].values.len != 0) bindings[0].values else bindings[1].values;
             },
             3 => blk: {
@@ -827,7 +827,7 @@ const Decoder = struct {
                 // `meta` produces no values.
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "expr", .shape = null }};
                 _ = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 break :blk &.{};
             },
             4 => blk: {
@@ -836,7 +836,7 @@ const Decoder = struct {
                     .{ .ty = .tagged, .card = .zero_or_many, .name = "expr", .shape = null },
                 };
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const n_elem = try bindingSingle(bindings[0]);
                 if (n_elem.value != .int) return IonError.InvalidIon;
                 const n_i128 = try self.intToI128(n_elem.value.int);
@@ -855,13 +855,13 @@ const Decoder = struct {
                 // Signature: (flatten <sequence*>)
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "sequence", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 break :blk try flattenSeqs(self.arena, bindings[0].values);
             },
             6 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "deltas", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const args = bindings[0].values;
                 if (args.len == 0) break :blk &.{};
                 const out = self.arena.allocator().alloc(value.Element, args.len) catch return IonError.OutOfMemory;
@@ -916,7 +916,7 @@ const Decoder = struct {
                     .{ .ty = .tagged, .card = .one, .name = "b", .shape = null },
                 };
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const a = try bindingSingle(bindings[0]);
                 const b = try bindingSingle(bindings[1]);
                 if (a.value != .int or b.value != .int) return IonError.InvalidIon;
@@ -948,7 +948,7 @@ const Decoder = struct {
                     .{ .ty = .tagged, .card = .one, .name = "value_to_annotate", .shape = null },
                 };
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
 
                 var anns = std.ArrayListUnmanaged(value.Symbol){};
                 defer anns.deinit(self.arena.allocator());
@@ -969,14 +969,14 @@ const Decoder = struct {
             9 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "text", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const buf = try concatText(self.arena, bindings[0].values);
                 break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .string = buf } });
             },
             10 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "text", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const buf = try concatText(self.arena, bindings[0].values);
                 break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .symbol = value.makeSymbolId(null, buf) } });
             },
@@ -986,7 +986,7 @@ const Decoder = struct {
                     .{ .ty = .tagged, .card = .one, .name = "exponent", .shape = null },
                 };
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const coeff = try bindingSingle(bindings[0]);
                 const exp = try bindingSingle(bindings[1]);
                 break :blk try mkOne(self.arena, try self.makeDecimalFromTwoInts(coeff.value, exp.value));
@@ -1002,7 +1002,7 @@ const Decoder = struct {
                     .{ .ty = .tagged, .card = .zero_or_one, .name = "offset_minutes", .shape = null },
                 };
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const year_e = try bindingSingle(bindings[0]);
                 if (year_e.value != .int) return IonError.InvalidIon;
                 const year_i128 = try self.intToI128(year_e.value.int);
@@ -1189,21 +1189,21 @@ const Decoder = struct {
             13 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "lob", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const buf = try concatLob(self.arena, bindings[0].values);
                 break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .blob = buf } });
             },
             14 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "sequences", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const flat = try flattenSeqs(self.arena, bindings[0].values);
                 break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .list = flat } });
             },
             15 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "sequences", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const flat = try flattenSeqs(self.arena, bindings[0].values);
                 break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .sexp = flat } });
             },
@@ -1213,7 +1213,7 @@ const Decoder = struct {
                     .{ .ty = .tagged, .card = .one, .name = "value", .shape = null },
                 };
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const name_elem = try bindingSingle(bindings[0]);
                 const val_elem = try bindingSingle(bindings[1]);
 
@@ -1230,7 +1230,7 @@ const Decoder = struct {
             17 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "fields", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 var out_fields = std.ArrayListUnmanaged(value.StructField){};
                 errdefer out_fields.deinit(self.arena.allocator());
                 for (bindings[0].values) |arg| {
@@ -1245,14 +1245,14 @@ const Decoder = struct {
             18 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "data", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const bytes = try concatIonBytes(self.arena, bindings[0].values);
                 break :blk try parseEmbedded(self.arena, bytes);
             },
             19 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "args", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const args = bindings[0].values;
 
                 // Match existing heuristic: all unannotated text => set_symbols, else flatten.
@@ -1273,13 +1273,14 @@ const Decoder = struct {
                     // parser apply it as a module directive.
                     break :blk try mkIonModuleDirectiveWithSymbolTableList(self.arena, self.arena.allocator(), false, args);
                 }
+                if (self.sys_symtab11_variant_override == .ion_rust) return IonError.InvalidIon;
                 break :blk try flattenSeqs(self.arena, args);
             },
             20 => blk: {
                 if (self.invoke_ctx != .top) return IonError.InvalidIon;
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "text", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const args = bindings[0].values;
                 for (args) |e| {
                     if (e.annotations.len != 0) return IonError.InvalidIon;
@@ -1297,10 +1298,12 @@ const Decoder = struct {
                 // Disambiguate by argument shape: all macro defs => `set_macros`, else `meta`.
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "macro_def", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const defs = bindings[0].values;
                 if (defs.len != 0 and self.allArgsAreMacroDefs(defs)) {
                     try self.applySetMacros(defs);
+                } else if (self.sys_symtab11_variant_override == .ion_rust) {
+                    return IonError.InvalidIon;
                 }
                 break :blk &.{};
             },
@@ -1309,7 +1312,7 @@ const Decoder = struct {
                 // (add_macros <macro_def*>)
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "macro_def", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
                 const defs = bindings[0].values;
                 if (defs.len != 0) {
                     if (!self.allArgsAreMacroDefs(defs)) return IonError.InvalidIon;
@@ -1325,7 +1328,7 @@ const Decoder = struct {
                     .{ .ty = .tagged, .card = .zero_or_one, .name = "version", .shape = null },
                 };
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
-                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                if (require_end and sub.i != sub.input.len) return IonError.InvalidIon;
 
                 const key_elem = bindings[0].values;
                 if (key_elem.len != 1) return IonError.InvalidIon;
@@ -1829,6 +1832,18 @@ const Decoder = struct {
     }
 
     fn readSystemMacroInvocationAt(self: *Decoder, addr: usize) IonError![]value.Element {
+        // Ion-rust's Ion 1.1 binary writer emits system macro invocations using the Ion 1.1
+        // signature-driven argument encoding (bitmap + required args + arg groups) immediately
+        // following `0xEF <addr>`.
+        //
+        // The ion-tests conformance suite historically uses a different, conformance-driven set of
+        // system macro argument encodings for qualified invocations. To keep conformance coverage
+        // green, we only switch to the signature-driven decoder when the Ion 1.1 system symbol
+        // table variant is forced or inferred as `ion_rust`.
+        if (self.sys_symtab11_variant_override == .ion_rust) {
+            if (addr > std.math.maxInt(u8)) return IonError.InvalidIon;
+            return self.readSystemMacroInvocationAtSignatureDriven(@intCast(addr));
+        }
         return switch (addr) {
             // System macro addresses used by conformance:
             // 0  => none
@@ -1880,6 +1895,26 @@ const Decoder = struct {
             23 => self.expandUse(),
             else => IonError.InvalidIon,
         };
+    }
+
+    fn readSystemMacroInvocationAtSignatureDriven(self: *Decoder, addr: u8) IonError![]value.Element {
+        // Parse arguments using the same signature-driven encoding as length-prefixed system
+        // macro invocations, but without an outer length field.
+        var sub = Decoder{
+            .arena = self.arena,
+            .input = self.input[self.i..],
+            .i = 0,
+            .mactab = self.currentMacroTable(),
+            .invoke_ctx = .nested,
+            .module_state = self.module_state,
+            .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+            .strict_flex = self.strict_flex,
+            .strict_opcodes = self.strict_opcodes,
+            .resolve_user_symbols = self.resolve_user_symbols,
+        };
+        const out = try self.expandSystemMacroLengthPrefixed(addr, &sub, false);
+        self.i += sub.i;
+        return out;
     }
 
     fn readQualifiedTaggedVarArgs(self: *Decoder) IonError![]const value.Element {
