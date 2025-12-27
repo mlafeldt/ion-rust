@@ -160,6 +160,7 @@ Key properties:
   - Provides low-level helpers for emitting conformance-driven Ion 1.1 binary e-expressions:
     - Length-prefixed e-expressions (`0xF5`) for system macros like `values`/`default` and for directive-like invocations (`set_symbols`, `add_symbols`, `set_macros`, `add_macros`, `use`).
     - Qualified system macro invocations (`0xEF`) for a small subset of system macros (currently including `none`, `values`, `default`, `repeat`, `delta`, `sum`, `annotate`, `make_string`, `make_symbol`, `make_decimal`, `make_timestamp`, `make_blob`, `make_list`, `make_sexp`, `parse_ion`, `make_field`, `make_struct`, `flatten`, `set_symbols`, `add_symbols`, `meta`, `set_macros`, `add_macros`, and `use`).
+      - Note: conformance overloading uses `flatten`/`set_symbols` at addr 19, `meta`/`set_macros` at addr 21, and `parse_ion`/`make_field` at addr 16; the decoder also accepts ion-rust canonical qualified addrs for `meta` (3), `flatten` (5), and `parse_ion` (18).
     - Unqualified user macro invocations using 6-bit / 12-bit / 20-bit address encodings (`0x00..0x5F`).
     - Delimited argument group encodings (tagged `0xF0` terminator; tagless chunked).
   - Limitations:
@@ -183,7 +184,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
 - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
-- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `161/161` tests).
+- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `164/164` tests).
 
 ### Skip list (currently empty)
 

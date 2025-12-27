@@ -642,7 +642,7 @@ const Decoder = struct {
             }
         }.run;
 
-        const flatten = struct {
+        const flattenSeqs = struct {
             fn run(arena: *value.Arena, seqs: []const value.Element) IonError![]value.Element {
                 var out = std.ArrayListUnmanaged(value.Element){};
                 errdefer out.deinit(arena.allocator());
@@ -770,7 +770,7 @@ const Decoder = struct {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "sequence", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
                 if (sub.i != sub.input.len) return IonError.InvalidIon;
-                break :blk try flatten(self.arena, bindings[0].values);
+                break :blk try flattenSeqs(self.arena, bindings[0].values);
             },
             6 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "deltas", .shape = null }};
@@ -1111,14 +1111,14 @@ const Decoder = struct {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "sequences", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
                 if (sub.i != sub.input.len) return IonError.InvalidIon;
-                const flat = try flatten(self.arena, bindings[0].values);
+                const flat = try flattenSeqs(self.arena, bindings[0].values);
                 break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .list = flat } });
             },
             15 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "sequences", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
                 if (sub.i != sub.input.len) return IonError.InvalidIon;
-                const flat = try flatten(self.arena, bindings[0].values);
+                const flat = try flattenSeqs(self.arena, bindings[0].values);
                 break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .sexp = flat } });
             },
             16 => blk: {
@@ -1187,7 +1187,7 @@ const Decoder = struct {
                     // parser apply it as a module directive.
                     break :blk try mkIonModuleDirectiveWithSymbolTableList(self.arena, self.arena.allocator(), false, args);
                 }
-                break :blk try flatten(self.arena, args);
+                break :blk try flattenSeqs(self.arena, args);
             },
             20 => blk: {
                 if (self.invoke_ctx != .top) return IonError.InvalidIon;
@@ -1712,7 +1712,11 @@ const Decoder = struct {
             0 => self.expandNone(),
             1 => self.expandValues(),
             2 => self.expandDefault(),
+            // Canonical system macro address in ion-rust: meta.
+            3 => self.expandMetaCanonicalQualified(),
             4 => self.expandRepeat(),
+            // Canonical system macro address in ion-rust: flatten.
+            5 => self.expandFlattenCanonicalQualified(),
             6 => self.expandDelta(),
             7 => self.expandSum(),
             8 => self.expandAnnotate(),
@@ -1725,6 +1729,8 @@ const Decoder = struct {
             15 => self.expandMakeSequence(.sexp),
             16 => self.expandSystem16(),
             17 => self.expandMakeStruct(),
+            // Canonical system macro address in ion-rust: parse_ion.
+            18 => self.expandParseIonCanonicalQualified(),
             19 => self.expandSystem19(),
             20 => self.expandAddSymbols(),
             21 => self.expandSystem21(),
@@ -1732,6 +1738,84 @@ const Decoder = struct {
             23 => self.expandUse(),
             else => IonError.Unsupported,
         };
+    }
+
+    fn readQualifiedTaggedVarArgs(self: *Decoder) IonError![]const value.Element {
+        // Conformance-style qualified system macro encoding used by many macros:
+        //   <presence u8>
+        //   0 => empty group
+        //   1 => single tagged value
+        //   2 => expression group of tagged values
+        if (self.i >= self.input.len) return IonError.Incomplete;
+        const presence = self.input[self.i];
+        self.i += 1;
+
+        const prev = self.pushInvokeCtx(.nested);
+        defer self.invoke_ctx = prev;
+
+        return switch (presence) {
+            0 => &.{},
+            1 => blk: {
+                const v = try self.readValue();
+                const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
+                one[0] = .{ .annotations = &.{}, .value = v };
+                break :blk one;
+            },
+            2 => try self.readExpressionGroup(.tagged),
+            else => IonError.InvalidIon,
+        };
+    }
+
+    fn expandMetaCanonicalQualified(self: *Decoder) IonError![]value.Element {
+        // Canonical: (meta <expr*>) => produces nothing.
+        _ = try self.readQualifiedTaggedVarArgs();
+        return &.{};
+    }
+
+    fn expandFlattenCanonicalQualified(self: *Decoder) IonError![]value.Element {
+        // Canonical: (flatten <sequence*>) => concatenates each sequence.
+        const args = try self.readQualifiedTaggedVarArgs();
+        return flatten(self.arena, args);
+    }
+
+    fn expandParseIonCanonicalQualified(self: *Decoder) IonError![]value.Element {
+        // Canonical: (parse_ion <data*>)
+        // Accept the same conformance-style presence-coded argument group as other qualified system macros.
+        const args = try self.readQualifiedTaggedVarArgs();
+
+        var total: usize = 0;
+        for (args) |e| {
+            if (e.annotations.len != 0) return IonError.InvalidIon;
+            total += switch (e.value) {
+                .string => |s| s.len,
+                .blob => |b| b.len,
+                .clob => |b| b.len,
+                else => return IonError.InvalidIon,
+            };
+        }
+
+        const buf = self.arena.allocator().alloc(u8, total) catch return IonError.OutOfMemory;
+        var i: usize = 0;
+        for (args) |e| {
+            const bytes = switch (e.value) {
+                .string => |s| s,
+                .blob => |b| b,
+                .clob => |b| b,
+                else => unreachable,
+            };
+            if (bytes.len != 0) {
+                @memcpy(buf[i .. i + bytes.len], bytes);
+                i += bytes.len;
+            }
+        }
+
+        if (buf.len >= 4 and buf[0] == 0xE0 and buf[1] == 0x01 and buf[2] == 0x00 and buf[3] == 0xEA) {
+            return ion.binary.parseTopLevel(self.arena, buf);
+        }
+        if (buf.len >= 4 and buf[0] == 0xE0 and buf[1] == 0x01 and buf[2] == 0x01 and buf[3] == 0xEA) {
+            return ion.binary11.parseTopLevelWithMacroTable(self.arena, buf, null);
+        }
+        return ion.text.parseTopLevelWithMacroTable(self.arena, buf, null);
     }
 
     fn expandNone(_: *Decoder) IonError![]value.Element {
@@ -4344,6 +4428,19 @@ fn decodeDecimal11(arena: *value.Arena, payload: []const u8) IonError!value.Deci
             break :blk .{ .is_negative = negative, .coefficient = .{ .big = bi }, .exponent = exp_i32 };
         },
     };
+}
+
+fn flatten(arena: *value.Arena, seqs: []const value.Element) IonError![]value.Element {
+    var out = std.ArrayListUnmanaged(value.Element){};
+    errdefer out.deinit(arena.allocator());
+    for (seqs) |e| {
+        switch (e.value) {
+            .list => |items| out.appendSlice(arena.allocator(), items) catch return IonError.OutOfMemory,
+            .sexp => |items| out.appendSlice(arena.allocator(), items) catch return IonError.OutOfMemory,
+            else => return IonError.InvalidIon,
+        }
+    }
+    return out.toOwnedSlice(arena.allocator()) catch return IonError.OutOfMemory;
 }
 
 fn detectFlexShift(input: []const u8, cursor: *usize) ?usize {

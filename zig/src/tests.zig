@@ -1583,6 +1583,70 @@ test "ion 1.1 writer11 can emit qualified system flatten e-expression" {
     try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
 }
 
+test "ion 1.1 binary11 decodes canonical qualified meta (addr 3)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const meta_args = [_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } }};
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedTaggedGroup(std.testing.allocator, &out, 3, &meta_args, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    try std.testing.expect(elems.len == 0);
+}
+
+test "ion 1.1 binary11 decodes canonical qualified flatten (addr 5)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const list_items_a = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    list_items_a[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
+    list_items_a[1] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } };
+    const list_a: ion.value.Element = .{ .annotations = &.{}, .value = .{ .list = list_items_a } };
+
+    const list_items_b = arena.allocator().alloc(ion.value.Element, 1) catch return ion.IonError.OutOfMemory;
+    list_items_b[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } };
+    const list_b: ion.value.Element = .{ .annotations = &.{}, .value = .{ .list = list_items_b } };
+
+    const seqs = [_]ion.value.Element{ list_a, list_b };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedTaggedGroup(std.testing.allocator, &out, 5, &seqs, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    const expected = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } },
+    };
+    try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
+}
+
+test "ion 1.1 binary11 decodes canonical qualified parse_ion (addr 18)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const bytes: ion.value.Element = .{ .annotations = &.{}, .value = .{ .string = "1 2" } };
+    const args = [_]ion.value.Element{bytes};
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedTaggedGroup(std.testing.allocator, &out, 18, &args, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    try std.testing.expect(elems.len == 2);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expect(elems[1].value == .int);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+    try std.testing.expectEqual(@as(i128, 2), elems[1].value.int.small);
+}
+
 test "ion 1.1 writer11 can emit qualified system set_macros and add_macros directives" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
