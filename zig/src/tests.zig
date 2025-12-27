@@ -5381,3 +5381,102 @@ test "ion 1.1 binary e-expression F5: parse_ion parses embedded Ion bytes" {
     try std.testing.expectEqual(@as(i128, 1), parsed[0].value.int.small);
     try std.testing.expectEqual(@as(i128, 2), parsed[1].value.int.small);
 }
+
+test "ion 1.1 binary module directive accepts symbol_table list wrapper" {
+    var sym_list_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .string = "a" } },
+        .{ .annotations = &.{}, .value = .{ .string = "b" } },
+    };
+    const sym_list_elem = ion.value.Element{ .annotations = &.{}, .value = .{ .list = sym_list_items[0..] } };
+
+    var symbol_table_clause_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "symbol_table") } },
+        sym_list_elem,
+    };
+    var macro_table_clause_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "macro_table") } },
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "_") } },
+    };
+
+    var module_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "module") } },
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "_") } },
+        .{ .annotations = &.{}, .value = .{ .sexp = symbol_table_clause_items[0..] } },
+        .{ .annotations = &.{}, .value = .{ .sexp = macro_table_clause_items[0..] } },
+    };
+
+    var anns = [_]ion.value.Symbol{ion.value.makeSymbolId(null, "$ion")};
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = anns[0..], .value = .{ .sexp = module_items[0..] } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(std.testing.allocator, doc, .{ .symbol_encoding = .addresses });
+    defer std.testing.allocator.free(bytes);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+    const parsed = try ion.binary11.parseTopLevelWithState(&parsed_arena, bytes);
+    try std.testing.expectEqual(@as(usize, 0), parsed.elements.len);
+    try std.testing.expect(parsed.state.system_loaded);
+    try std.testing.expectEqual(@as(usize, 2), parsed.state.user_symbols.len);
+    try std.testing.expect(parsed.state.user_symbols[0] != null and std.mem.eql(u8, parsed.state.user_symbols[0].?, "a"));
+    try std.testing.expect(parsed.state.user_symbols[1] != null and std.mem.eql(u8, parsed.state.user_symbols[1].?, "b"));
+}
+
+test "ion 1.1 binary module directive symbol_table underscore appends" {
+    var sym_list1_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .string = "a" } },
+    };
+    var sym_list2_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .string = "b" } },
+        .{ .annotations = &.{}, .value = .{ .string = "c" } },
+    };
+    const sym_list1_elem = ion.value.Element{ .annotations = &.{}, .value = .{ .list = sym_list1_items[0..] } };
+    const sym_list2_elem = ion.value.Element{ .annotations = &.{}, .value = .{ .list = sym_list2_items[0..] } };
+
+    var clause1_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "symbol_table") } },
+        sym_list1_elem,
+    };
+    var clause2_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "symbol_table") } },
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "_") } },
+        sym_list2_elem,
+    };
+    var macro_table_clause_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "macro_table") } },
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "_") } },
+    };
+
+    var module1_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "module") } },
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "_") } },
+        .{ .annotations = &.{}, .value = .{ .sexp = clause1_items[0..] } },
+        .{ .annotations = &.{}, .value = .{ .sexp = macro_table_clause_items[0..] } },
+    };
+    var module2_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "module") } },
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "_") } },
+        .{ .annotations = &.{}, .value = .{ .sexp = clause2_items[0..] } },
+        .{ .annotations = &.{}, .value = .{ .sexp = macro_table_clause_items[0..] } },
+    };
+
+    var anns = [_]ion.value.Symbol{ion.value.makeSymbolId(null, "$ion")};
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = anns[0..], .value = .{ .sexp = module1_items[0..] } },
+        .{ .annotations = anns[0..], .value = .{ .sexp = module2_items[0..] } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(std.testing.allocator, doc, .{ .symbol_encoding = .addresses });
+    defer std.testing.allocator.free(bytes);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+    const parsed = try ion.binary11.parseTopLevelWithState(&parsed_arena, bytes);
+    try std.testing.expectEqual(@as(usize, 0), parsed.elements.len);
+    try std.testing.expect(parsed.state.system_loaded);
+    try std.testing.expectEqual(@as(usize, 3), parsed.state.user_symbols.len);
+    try std.testing.expect(parsed.state.user_symbols[0] != null and std.mem.eql(u8, parsed.state.user_symbols[0].?, "a"));
+    try std.testing.expect(parsed.state.user_symbols[1] != null and std.mem.eql(u8, parsed.state.user_symbols[1].?, "b"));
+    try std.testing.expect(parsed.state.user_symbols[2] != null and std.mem.eql(u8, parsed.state.user_symbols[2].?, "c"));
+}

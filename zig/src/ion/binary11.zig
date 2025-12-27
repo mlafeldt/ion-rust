@@ -148,7 +148,11 @@ const Decoder = struct {
 
         var defs: []const value.Element = &.{};
         var base_addr: usize = 0;
+        var saw_defs = false;
+
         var symbols: []const value.Element = &.{};
+        var saw_symbols = false;
+        var symbols_append = false;
 
         // Infer system symbol table variant from the module directive head.
         // This helps decode Ion 1.1 binary streams produced by ion-rust, which assigns `module`
@@ -173,32 +177,57 @@ const Decoder = struct {
             if (head_text != null and std.mem.eql(u8, head_text.?, "macros")) {
                 defs = csx[1..];
                 base_addr = 0;
+                saw_defs = true;
                 continue;
             }
 
             if ((head_text != null and std.mem.eql(u8, head_text.?, "macro_table")) or head_sid == 14) {
                 base_addr = ion.macro.system_macro_count;
 
-                // Common upstream encoding: (macro_table _ <macro_def>...)
-                if (csx.len >= 3) {
-                    defs = csx[2..];
-                } else if (csx.len >= 2) {
-                    defs = csx[1..];
-                } else {
-                    defs = &.{};
+                // Common upstream encoding:
+                // - (macro_table _ <macro_def>...)
+                // - (macro_table <macro_def>...)
+                // - (macro_table _)  // keep active macro table (no change)
+                var i: usize = 1;
+                if (csx.len >= 2 and csx[1].annotations.len == 0 and csx[1].value == .symbol) {
+                    const t = csx[1].value.symbol.text orelse "";
+                    if (std.mem.eql(u8, t, "_")) i = 2;
                 }
+
+                if (i >= csx.len) {
+                    // `macro_table _` means "include the active macro table" (no mutation).
+                    continue;
+                }
+
+                // Some encodings wrap defs in a list.
+                if (csx.len - i == 1 and csx[i].annotations.len == 0 and csx[i].value == .list) {
+                    defs = csx[i].value.list;
+                } else {
+                    defs = csx[i..];
+                }
+                saw_defs = true;
                 continue;
             }
 
             if ((head_text != null and std.mem.eql(u8, head_text.?, "symbols")) or head_sid == 7) {
-                // Expected forms:
-                // - (symbols _ <text-or-null>...)
-                // - (symbol_table _ <text-or-null>...)
-                if (csx.len >= 3) {
-                    symbols = csx[2..];
-                } else {
-                    symbols = &.{};
+                var i: usize = 1;
+                var append = false;
+                if (csx.len >= 2 and csx[1].annotations.len == 0 and csx[1].value == .symbol) {
+                    const t = csx[1].value.symbol.text orelse "";
+                    if (std.mem.eql(u8, t, "_")) {
+                        i = 2;
+                        append = true;
+                    }
                 }
+                if (i >= csx.len) continue;
+
+                if (csx.len - i == 1 and csx[i].annotations.len == 0 and csx[i].value == .list) {
+                    symbols = csx[i].value.list;
+                } else {
+                    symbols = csx[i..];
+                }
+                saw_symbols = true;
+                symbols_append = append;
                 continue;
             }
 
@@ -206,38 +235,61 @@ const Decoder = struct {
                 // ion-rust uses `symbol_table` (address 15) in the module directive; ion-tests does
                 // not include it in its system symbol table, so we key off the SID.
                 self.sys_symtab11_variant_override = .ion_rust;
-                if (csx.len >= 3) {
-                    symbols = csx[2..];
-                } else {
-                    symbols = &.{};
+                var i: usize = 1;
+                var append = false;
+                if (csx.len >= 2 and csx[1].annotations.len == 0 and csx[1].value == .symbol) {
+                    const t = csx[1].value.symbol.text orelse "";
+                    if (std.mem.eql(u8, t, "_")) {
+                        i = 2;
+                        append = true;
+                    }
                 }
+                if (i >= csx.len) continue;
+
+                if (csx.len - i == 1 and csx[i].annotations.len == 0 and csx[i].value == .list) {
+                    symbols = csx[i].value.list;
+                } else {
+                    symbols = csx[i..];
+                }
+                saw_symbols = true;
+                symbols_append = append;
                 continue;
             }
         }
 
-        const parsed = try ion.macro.parseMacroTableWithBase(self.arena.allocator(), defs, base_addr);
-        self.mactab_local = parsed;
-        self.mactab_local_set = true;
+        if (saw_defs) {
+            const parsed = try ion.macro.parseMacroTableWithBase(self.arena.allocator(), defs, base_addr);
+            self.mactab_local = parsed;
+            self.mactab_local_set = true;
+        }
 
-        if (symbols.len != 0) {
-            var out = std.ArrayListUnmanaged(?[]const u8){};
-            errdefer out.deinit(self.arena.allocator());
-            for (symbols) |s| {
+        if (saw_symbols) {
+            const out_new = self.arena.allocator().alloc(?[]const u8, symbols.len) catch return IonError.OutOfMemory;
+            for (symbols, 0..) |s, idx| {
                 if (s.annotations.len != 0) return IonError.InvalidIon;
-                switch (s.value) {
-                    .string => |t| out.append(self.arena.allocator(), try self.arena.dupe(t)) catch return IonError.OutOfMemory,
-                    .symbol => |sym| {
+                out_new[idx] = switch (s.value) {
+                    .string => |t| try self.arena.dupe(t),
+                    .symbol => |sym| blk: {
                         const t = sym.text orelse return IonError.InvalidIon;
-                        out.append(self.arena.allocator(), try self.arena.dupe(t)) catch return IonError.OutOfMemory;
+                        break :blk try self.arena.dupe(t);
                     },
-                    .null => |ty| {
+                    .null => |ty| blk: {
                         if (ty != .symbol) return IonError.InvalidIon;
-                        out.append(self.arena.allocator(), null) catch return IonError.OutOfMemory;
+                        break :blk null;
                     },
                     else => return IonError.InvalidIon,
-                }
+                };
             }
-            self.module_state.user_symbols = out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+
+            if (symbols_append) {
+                const old = self.module_state.user_symbols;
+                const out = self.arena.allocator().alloc(?[]const u8, old.len + out_new.len) catch return IonError.OutOfMemory;
+                if (old.len != 0) @memcpy(out[0..old.len], old);
+                if (out_new.len != 0) @memcpy(out[old.len .. old.len + out_new.len], out_new);
+                self.module_state.user_symbols = out;
+            } else {
+                self.module_state.user_symbols = out_new;
+            }
             self.module_state.system_loaded = true;
         }
     }
