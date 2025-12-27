@@ -207,7 +207,8 @@ pub const Format = enum(u32) {
     ///
     /// Note: this uses the experimental Ion 1.1 binary writer (`zig/src/ion/writer11.zig`).
     /// It emits values (not macros/e-expressions), and may emit a minimal module prelude
-    /// (`set_symbols`) so non-system symbols can be encoded by address in a self-contained stream.
+    /// (`$ion::(module ...)`) so non-system symbols can be encoded by address in a self-contained
+    /// stream.
     binary_1_1 = 4,
     /// Ion 1.1 binary without forcing a self-contained module prelude.
     ///

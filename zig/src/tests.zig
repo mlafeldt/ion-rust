@@ -193,6 +193,20 @@ test "zig ion serializeDocument binary_1_1 uses system symbol addresses in modul
     try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x07 }) != null);
 }
 
+test "zig ion serializeDocument binary_1_1_raw does not emit module prelude" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const sym_a = try ion.value.makeSymbol(&arena, "a");
+    const elems = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .symbol = sym_a } }};
+    const bytes = try ion.serializeDocument(std.testing.allocator, .binary_1_1_raw, elems);
+    defer std.testing.allocator.free(bytes);
+
+    // `binary_1_1_raw` does not attempt to make output self-contained, so it should not emit
+    // `$ion::(module ...)` up front.
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x0F }) == null);
+}
+
 test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
     const elems = &[_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } }, // $ion
