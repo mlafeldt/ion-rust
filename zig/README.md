@@ -280,25 +280,53 @@ This is a rough "where to look next" map. Passing `ion-tests/` does not imply fe
 
 `ion-tests` is a strong correctness baseline (and is currently fully passing), but it is not a full Ion specification test suite. The items below are known gaps or areas where the implementation is intentionally conformance-driven.
 
-1) Ion 1.1 module state and symbol semantics (beyond the conformance "default module" model)
-   - The conformance runner models `set_symbols`/`add_symbols`/`set_macros`/`add_macros`/`use` in a minimal way to keep the suite actionable.
-   - Full Ion 1.1 semantics require a more complete module model for symbol IDs, symbol addresses, and macro tables (reader + writer).
-   - Relevant files: `zig/src/ion/text.zig`, `zig/src/ion/binary11.zig`, `zig/src/ion/shared_module_catalog11.zig`.
+Below is a tighter checklist for "spec completeness" work. These are not required for `ion-tests`, but are required for something closer to "spec complete Ion 1.1" and/or ion-rust feature parity.
 
-2) Ion 1.1 macro system / TDL (beyond the subset exercised by conformance)
-   - Conformance-driven macro evaluation is implemented, but it is not a complete macro compiler/evaluator.
-   - Relevant files: `zig/src/ion/macro.zig`, `zig/src/ion/tdl_eval.zig`, `zig/src/conformance/runner.zig`.
+1) Ion 1.1 modules (reader + writer)
+   - [ ] Implement a real Ion 1.1 module state model (not the conformance-only "default module" model).
+   - [ ] Implement full symbol semantics:
+     - [ ] Separate system symbol addresses (`0xEE`) vs symbol IDs (`0xE1..0xE3`, FlexSym positive IDs).
+     - [ ] Deterministic assignment and tracking of user symbol IDs across the stream.
+     - [ ] Correct handling of `$0`, unknown SIDs, and unknown system addresses (error vs unknown symbol) per spec.
+   - [ ] Implement full module mutation semantics:
+     - [ ] `use` with catalog/module imports and versioning (beyond the minimal shared module catalog used for conformance).
+     - [ ] `set_symbols` / `add_symbols` semantics as defined by Ion 1.1, not just the conformance runner shortcut.
+     - [ ] `set_macros` / `add_macros` semantics with proper scoping and address space.
+   - Relevant files: `zig/src/ion/text.zig`, `zig/src/ion/binary11.zig`, `zig/src/ion/shared_module_catalog11.zig`, `zig/src/ion/symtab.zig`.
 
-3) Ion 1.1 writing (text + binary) is still incomplete
-   - `zig/src/ion/writer11.zig` is a partial binary writer used for regression tests/ad-hoc tooling.
-   - It can emit a useful subset of binary Ion 1.1 value encodings and can also emit some conformance-driven e-expression/directive patterns, but it is not a full Ion 1.1 module/macro system writer.
-   - Deterministic standalone serialization is still limited by module state (for example: SID-only user symbols require ambient module state to serialize meaningfully).
-   - Text writer does not emit Ion 1.1 e-expression syntax.
-   - Relevant files: `zig/src/ion/writer11.zig`, `zig/src/ion/writer.zig`.
+2) Ion 1.1 macro system / TDL (beyond conformance subset)
+   - [ ] Implement a full macro compiler/evaluator (not just conformance-driven evaluation).
+   - [ ] Support macro definitions beyond simple shapes:
+     - [ ] Full `(macro ...)` compilation, including nested shapes and tagless encodings.
+     - [ ] Correct cardinality (`one`, `?`, `*`, `+`) across tagged and tagless parameters.
+     - [ ] Recursive expansion semantics (termination rules, memoization/caching strategy).
+   - [ ] Support more macro-shape decoding/encoding paths:
+     - [ ] `ParamType.macro_shape` for decoding tagless args in `binary11` (`readArgValue(.macro_shape)` is currently unsupported).
+     - [ ] More qualified system macro shapes (currently only a subset is recognized in `binary11.readMacroShapeValues` and `writer11.writeMacroShapeArg`).
+   - Relevant files: `zig/src/ion/macro.zig`, `zig/src/ion/tdl_eval.zig`, `zig/src/conformance/runner.zig`, `zig/src/ion/binary11.zig`, `zig/src/ion/writer11.zig`.
 
-4) Reader architecture: DOM-only (no streaming/lazy reader)
-   - The Zig implementation currently parses documents into an arena-backed DOM.
-   - A streaming/lazy reader is not required for `ion-tests`, but is important for parity with ion-rust and for large inputs.
+3) Ion 1.1 writing (spec-complete)
+   - [ ] Ion 1.1 text writer:
+     - [ ] Emit Ion 1.1 e-expression syntax and macro invocations (not just expanded values).
+     - [ ] Preserve/roundtrip macro AST when parsing Ion 1.1 text (requires a non-DOM macro representation or an alternate AST surface).
+   - [ ] Ion 1.1 binary writer:
+     - [ ] Full module-aware emission (beyond `writeBinary11SelfContained` and `binary_1_1_raw`).
+     - [ ] Full macro/e-expression emission (beyond conformance helpers and the value-only writer).
+     - [ ] Ensure canonical encodings where required by the spec (not just "decoder accepts it").
+   - Relevant files: `zig/src/ion/writer11.zig`, `zig/src/ion/writer.zig`, `zig/src/ion/text.zig`.
+
+4) Ion 1.1 binary (spec completeness audit)
+   - [ ] Audit remaining value opcodes and edge cases against ion-rust's Ion 1.1 binary reader/writer:
+     - [ ] Ensure all reserved/invalid opcodes signal errors as required (not `Unsupported` where the spec requires `InvalidIon`).
+     - [ ] Validate canonical vs non-canonical encodings where the spec distinguishes them.
+     - [ ] Verify all container forms (short/long/delimited) and annotation wrappers across nesting.
+   - Relevant files: `zig/src/ion/binary11.zig`, `zig/src/ion/writer11.zig`, `src/lazy/binary/raw/v1_1/reader.rs`, `src/lazy/encoder/binary/v1_1/value_writer.rs`.
+
+5) Reader architecture (streaming/lazy)
+   - [ ] Add a streaming/lazy reader API (instead of arena-backed DOM-only parsing):
+     - [ ] Zero-copy or bounded-copy tokenization
+     - [ ] Incremental container traversal
+     - [ ] Large value handling without buffering entire documents
    - Relevant files: `zig/src/ion.zig`, `zig/src/ion/value.zig`.
 
 ### Performance
