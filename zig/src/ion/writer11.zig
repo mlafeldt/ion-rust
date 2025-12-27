@@ -148,8 +148,10 @@ fn writeModuleDirectivePrelude(
 
     const elem: value.Element = .{ .annotations = @constCast(ann[0..]), .value = .{ .sexp = module_items } };
 
-    // Inline text is deterministic and avoids depending on any system symbol address mapping.
-    try writeElement(allocator, out, .{ .symbol_encoding = .inline_text_only }, elem);
+    // Use system symbol addresses (0xEE) when possible. This keeps the output compact, but note
+    // that the Ion 1.1 system symbol table differs between `ion-tests` and ion-rust (see
+    // `symtab.systemSymtab11Variant()` / `ION_ZIG_SYSTEM_SYMTAB11`).
+    try writeElement(allocator, out, .{ .symbol_encoding = .addresses }, elem);
 }
 
 pub fn writeSetSymbolsDirectiveText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), texts: []const []const u8) IonError!void {

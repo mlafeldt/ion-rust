@@ -177,6 +177,22 @@ test "zig ion serializeDocument binary_1_1 rejects SID-only symbols" {
     try std.testing.expectError(ion.IonError.InvalidIon, ion.serializeDocument(std.testing.allocator, .binary_1_1, elems));
 }
 
+test "zig ion serializeDocument binary_1_1 uses system symbol addresses in module prelude" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const sym_a = try ion.value.makeSymbol(&arena, "a");
+    const elems = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .symbol = sym_a } }};
+    const bytes = try ion.serializeDocument(std.testing.allocator, .binary_1_1, elems);
+    defer std.testing.allocator.free(bytes);
+
+    // Default test configuration uses the ion-tests Ion 1.1 system symtab, where:
+    // - module == 15
+    // - symbols == 7
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x0F }) != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x07 }) != null);
+}
+
 test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
     const elems = &[_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } }, // $ion
