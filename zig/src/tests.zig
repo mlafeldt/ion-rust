@@ -4552,6 +4552,58 @@ test "ion 1.1 binary directives may not be invoked inside length-prefixed arg gr
     try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes.items));
 }
 
+test "ion 1.1 binary respects ion-rust macro address layout when inferred" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Use a `$ion::(module ...)` directive with head SID 16 to force the decoder into the
+    // ion-rust system symbol table variant for subsequent opcode interpretation.
+    const anns = arena.allocator().alloc(ion.value.Symbol, 1) catch return ion.IonError.OutOfMemory;
+    anns[0] = ion.value.makeSymbolId(1, null); // $ion
+
+    const module_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    module_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(16, null) } };
+    module_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "_") } };
+    const module_directive: ion.value.Element = .{ .annotations = anns, .value = .{ .sexp = module_items } };
+
+    const prefix = try ion.writer11.writeBinary11(std.testing.allocator, &.{module_directive});
+    defer std.testing.allocator.free(prefix);
+
+    // Under ion-rust's layout:
+    // - addr 19 is always set_symbols (flatten is addr 5)
+    // - addr 21 is always set_macros (meta is addr 3)
+    // - addr 16 is always make_field (parse_ion is addr 18)
+    //
+    // These encodings are valid in the conformance-overloaded model, but should be rejected once
+    // we have inferred the ion-rust variant.
+
+    // 1) EF 19 with a non-text arg (would be treated as flatten under conformance).
+    var b1 = std.ArrayListUnmanaged(u8){};
+    defer b1.deinit(std.testing.allocator);
+    try b1.appendSlice(std.testing.allocator, prefix);
+    const list_items = arena.allocator().alloc(ion.value.Element, 1) catch return ion.IonError.OutOfMemory;
+    list_items[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
+    const list_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .list = list_items } };
+    try ion.writer11.writeSystemMacroInvocationQualifiedTaggedGroup(std.testing.allocator, &b1, 19, &.{list_elem}, .{});
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, b1.items));
+
+    // 2) EF 21 with a non-macro-def arg (would be treated as meta under conformance).
+    var b2 = std.ArrayListUnmanaged(u8){};
+    defer b2.deinit(std.testing.allocator);
+    try b2.appendSlice(std.testing.allocator, prefix);
+    const int_arg: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
+    try ion.writer11.writeSystemMacroInvocationQualifiedTaggedGroup(std.testing.allocator, &b2, 21, &.{int_arg}, .{});
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, b2.items));
+
+    // 3) EF 16 with a string arg (would be treated as parse_ion under conformance).
+    var b3 = std.ArrayListUnmanaged(u8){};
+    defer b3.deinit(std.testing.allocator);
+    try b3.appendSlice(std.testing.allocator, prefix);
+    const str_arg: ion.value.Element = .{ .annotations = &.{}, .value = .{ .string = "1" } };
+    try ion.writer11.writeSystemMacroInvocationQualifiedTaggedGroup(std.testing.allocator, &b3, 16, &.{str_arg}, .{});
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, b3.items));
+}
+
 test "ion 1.1 binary system sum supports big ints" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

@@ -2237,6 +2237,10 @@ const Decoder = struct {
     fn expandSystem19(self: *Decoder) IonError![]value.Element {
         // Conformance uses system macro address 19 for both `flatten` and `set_symbols`.
         //
+        // In ion-rust's system macro table, `flatten` has address 5 and address 19 is always
+        // `set_symbols`. If we have inferred the ion-rust system symbol table variant (e.g. via a
+        // `$ion::(module ...)` directive with head SID 16), treat address 19 as `set_symbols` only.
+        //
         // Encoding is a single presence byte for a vararg expression group (tagged).
         if (self.i >= self.input.len) return IonError.Incomplete;
         const presence = self.input[self.i];
@@ -2274,6 +2278,7 @@ const Decoder = struct {
                 else => all_text = false,
             }
         }
+        if (self.sys_symtab11_variant_override == .ion_rust and !all_text) return IonError.InvalidIon;
         if (all_text) {
             if (self.invoke_ctx != .top) return IonError.InvalidIon;
             try self.setIon11UserSymbolsFromTextArgs(args);
@@ -2346,6 +2351,10 @@ const Decoder = struct {
         // disambiguate by argument shape:
         // - if all provided args are unannotated `(macro ...)` sexps, treat as `set_macros`
         // - otherwise treat as `meta`
+        //
+        // In ion-rust's system macro table, `meta` has address 3 and address 21 is always
+        // `set_macros`. If we have inferred the ion-rust system symbol table variant, treat
+        // address 21 as `set_macros` only.
         if (self.invoke_ctx != .top) return IonError.InvalidIon;
         if (self.i >= self.input.len) return IonError.Incomplete;
         const presence = self.input[self.i];
@@ -2368,8 +2377,12 @@ const Decoder = struct {
             else => return IonError.InvalidIon,
         };
 
-        if (args.len != 0 and self.allArgsAreMacroDefs(args)) {
-            try self.applySetMacros(args);
+        if (args.len != 0) {
+            if (!self.allArgsAreMacroDefs(args)) {
+                if (self.sys_symtab11_variant_override == .ion_rust) return IonError.InvalidIon;
+            } else {
+                try self.applySetMacros(args);
+            }
         }
         return &.{};
     }
@@ -2512,7 +2525,13 @@ const Decoder = struct {
         defer self.invoke_ctx = prev;
         const first = try self.readValue();
         switch (first) {
-            .string, .clob, .blob => return self.expandParseIonFrom(first),
+            .string, .clob, .blob => {
+                // In ion-rust's system macro table, `parse_ion` has address 18 and address 16 is
+                // always `make_field`. If we have inferred the ion-rust system symbol table variant,
+                // reject the conformance-style overload.
+                if (self.sys_symtab11_variant_override == .ion_rust) return IonError.InvalidIon;
+                return self.expandParseIonFrom(first);
+            },
             else => return self.expandMakeFieldFrom(first),
         }
     }
