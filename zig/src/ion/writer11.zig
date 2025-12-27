@@ -38,6 +38,16 @@ pub const Options = struct {
     /// Optional macro table for encoding `ParamType.macro_shape` arguments.
     /// When absent, writing `macro_shape` arguments is unsupported.
     mactab: ?*const ion.macro.MacroTable = null,
+
+    /// Controls which container encodings the writer emits.
+    ///
+    /// - `.delimited` emits streaming-friendly delimited containers (`0xF1`/`0xF2`/`0xF3` ... `0xF0`).
+    /// - `.length_prefixed` emits short/long containers with explicit lengths (`B0..BF`/`FB`,
+    ///   `C0..CF`/`FC`, `D0..DF`/`FD`).
+    ///
+    /// Both forms are valid Ion 1.1 binary. Delimited is the default because it avoids buffering
+    /// the container body in memory before writing.
+    container_encoding: enum { delimited, length_prefixed } = .delimited,
 };
 
 pub fn writeBinary11(allocator: std.mem.Allocator, doc: []const value.Element) IonError![]u8 {
@@ -157,9 +167,18 @@ fn writeValue(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), op
         .symbol => |s| try writeSymbol(allocator, out, options, s),
         .blob => |b| try writeLob(allocator, out, 0xFE, b),
         .clob => |b| try writeLob(allocator, out, 0xFF, b),
-        .list => |items| try writeDelimitedList(allocator, out, options, items),
-        .sexp => |items| try writeDelimitedSexp(allocator, out, options, items),
-        .@"struct" => |st| try writeDelimitedStruct(allocator, out, options, st),
+        .list => |items| switch (options.container_encoding) {
+            .delimited => try writeDelimitedList(allocator, out, options, items),
+            .length_prefixed => try writeSequence(allocator, out, options, 0xB0, 0xFB, items),
+        },
+        .sexp => |items| switch (options.container_encoding) {
+            .delimited => try writeDelimitedSexp(allocator, out, options, items),
+            .length_prefixed => try writeSequence(allocator, out, options, 0xC0, 0xFC, items),
+        },
+        .@"struct" => |st| switch (options.container_encoding) {
+            .delimited => try writeDelimitedStruct(allocator, out, options, st),
+            .length_prefixed => try writeStruct(allocator, out, options, st),
+        },
         .timestamp => |ts| try writeTimestamp(allocator, out, ts),
     }
 }
@@ -872,6 +891,13 @@ fn writeSequence(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8),
 }
 
 fn writeStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), options: Options, st: value.Struct) IonError!void {
+    // Avoid emitting the reserved short-struct opcode `0xD1`. For an empty struct, we can emit a
+    // zero-length short struct (`0xD0`) with an empty body, which decodes to `{}`.
+    if (st.fields.len == 0) {
+        try appendByte(out, allocator, 0xD0);
+        return;
+    }
+
     // For simplicity, always use FlexSym field-name mode:
     // struct-body := FlexUInt(0) then repeated (FlexSym field-name, value-expr).
     var body = std.ArrayListUnmanaged(u8){};
@@ -883,7 +909,9 @@ fn writeStruct(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
         try writeElement(allocator, &body, options, f.value);
     }
 
-    if (body.items.len <= 15) {
+    // Short struct: D0..DF (len in opcode). D1 is reserved, so only use the short form when the
+    // computed body length does not map to 0xD1.
+    if (body.items.len <= 15 and body.items.len != 1) {
         try appendByte(out, allocator, 0xD0 + @as(u8, @intCast(body.items.len)));
         try appendSlice(out, allocator, body.items);
         return;

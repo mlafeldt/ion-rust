@@ -3627,6 +3627,39 @@ test "ion 1.1 binary writer roundtrip (typed nulls)" {
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
 }
 
+test "ion 1.1 writer11 can emit length-prefixed containers" {
+    var list_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } },
+    };
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .list = &.{} } },
+        .{ .annotations = &.{}, .value = .{ .sexp = &.{} } },
+        .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = &.{} } } },
+        .{ .annotations = &.{}, .value = .{ .list = list_items[0..] } },
+    };
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(std.testing.allocator, doc, .{ .container_encoding = .length_prefixed });
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expect(bytes.len >= 7);
+    try std.testing.expectEqual(@as(u8, 0xE0), bytes[0]);
+    try std.testing.expectEqual(@as(u8, 0x01), bytes[1]);
+    try std.testing.expectEqual(@as(u8, 0x01), bytes[2]);
+    try std.testing.expectEqual(@as(u8, 0xEA), bytes[3]);
+
+    // First three values are empty containers: B0 (list), C0 (sexp), D0 (struct).
+    try std.testing.expectEqual(@as(u8, 0xB0), bytes[4]);
+    try std.testing.expectEqual(@as(u8, 0xC0), bytes[5]);
+    try std.testing.expectEqual(@as(u8, 0xD0), bytes[6]);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
+}
+
 test "ion 1.1 binary writer roundtrip (timestamps long form)" {
     const frac: ion.value.Decimal = .{ .is_negative = false, .coefficient = .{ .small = 123 }, .exponent = -3 };
     const doc = &[_]ion.value.Element{
