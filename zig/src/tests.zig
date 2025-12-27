@@ -4170,6 +4170,70 @@ test "ion 1.1 binary resolve_user_symbols resolves module symbol addresses" {
     try std.testing.expectEqualStrings("val", st.fields[0].value.value.symbol.text.?);
 }
 
+test "ion 1.1 writer11 length-prefixed containers roundtrip" {
+    const allocator = std.testing.allocator;
+
+    var arena = try ion.value.Arena.init(allocator);
+    defer arena.deinit();
+
+    const top_ann_text = try arena.dupe("topann");
+    const numbers_name_text = try arena.dupe("numbers");
+    const sexp_name_text = try arena.dupe("sx");
+    const nested_name_text = try arena.dupe("nested");
+
+    const foo_text = try arena.dupe("foo");
+    const bar_text = try arena.dupe("bar");
+
+    const top_anns = try arena.allocator().alloc(ion.value.Symbol, 1);
+    top_anns[0] = ion.value.makeSymbolId(null, top_ann_text);
+
+    const list_items = try arena.allocator().alloc(ion.value.Element, 10);
+    for (list_items, 0..) |*it, i| {
+        it.* = .{ .annotations = &.{}, .value = .{ .int = .{ .small = @intCast(i) } } };
+    }
+
+    const sx_items = try arena.allocator().alloc(ion.value.Element, 2);
+    sx_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, foo_text) } };
+    sx_items[1] = .{ .annotations = &.{}, .value = .{ .string = bar_text } };
+
+    const nested_struct_fields = try arena.allocator().alloc(ion.value.StructField, 1);
+    nested_struct_fields[0] = .{
+        .name = ion.value.makeSymbolId(null, try arena.dupe("k")),
+        .value = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 123 } } },
+    };
+    const nested_list_items = try arena.allocator().alloc(ion.value.Element, 1);
+    nested_list_items[0] = .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = nested_struct_fields } } };
+
+    const fields = try arena.allocator().alloc(ion.value.StructField, 3);
+    fields[0] = .{
+        .name = ion.value.makeSymbolId(null, numbers_name_text),
+        .value = .{ .annotations = &.{}, .value = .{ .list = list_items } },
+    };
+    fields[1] = .{
+        .name = ion.value.makeSymbolId(null, sexp_name_text),
+        .value = .{ .annotations = &.{}, .value = .{ .sexp = sx_items } },
+    };
+    fields[2] = .{
+        .name = ion.value.makeSymbolId(null, nested_name_text),
+        .value = .{ .annotations = &.{}, .value = .{ .list = nested_list_items } },
+    };
+
+    const doc = [_]ion.value.Element{
+        .{
+            .annotations = top_anns,
+            .value = .{ .@"struct" = .{ .fields = fields } },
+        },
+    };
+
+    const bytes = try ion.serializeDocumentBinary11SelfContainedWithOptions(allocator, &doc, .{ .container_encoding = .length_prefixed });
+    defer allocator.free(bytes);
+
+    var parsed = try ion.parseDocumentBinary11WithOptions(allocator, bytes, .{ .resolve_user_symbols = true });
+    defer parsed.deinit();
+
+    try std.testing.expect(ion.eq.ionEqElements(&doc, parsed.elements));
+}
+
 test "ion 1.1 binary e-expression 12-bit address (minimal)" {
     // Minimal coverage for the EExpressionWith12BitAddress encoding (0x40..0x4F).
     // This uses a synthetic user macro at address 64 that expands to its single argument.
