@@ -60,6 +60,11 @@ pub const Options = struct {
     /// Both forms are valid Ion 1.1. The delimited form is useful for streaming emitters and for
     /// exercising decoder paths that only appear in delimited group encodings.
     arg_group_encoding: enum { length_prefixed, delimited } = .length_prefixed,
+
+    /// Maximum chunk size (in bytes) when `arg_group_encoding == .delimited` and emitting tagless
+    /// argument groups (chunked form). This is a soft limit: a single tagless value may exceed
+    /// it, in which case that value is emitted as its own chunk.
+    arg_group_chunk_max_bytes: usize = 4096,
 };
 
 pub fn writeBinary11(allocator: std.mem.Allocator, doc: []const value.Element) IonError![]u8 {
@@ -1927,11 +1932,40 @@ fn encodeLengthPrefixedArgBindings(
                             continue;
                         }
 
-                        var payload = std.ArrayListUnmanaged(u8){};
-                        defer payload.deinit(allocator);
-                        for (args) |e| try writeArgValue(allocator, &payload, options, p, e);
-                        try writeFlexUIntShift1(out, allocator, payload.items.len);
-                        try appendSlice(out, allocator, payload.items);
+                        // Chunked tagless encoding: write one or more `<flexuint chunk_len>
+                        // <chunk_bytes...>` sections followed by `<flexuint 0>`.
+                        const max_chunk: usize = @max(@as(usize, 1), options.arg_group_chunk_max_bytes);
+                        var chunk = std.ArrayListUnmanaged(u8){};
+                        defer chunk.deinit(allocator);
+                        var one = std.ArrayListUnmanaged(u8){};
+                        defer one.deinit(allocator);
+
+                        const flush = struct {
+                            fn run(a: std.mem.Allocator, o: *std.ArrayListUnmanaged(u8), ch: *std.ArrayListUnmanaged(u8)) IonError!void {
+                                if (ch.items.len == 0) return;
+                                try writeFlexUIntShift1(o, a, ch.items.len);
+                                try appendSlice(o, a, ch.items);
+                                ch.clearRetainingCapacity();
+                            }
+                        }.run;
+
+                        for (args) |e| {
+                            one.clearRetainingCapacity();
+                            try writeArgValue(allocator, &one, options, p, e);
+
+                            if (one.items.len > max_chunk) {
+                                try flush(allocator, out, &chunk);
+                                try writeFlexUIntShift1(out, allocator, one.items.len);
+                                try appendSlice(out, allocator, one.items);
+                                continue;
+                            }
+
+                            if (chunk.items.len != 0 and (chunk.items.len + one.items.len) > max_chunk) {
+                                try flush(allocator, out, &chunk);
+                            }
+                            try appendSlice(&chunk, allocator, one.items);
+                        }
+                        try flush(allocator, out, &chunk);
                         try writeFlexUIntShift1(out, allocator, 0);
                     },
                 }
