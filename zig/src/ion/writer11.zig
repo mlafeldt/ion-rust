@@ -1943,6 +1943,25 @@ fn writeMacroShapeArg(
             try writeElement(allocator, out, options, args[1]);
             return;
         }
+        if (std.mem.eql(u8, shape.name, "sum")) {
+            // Payload encoding matches the qualified system macro invocation encoding (minus the
+            // leading `0xEF <addr>`): two tagged values back-to-back.
+            if (args.len != 2) return IonError.InvalidIon;
+            try writeElement(allocator, out, options, args[0]);
+            try writeElement(allocator, out, options, args[1]);
+            return;
+        }
+        if (std.mem.eql(u8, shape.name, "parse_ion")) {
+            // Payload encoding matches the qualified system macro invocation encoding (minus the
+            // leading `0xEF <addr>`): a single tagged value argument (string/clob/blob).
+            if (args.len != 1) return IonError.InvalidIon;
+            switch (args[0].value) {
+                .string, .clob, .blob => {},
+                else => return IonError.InvalidIon,
+            }
+            try writeElement(allocator, out, options, args[0]);
+            return;
+        }
         if (std.mem.eql(u8, shape.name, "make_field")) {
             // Payload encoding matches the qualified system macro invocation encoding (minus the
             // leading `0xEF <addr>`): two tagged values back-to-back.

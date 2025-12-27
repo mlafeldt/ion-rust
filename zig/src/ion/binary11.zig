@@ -1201,6 +1201,16 @@ const Decoder = struct {
                 if (out.len != 1) return IonError.InvalidIon;
                 return out[0];
             }
+            if (std.mem.eql(u8, shape.name, "sum")) {
+                const out = try self.expandSum();
+                if (out.len != 1) return IonError.InvalidIon;
+                return out[0];
+            }
+            if (std.mem.eql(u8, shape.name, "parse_ion")) {
+                const out = try self.expandSystem16();
+                if (out.len != 1) return IonError.InvalidIon;
+                return out[0];
+            }
             return IonError.Unsupported;
         }
 

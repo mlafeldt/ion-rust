@@ -917,6 +917,98 @@ test "ion 1.1 writer11 can encode macro_shape args (system $ion::make_decimal sh
     try std.testing.expect(elems.len == 1 and ion.eq.ionEqElements(elems, &.{expected}));
 }
 
+test "ion 1.1 writer11 can encode macro_shape args (system $ion::sum shape)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Macro at address 1:
+    //   (macro m ($ion::sum::x) (% x))
+    const body_sym_percent = try ion.value.makeSymbol(&arena, "%");
+    const body_sym_x = try ion.value.makeSymbol(&arena, "x");
+    const body_sx_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    body_sx_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_percent } };
+    body_sx_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_x } };
+    const body_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = body_sx_items } };
+
+    const shape: ion.macro.MacroShape = .{ .module = "$ion", .name = "sum" };
+    const macro_params = [_]ion.macro.Param{.{ .ty = .macro_shape, .card = .one, .name = "x", .shape = shape }};
+    const macro_body = [_]ion.value.Element{body_elem};
+    const macro_defs = try std.testing.allocator.alloc(ion.macro.Macro, 2);
+    defer std.testing.allocator.free(macro_defs);
+    macro_defs[0] = .{ .name = null, .params = &.{}, .body = &.{} };
+    macro_defs[1] = .{ .name = "m", .params = @constCast(macro_params[0..]), .body = &macro_body };
+    const mactab: ion.macro.MacroTable = .{ .macros = macro_defs };
+
+    const shape_args_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    shape_args_items[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 10 } } };
+    shape_args_items[1] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 32 } } };
+    const shape_arg_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = shape_args_items } };
+    const args_by_param = [_][]const ion.value.Element{&.{shape_arg_elem}};
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeMacroInvocationLengthPrefixedWithParams(
+        std.testing.allocator,
+        &out,
+        1,
+        macro_params[0..],
+        args_by_param[0..],
+        .{ .mactab = &mactab },
+    );
+
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, out.items, &mactab);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expectEqual(@as(i128, 42), elems[0].value.int.small);
+}
+
+test "ion 1.1 writer11 can encode macro_shape args (system $ion::parse_ion shape)" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Macro at address 1:
+    //   (macro m ($ion::parse_ion::x) (% x))
+    const body_sym_percent = try ion.value.makeSymbol(&arena, "%");
+    const body_sym_x = try ion.value.makeSymbol(&arena, "x");
+    const body_sx_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    body_sx_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_percent } };
+    body_sx_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_x } };
+    const body_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = body_sx_items } };
+
+    const shape: ion.macro.MacroShape = .{ .module = "$ion", .name = "parse_ion" };
+    const macro_params = [_]ion.macro.Param{.{ .ty = .macro_shape, .card = .one, .name = "x", .shape = shape }};
+    const macro_body = [_]ion.value.Element{body_elem};
+    const macro_defs = try std.testing.allocator.alloc(ion.macro.Macro, 2);
+    defer std.testing.allocator.free(macro_defs);
+    macro_defs[0] = .{ .name = null, .params = &.{}, .body = &.{} };
+    macro_defs[1] = .{ .name = "m", .params = @constCast(macro_params[0..]), .body = &macro_body };
+    const mactab: ion.macro.MacroTable = .{ .macros = macro_defs };
+
+    // Encode x as a sexp containing the macro shape's single argument: the bytes to parse.
+    const shape_args_items = arena.allocator().alloc(ion.value.Element, 1) catch return ion.IonError.OutOfMemory;
+    shape_args_items[0] = .{ .annotations = &.{}, .value = .{ .string = "1" } };
+    const shape_arg_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = shape_args_items } };
+    const args_by_param = [_][]const ion.value.Element{&.{shape_arg_elem}};
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeMacroInvocationLengthPrefixedWithParams(
+        std.testing.allocator,
+        &out,
+        1,
+        macro_params[0..],
+        args_by_param[0..],
+        .{ .mactab = &mactab },
+    );
+
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, out.items, &mactab);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .int);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+}
+
 test "ion 1.1 writer11 can encode nested macro_shape args (user shape contains macro_shape)" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
