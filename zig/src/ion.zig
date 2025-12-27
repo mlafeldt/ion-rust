@@ -59,6 +59,11 @@ pub const ParseOptions = struct {
     /// Optional override for the Ion 1.1 system symbol table variant when parsing Ion 1.1 binary.
     /// When null, the parser may use environment configuration and/or in-stream inference.
     sys_symtab11_variant: ?symtab.SystemSymtab11Variant = null,
+    /// When true, rejects non-minimal FlexUInt/FlexInt encodings in Ion 1.1 binary.
+    ///
+    /// Note: `ion-tests` (especially conformance) intentionally uses non-canonical Flex encodings,
+    /// so the default is `false` to keep the suite green.
+    strict_flex: bool = false,
 };
 
 /// Parses a byte slice as Ion (IVM-detected), with optional Ion 1.1 parsing configuration.
@@ -71,11 +76,17 @@ pub fn parseDocumentWithOptions(allocator: Allocator, bytes: []const u8, options
         return .{ .arena = arena, .elements = elements };
     } else if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA) {
         if (options.sys_symtab11_variant) |variant| {
-            const res = try binary11.parseTopLevelWithMacroTableAndStateWithSystemSymtabVariant(&arena, bytes, options.mactab, variant);
+            const res = try binary11.parseTopLevelWithMacroTableAndStateWithSystemSymtabVariantAndOptions(
+                &arena,
+                bytes,
+                options.mactab,
+                variant,
+                .{ .strict_flex = options.strict_flex },
+            );
             return .{ .arena = arena, .elements = res.elements };
         }
-        const elements = try binary11.parseTopLevelWithMacroTable(&arena, bytes, options.mactab);
-        return .{ .arena = arena, .elements = elements };
+        const res = try binary11.parseTopLevelWithMacroTableAndStateWithOptions(&arena, bytes, options.mactab, .{ .strict_flex = options.strict_flex });
+        return .{ .arena = arena, .elements = res.elements };
     } else {
         const decoded = try decodeTextToUtf8(allocator, bytes);
         defer if (decoded) |b| allocator.free(b);
