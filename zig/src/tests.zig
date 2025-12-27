@@ -1047,6 +1047,33 @@ test "ion 1.1 binary can infer ion-rust system symbols from module head" {
     try std.testing.expectEqualStrings("module", res.elements[0].value.symbol.text orelse return error.TestExpectedEqual);
 }
 
+test "ion.parseDocumentBinary11WithOptions can force ion-tests symtab variant (disables inference)" {
+    // Like "ion 1.1 binary can infer ion-rust system symbols from module head", but force the
+    // ion-tests system symbol table. The same system symbol address (16) should then resolve as
+    // `export` instead of `module`.
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA, // IVM
+        0xE7, 0x01, 0x61, // annotations: FlexSym escape system symbol address 1 ($ion)
+        0xF2, // delimited sexp
+        0xEE, 0x10, // system symbol address 16 (ion-rust `module`, ion-tests `export`)
+        0xA1, '_', // inline symbol "_"
+        0xF2, // clause: delimited sexp
+        0xEE, 0x07, // system symbol address 7 ("symbols")
+        0xA1, '_', // inline symbol "_"
+        0x91, 'a', // string "a"
+        0xF0, // end clause sexp
+        0xF0, // end module sexp
+        0xEE, 0x10, // system symbol address 16 again
+    };
+
+    var doc = try ion.parseDocumentBinary11WithOptions(std.testing.allocator, bytes, .{ .sys_symtab11_variant = .ion_tests });
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), doc.elements.len);
+    try std.testing.expect(doc.elements[0].value == .symbol);
+    try std.testing.expectEqualStrings("export", doc.elements[0].value.symbol.text orelse return error.TestExpectedEqual);
+}
+
 test "ion 1.1 writer11 self-contained module prelude can use ion-rust system symbols" {
     const allocator = std.testing.allocator;
 

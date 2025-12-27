@@ -190,7 +190,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
 - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
-- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `175/175` tests).
+- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `176/176` tests).
 
 ### Skip list (currently empty)
 
@@ -225,6 +225,14 @@ The `ion-tests/` repo contains multiple suites. The Zig harness covers the two c
    - `good/non-equivs/` non-equivalence: 21 files
    - `good/` roundtrip: 206 files (text lines -> text lines)
 3) Current result in Zig: all pass (no skips in `zig/src/tests.zig`).
+
+### 3) Ion 1.1 binary options
+
+For Ion 1.1 binary streams that depend on a specific Ion 1.1 system symbol table variant (ion-tests vs ion-rust),
+you can avoid environment variables and in-stream inference by using:
+
+- `ion.parseDocumentBinary11WithOptions(..., .{ .sys_symtab11_variant = .ion_tests })`
+- `ion.parseDocumentBinary11WithOptions(..., .{ .sys_symtab11_variant = .ion_rust })`
 
 ### 3) Ion 1.1 conformance: `ion-tests/conformance/**/*.ion` (full pass)
 

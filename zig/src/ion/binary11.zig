@@ -73,6 +73,27 @@ pub fn parseTopLevelWithMacroTableAndState(
     return .{ .elements = elems, .state = d.module_state };
 }
 
+pub fn parseTopLevelWithMacroTableAndStateWithSystemSymtabVariant(
+    arena: *value.Arena,
+    bytes: []const u8,
+    mactab: ?*const MacroTable,
+    variant: symtab.SystemSymtab11Variant,
+) IonError!ParseResultWithState {
+    if (bytes.len < 4) return IonError.InvalidIon;
+    if (!(bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA)) return IonError.InvalidIon;
+    var d = Decoder{
+        .arena = arena,
+        .input = bytes[4..],
+        .i = 0,
+        .mactab = mactab,
+        .invoke_ctx = .top,
+        .sys_symtab11_variant_override = variant,
+        .sys_symtab11_variant_forced = true,
+    };
+    const elems = try d.parseTopLevel();
+    return .{ .elements = elems, .state = d.module_state };
+}
+
 const Decoder = struct {
     const InvokeCtx = enum { top, nested };
 
@@ -85,6 +106,7 @@ const Decoder = struct {
     invoke_ctx: InvokeCtx = .nested,
     module_state: ModuleState11 = .{},
     sys_symtab11_variant_override: ?symtab.SystemSymtab11Variant = null,
+    sys_symtab11_variant_forced: bool = false,
 
     fn pushInvokeCtx(self: *Decoder, next: InvokeCtx) InvokeCtx {
         const prev = self.invoke_ctx;
@@ -157,7 +179,7 @@ const Decoder = struct {
         // Infer system symbol table variant from the module directive head.
         // This helps decode Ion 1.1 binary streams produced by ion-rust, which assigns `module`
         // address 16 (ion-tests uses 15).
-        if (sx.len >= 1 and sx[0].value == .symbol) {
+        if (!self.sys_symtab11_variant_forced and sx.len >= 1 and sx[0].value == .symbol) {
             const head_sym = sx[0].value.symbol;
             if (head_sym.sid) |sid| {
                 if (sid == 16) self.sys_symtab11_variant_override = .ion_rust;
@@ -234,7 +256,7 @@ const Decoder = struct {
             if ((head_text != null and std.mem.eql(u8, head_text.?, "symbol_table")) or head_sid == 15) {
                 // Ion-rust includes `symbol_table` in its Ion 1.1 system symbol table (SID 15).
                 // Ion-tests does not, so only infer the ion-rust variant when the SID is present.
-                if (head_sid != null and head_sid.? == 15) self.sys_symtab11_variant_override = .ion_rust;
+                if (!self.sys_symtab11_variant_forced and head_sid != null and head_sid.? == 15) self.sys_symtab11_variant_override = .ion_rust;
                 var i: usize = 1;
                 var append = false;
                 if (csx.len >= 2 and csx[1].annotations.len == 0 and csx[1].value == .symbol) {

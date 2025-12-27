@@ -96,6 +96,29 @@ pub fn parseDocumentWithMacroTableIon11Modules(allocator: Allocator, bytes: []co
     }
 }
 
+pub const Binary11ParseOptions = struct {
+    mactab: ?*const macro.MacroTable = null,
+    sys_symtab11_variant: ?symtab.SystemSymtab11Variant = null,
+};
+
+/// Parses an Ion 1.1 binary stream that begins with the Ion 1.1 IVM (`E0 01 01 EA`).
+///
+/// This is useful when you want to:
+/// - provide an out-of-band macro table, and/or
+/// - force the Ion 1.1 system symbol table variant (`ion-tests` vs ion-rust) without relying on
+///   `ION_ZIG_SYSTEM_SYMTAB11` or in-stream inference.
+pub fn parseDocumentBinary11WithOptions(allocator: Allocator, bytes: []const u8, options: Binary11ParseOptions) IonError!Document {
+    var arena = try value.Arena.init(allocator);
+    errdefer arena.deinit();
+
+    if (options.sys_symtab11_variant) |variant| {
+        const res = try binary11.parseTopLevelWithMacroTableAndStateWithSystemSymtabVariant(&arena, bytes, options.mactab, variant);
+        return .{ .arena = arena, .elements = res.elements };
+    }
+    const elements = try binary11.parseTopLevelWithMacroTable(&arena, bytes, options.mactab);
+    return .{ .arena = arena, .elements = elements };
+}
+
 fn decodeTextToUtf8(allocator: Allocator, bytes: []const u8) IonError!?[]u8 {
     if (bytes.len == 0) return null;
 
