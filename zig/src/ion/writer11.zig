@@ -100,14 +100,18 @@ fn writeModuleDirectivePrelude(
     out: *std.ArrayListUnmanaged(u8),
     user_symbol_texts: []const []const u8,
 ) IonError!void {
-    // `$ion::(module _ (symbols _ <text-or-null>*))`
+    // `$ion::(module _ (<symbols-clause> _ <text-or-null>*))`
     //
     // This is not a full Ion 1.1 module writer. It's just enough structure to let our Ion 1.1
     // binary reader track the symbol address space deterministically for roundtrips.
     const ann = [_]value.Symbol{value.makeSymbolId(null, "$ion")};
 
     const sym_module: value.Symbol = value.makeSymbolId(null, "module");
-    const sym_symbols: value.Symbol = value.makeSymbolId(null, "symbols");
+    const symbols_clause_name: []const u8 = switch (symtab.systemSymtab11Variant()) {
+        .ion_tests => "symbols",
+        .ion_rust => "symbol_table",
+    };
+    const sym_symbols: value.Symbol = value.makeSymbolId(null, symbols_clause_name);
     const sym_underscore: value.Symbol = value.makeSymbolId(null, "_");
 
     const clause_items = allocator.alloc(value.Element, 2 + user_symbol_texts.len) catch return IonError.OutOfMemory;
