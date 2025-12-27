@@ -1758,6 +1758,25 @@ test "ion 1.1 binary11 rejects FlexUInt/FlexInt encodings over 10 bytes" {
     try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes));
 }
 
+test "ion 1.1 binary11 rejects unknown system macro address" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // IVM + qualified system macro invocation with an unknown address.
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xEF, 0xFE };
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes));
+}
+
+test "ion 1.1 binary11 rejects invalid FlexSym escape byte" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // IVM + E7 (annotations sequence with 1 FlexSym) + FlexInt(0) + invalid escape byte.
+    // FlexInt(0) minimal encoding is 0x01.
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xE7, 0x01, 0x00 };
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes));
+}
+
 test "ion 1.1 writer11 can emit canonical qualified meta/flatten/parse_ion helpers" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

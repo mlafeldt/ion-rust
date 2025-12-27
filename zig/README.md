@@ -191,7 +191,7 @@ Key properties:
   - `good/` roundtrip through a format matrix (binary/text variants)
 - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
 - As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `179/179` tests).
-- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `180/180` tests).
+- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `182/182` tests).
 
 ### Skip list (currently empty)
 

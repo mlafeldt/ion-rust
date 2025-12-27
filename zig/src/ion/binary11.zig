@@ -1283,7 +1283,7 @@ const Decoder = struct {
                 try self.appendIon11UserSymbolsFromModule(entry.symbols);
                 break :blk &.{};
             },
-            else => IonError.Unsupported,
+            else => IonError.InvalidIon,
         };
     }
 
@@ -1793,7 +1793,7 @@ const Decoder = struct {
             21 => self.expandSystem21(),
             22 => self.expandAddMacros(),
             23 => self.expandUse(),
-            else => IonError.Unsupported,
+            else => IonError.InvalidIon,
         };
     }
 
@@ -3790,7 +3790,7 @@ fn readFlexSym(
             break :blk .{ .symbol = value.makeSymbolId(addr, t) };
         },
         0xF0 => .end_delimited,
-        else => IonError.Unsupported,
+        else => IonError.InvalidIon,
     };
 }
 
