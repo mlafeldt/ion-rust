@@ -373,6 +373,160 @@ test "ion 1.1 writer11 encodes SID-only user symbols by address" {
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
 }
 
+test "ion 1.1 writer11 long string uses 0xF9" {
+    const allocator = std.testing.allocator;
+
+    const s = "aaaaaaaaaaaaaaaa"; // 16 bytes
+    const doc = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .string = s },
+    }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{});
+    defer allocator.free(bytes);
+
+    try std.testing.expect(bytes.len >= 5);
+    try std.testing.expect(bytes[4] == 0xF9);
+
+    var parsed = try ion.parseDocument(allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
+}
+
+test "ion 1.1 writer11 long symbol uses 0xFA" {
+    const allocator = std.testing.allocator;
+
+    const t = "abcdefghijklmnop"; // 16 bytes, not a system symbol
+    const doc = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .symbol = .{ .sid = null, .text = t } },
+    }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{});
+    defer allocator.free(bytes);
+
+    try std.testing.expect(bytes.len >= 5);
+    try std.testing.expect(bytes[4] == 0xFA);
+
+    var parsed = try ion.parseDocument(allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
+}
+
+test "ion 1.1 writer11 long int uses 0xF6" {
+    const allocator = std.testing.allocator;
+
+    const v: i128 = @as(i128, 1) << 72;
+    const doc = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .int = .{ .small = v } },
+    }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{});
+    defer allocator.free(bytes);
+
+    try std.testing.expect(bytes.len >= 5);
+    try std.testing.expect(bytes[4] == 0xF6);
+
+    var parsed = try ion.parseDocument(allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
+}
+
+test "ion 1.1 writer11 long decimal uses 0xF7" {
+    const allocator = std.testing.allocator;
+
+    const coeff: i128 = @as(i128, 1) << 120;
+    const doc = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .decimal = .{ .is_negative = false, .coefficient = .{ .small = coeff }, .exponent = 0 } },
+    }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{});
+    defer allocator.free(bytes);
+
+    try std.testing.expect(bytes.len >= 5);
+    try std.testing.expect(bytes[4] == 0xF7);
+
+    var parsed = try ion.parseDocument(allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
+}
+
+test "ion 1.1 writer11 blob/clob use 0xFE/0xFF" {
+    const allocator = std.testing.allocator;
+
+    const bytes_in = &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+
+    const doc_blob = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .blob = bytes_in },
+    }};
+    const blob_bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc_blob, .{});
+    defer allocator.free(blob_bytes);
+    try std.testing.expect(blob_bytes.len >= 5);
+    try std.testing.expect(blob_bytes[4] == 0xFE);
+    var parsed_blob = try ion.parseDocument(allocator, blob_bytes);
+    defer parsed_blob.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_blob, parsed_blob.elements));
+
+    const doc_clob = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .clob = bytes_in },
+    }};
+    const clob_bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc_clob, .{});
+    defer allocator.free(clob_bytes);
+    try std.testing.expect(clob_bytes.len >= 5);
+    try std.testing.expect(clob_bytes[4] == 0xFF);
+    var parsed_clob = try ion.parseDocument(allocator, clob_bytes);
+    defer parsed_clob.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_clob, parsed_clob.elements));
+}
+
+test "ion 1.1 writer11 timestamp short vs long opcode selection" {
+    const allocator = std.testing.allocator;
+
+    const ts_short: ion.value.Timestamp = .{
+        .year = 2020,
+        .month = null,
+        .day = null,
+        .hour = null,
+        .minute = null,
+        .second = null,
+        .fractional = null,
+        .offset_minutes = null,
+        .precision = .year,
+    };
+    const doc_short = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .timestamp = ts_short } }};
+    const short_bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc_short, .{});
+    defer allocator.free(short_bytes);
+    try std.testing.expect(short_bytes.len >= 5);
+    try std.testing.expect(short_bytes[4] == 0x80);
+    var parsed_short = try ion.parseDocument(allocator, short_bytes);
+    defer parsed_short.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_short, parsed_short.elements));
+
+    const ts_long: ion.value.Timestamp = .{
+        .year = 2100, // outside the short timestamp range
+        .month = null,
+        .day = null,
+        .hour = null,
+        .minute = null,
+        .second = null,
+        .fractional = null,
+        .offset_minutes = null,
+        .precision = .year,
+    };
+    const doc_long = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .timestamp = ts_long } }};
+    const long_bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc_long, .{});
+    defer allocator.free(long_bytes);
+    try std.testing.expect(long_bytes.len >= 5);
+    try std.testing.expect(long_bytes[4] == 0xF8);
+    var parsed_long = try ion.parseDocument(allocator, long_bytes);
+    defer parsed_long.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_long, parsed_long.elements));
+}
+
 test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
     const elems = &[_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } }, // $ion
