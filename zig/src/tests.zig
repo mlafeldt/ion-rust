@@ -241,6 +241,34 @@ test "ion 1.1 binary can apply $ion::(module ...) encoded via symbol addresses" 
     try std.testing.expectEqualStrings("a", res.elements[0].value.symbol.text orelse return error.TestExpectedEqual);
 }
 
+test "ion 1.1 binary can infer ion-rust system symbols from module head" {
+    // Like the previous test, but the module head uses address 16 (ion-rust's `module`).
+    // After the directive is applied, subsequent system symbol addresses should resolve using the
+    // ion-rust table, even though tests default to the ion-tests table.
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA, // IVM
+        0xE7, 0x01, 0x61, // annotations: FlexSym escape system symbol address 1 ($ion)
+        0xF2, // delimited sexp
+        0xEE, 0x10, // system symbol address 16 (ion-rust `module`, ion-tests `export`)
+        0xA1, '_', // inline symbol "_"
+        0xF2, // clause: delimited sexp
+        0xEE, 0x07, // system symbol address 7 ("symbols")
+        0xA1, '_', // inline symbol "_"
+        0x91, 'a', // string "a"
+        0xF0, // end clause sexp
+        0xF0, // end module sexp
+        0xEE, 0x10, // system symbol address 16 again
+    };
+
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = try ion.binary11.parseTopLevelWithState(&arena, bytes);
+
+    try std.testing.expectEqual(@as(usize, 1), res.elements.len);
+    try std.testing.expect(res.elements[0].value == .symbol);
+    try std.testing.expectEqualStrings("module", res.elements[0].value.symbol.text orelse return error.TestExpectedEqual);
+}
+
 test "zig ion serializeDocument binary_1_1 roundtrips values" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

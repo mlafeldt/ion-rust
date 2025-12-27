@@ -134,10 +134,12 @@ const Decoder = struct {
         if (sx.len < 2) return false;
         if (sx[0].annotations.len != 0 or sx[0].value != .symbol) return false;
         const head_sym = sx[0].value.symbol;
+        if (head_sym.sid) |sid| {
+            // ion-tests uses `module` at address 15, ion-rust uses address 16.
+            if (sid == 15 or sid == 16) return true;
+        }
         if (head_sym.text) |t| return std.mem.eql(u8, t, "module");
-        const sid = head_sym.sid orelse return false;
-        // ion-tests uses `module` at address 15, ion-rust uses address 16.
-        return sid == 15 or sid == 16;
+        return false;
     }
 
     fn applyIonSystemModuleDirective(self: *Decoder, elem: value.Element) IonError!void {
