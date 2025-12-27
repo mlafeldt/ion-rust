@@ -208,6 +208,39 @@ test "ion 1.1 binary FlexSym escape returns system symbol as text" {
     try std.testing.expect(st.fields[0].name.sid == 1);
 }
 
+test "ion 1.1 binary can apply $ion::(module ...) encoded via symbol addresses" {
+    // This is a minimal Ion 1.1 binary stream:
+    //   $ion::(module _ (symbols _ "a" "b"))
+    //   $1
+    //
+    // The module directive is encoded using symbol addresses (so `module` and `symbols` have SIDs
+    // but no text). The decoder should still recognize and apply it at top-level.
+    const bytes = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA, // IVM
+        0xE7, 0x01, 0x61, // annotations: FlexSym escape system symbol address 1 ($ion)
+        0xF2, // delimited sexp
+        0xEE, 0x0F, // system symbol address 15 ("module" in ion-tests SystemSymtab11)
+        0xA1, '_', // inline symbol "_"
+        0xF2, // clause: delimited sexp
+        0xEE, 0x07, // system symbol address 7 ("symbols")
+        0xA1, '_', // inline symbol "_"
+        0x91, 'a', // string "a"
+        0x91, 'b', // string "b"
+        0xF0, // end clause sexp
+        0xF0, // end module sexp
+        0xE1, 0x01, // symbol address 1 ($1)
+    };
+
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+    const res = try ion.binary11.parseTopLevelWithState(&arena, bytes);
+    try ion.value.resolveDefaultModuleSymbols11(&arena, res.elements, res.state.user_symbols, res.state.system_loaded);
+
+    try std.testing.expectEqual(@as(usize, 1), res.elements.len);
+    try std.testing.expect(res.elements[0].value == .symbol);
+    try std.testing.expectEqualStrings("a", res.elements[0].value.symbol.text orelse return error.TestExpectedEqual);
+}
+
 test "zig ion serializeDocument binary_1_1 roundtrips values" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
