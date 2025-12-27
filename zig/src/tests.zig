@@ -317,6 +317,62 @@ test "ion 1.1 writer11 rejects unencodable symbol IDs" {
     try std.testing.expectError(ion.IonError.InvalidIon, ion.serializeDocument(allocator, .binary_1_1_raw, doc_too_big));
 }
 
+test "ion 1.1 writer11 encodes system symbol text via 0xEE in addresses mode" {
+    const allocator = std.testing.allocator;
+
+    const doc = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .symbol = .{ .sid = null, .text = "$ion" } },
+    }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{ .symbol_encoding = .addresses });
+    defer allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x01 }) != null);
+
+    var parsed = try ion.parseDocument(allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
+}
+
+test "ion 1.1 writer11 inline_text_only does not emit 0xEE for system symbols" {
+    const allocator = std.testing.allocator;
+
+    const doc = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .symbol = .{ .sid = null, .text = "$ion" } },
+    }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{ .symbol_encoding = .inline_text_only });
+    defer allocator.free(bytes);
+
+    // "$ion" should be emitted as a short inline symbol (A0 + len).
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{0xA4}) != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x01 }) == null);
+
+    var parsed = try ion.parseDocument(allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
+}
+
+test "ion 1.1 writer11 encodes SID-only user symbols by address" {
+    const allocator = std.testing.allocator;
+
+    const doc = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .symbol = .{ .sid = 300, .text = null } },
+    }};
+
+    const bytes = try ion.serializeDocument(allocator, .binary_1_1_raw, doc);
+    defer allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{0xE2}) != null);
+
+    var parsed = try ion.parseDocument(allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
+}
+
 test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
     const elems = &[_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } }, // $ion
