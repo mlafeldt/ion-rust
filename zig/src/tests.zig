@@ -527,6 +527,54 @@ test "ion 1.1 writer11 timestamp short vs long opcode selection" {
     try std.testing.expect(ion.eq.ionEqElements(doc_long, parsed_long.elements));
 }
 
+test "ion 1.1 writer11 delimited struct uses FlexSym escape terminator" {
+    const allocator = std.testing.allocator;
+
+    var fields = [_]ion.value.StructField{
+        .{ .name = .{ .sid = null, .text = "a" }, .value = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } } },
+    };
+    const doc = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .@"struct" = .{ .fields = fields[0..] } },
+    }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{ .container_encoding = .delimited });
+    defer allocator.free(bytes);
+
+    // Delimited struct ends with a FlexSym escape for 0xF0:
+    //   FlexInt(0) then 0xF0
+    // and FlexInt(0) in shift-1 form is 0x01.
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0x01, 0xF0 }) != null);
+
+    var parsed = try ion.parseDocument(allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
+}
+
+test "ion 1.1 writer11 encodes system symbol field name as FlexSym escape" {
+    const allocator = std.testing.allocator;
+
+    // "$ion" is a system symbol. In addresses mode, the writer should encode it in FlexSym form
+    // as an escape (FlexInt(0) + 0x60+addr).
+    var fields = [_]ion.value.StructField{
+        .{ .name = .{ .sid = null, .text = "$ion" }, .value = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } } },
+    };
+    const doc = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .@"struct" = .{ .fields = fields[0..] } },
+    }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{ .container_encoding = .delimited, .symbol_encoding = .addresses });
+    defer allocator.free(bytes);
+
+    // FlexSym escape: FlexInt(0) then 0x60 + sys_sid (1).
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0x01, 0x61 }) != null);
+
+    var parsed = try ion.parseDocument(allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
+}
+
 test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
     const elems = &[_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } }, // $ion
