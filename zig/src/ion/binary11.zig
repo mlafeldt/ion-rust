@@ -777,7 +777,7 @@ const Decoder = struct {
                 if (n_elem.value != .int) return IonError.InvalidIon;
                 const n_i128 = try self.intToI128(n_elem.value.int);
                 if (n_i128 < 0) return IonError.InvalidIon;
-                const n = std.math.cast(usize, n_i128) orelse return IonError.Unsupported;
+                const n = std.math.cast(usize, n_i128) orelse return IonError.InvalidIon;
                 const body = bindings[1].values;
                 var out = std.ArrayListUnmanaged(value.Element){};
                 errdefer out.deinit(self.arena.allocator());
@@ -1991,7 +1991,7 @@ const Decoder = struct {
 
         const count_i128 = try self.intToI128(count_vals[0].value.int);
         if (count_i128 < 0) return IonError.InvalidIon;
-        const count = std.math.cast(usize, count_i128) orelse return IonError.Unsupported;
+        const count = std.math.cast(usize, count_i128) orelse return IonError.InvalidIon;
 
         if (self.i >= self.input.len) return IonError.Incomplete;
         const vals: []const value.Element = blk: {
@@ -3836,7 +3836,7 @@ fn parseStructBody(
                     mode = .flex_sym;
                     continue;
                 }
-                if (id > std.math.maxInt(u32)) return IonError.Unsupported;
+                if (id > std.math.maxInt(u32)) return IonError.InvalidIon;
                 name_sym = value.makeSymbolId(@intCast(id), null);
             },
             .flex_sym => {
