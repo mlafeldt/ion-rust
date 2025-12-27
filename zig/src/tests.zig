@@ -255,6 +255,36 @@ test "ion 1.1 writer11 uses SID-only annotation sequence encoding when possible"
     try std.testing.expect(std.mem.indexOf(u8, bytes, &.{0xE5}) != null);
 }
 
+test "ion 1.1 writer11 uses E4 for single SID-only annotation" {
+    const allocator = std.testing.allocator;
+
+    var anns = [_]ion.value.Symbol{
+        .{ .sid = 1, .text = null }, // $ion
+    };
+    const doc = &[_]ion.value.Element{.{ .annotations = anns[0..], .value = .{ .int = .{ .small = 1 } } }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{ .symbol_encoding = .addresses });
+    defer allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{0xE4}) != null);
+}
+
+test "ion 1.1 writer11 uses E6 for 3+ SID-only annotations" {
+    const allocator = std.testing.allocator;
+
+    var anns = [_]ion.value.Symbol{
+        .{ .sid = 1, .text = null }, // $ion
+        .{ .sid = 2, .text = null }, // $ion_1_0
+        .{ .sid = 3, .text = null }, // $ion_1_1
+    };
+    const doc = &[_]ion.value.Element{.{ .annotations = anns[0..], .value = .{ .int = .{ .small = 1 } } }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{ .symbol_encoding = .addresses });
+    defer allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{0xE6}) != null);
+}
+
 test "ion 1.1 writer11 can write SID-only system annotations in inline-text mode" {
     const allocator = std.testing.allocator;
 
