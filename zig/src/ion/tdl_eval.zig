@@ -189,11 +189,18 @@ fn bindParams(
                         }
                     }
 
-                    // Minimal system macro-shape support needed by conformance demos.
-                    if ((shape.module == null or std.mem.eql(u8, shape.module.?, "$ion")) and std.mem.eql(u8, shape.name, "make_decimal")) {
+                    // Minimal system macro-shape support needed by conformance demos/tests.
+                    //
+                    // If a macro shape is qualified as `$ion::...` (or unqualified), try to
+                    // interpret it as a system macro invocation. This reuses the existing system
+                    // macro evaluator (rather than re-implementing shape-specific decoding).
+                    if (shape.module == null or std.mem.eql(u8, shape.module.?, "$ion")) {
                         var empty_env: Env = .{ .parent = null };
                         defer empty_env.deinit(arena.allocator());
-                        const produced = try evalMacroInvocation(arena, tab, &empty_env, "make_decimal", items);
+                        const produced = evalMacroInvocation(arena, tab, &empty_env, shape.name, items) catch |e| switch (e) {
+                            IonError.Unsupported => return IonError.Unsupported,
+                            else => return e,
+                        };
                         decoded.appendSlice(arena.allocator(), produced) catch return IonError.OutOfMemory;
                         continue;
                     }
