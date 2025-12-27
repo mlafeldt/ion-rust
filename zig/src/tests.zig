@@ -262,6 +262,98 @@ test "ion.serializeDocumentBinary11WithOptions controls container encoding" {
     try std.testing.expect(prefixed[4] != 0xF1);
 }
 
+test "ion 1.1 binary nested containers and annotations roundtrip across container encodings" {
+    const allocator = std.testing.allocator;
+
+    var anns_int = [_]ion.value.Symbol{
+        ion.value.makeSymbolId(null, "ann_int"),
+        ion.value.makeSymbolId(null, "ann_int2"),
+        ion.value.makeSymbolId(null, "ann_int3"),
+    };
+    var anns_struct = [_]ion.value.Symbol{
+        ion.value.makeSymbolId(null, "ann_struct"),
+        ion.value.makeSymbolId(null, "ann_struct2"),
+    };
+    var anns_inner_list = [_]ion.value.Symbol{
+        ion.value.makeSymbolId(null, "ann_list"),
+    };
+
+    var inner_list_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } },
+    };
+    const inner_list_elem: ion.value.Element = .{
+        .annotations = anns_inner_list[0..],
+        .value = .{ .list = inner_list_items[0..] },
+    };
+
+    const long_string = "0123456789abcdefghij"; // 20 bytes => forces long string (0xF9) in Ion 1.1 binary.
+    var st_fields = [_]ion.value.StructField{
+        .{
+            .name = ion.value.makeSymbolId(null, "a"),
+            .value = .{ .annotations = &.{}, .value = .{ .string = long_string } },
+        },
+        .{
+            .name = ion.value.makeSymbolId(null, "b"),
+            .value = inner_list_elem,
+        },
+    };
+    const struct_elem: ion.value.Element = .{
+        .annotations = anns_struct[0..],
+        .value = .{ .@"struct" = .{ .fields = st_fields[0..] } },
+    };
+
+    var sx_items = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "foo") } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 9 } } },
+    };
+    const sexp_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = sx_items[0..] } };
+
+    const annotated_int: ion.value.Element = .{
+        .annotations = anns_int[0..],
+        .value = .{ .int = .{ .small = 1 } },
+    };
+
+    var outer_items = [_]ion.value.Element{
+        annotated_int,
+        struct_elem,
+        sexp_elem,
+    };
+
+    const doc = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .list = outer_items[0..] },
+    }};
+
+    const opts = [_]ion.writer11.Options{
+        .{ .container_encoding = .delimited },
+        .{ .container_encoding = .length_prefixed },
+    };
+
+    for (opts) |o| {
+        const bytes = try ion.serializeDocumentBinary11WithOptions(allocator, doc, o);
+        defer allocator.free(bytes);
+
+        try std.testing.expectEqualSlices(u8, &.{ 0xE0, 0x01, 0x01, 0xEA }, bytes[0..4]);
+        try std.testing.expect(bytes.len >= 5);
+        switch (o.container_encoding) {
+            .delimited => {
+                try std.testing.expectEqual(@as(u8, 0xF1), bytes[4]);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, &.{0xF3}) != null);
+            },
+            .length_prefixed => {
+                // Outer list body is guaranteed to exceed 15 bytes, so this must use the long list opcode.
+                try std.testing.expectEqual(@as(u8, 0xFB), bytes[4]);
+            },
+        }
+        try std.testing.expect(std.mem.indexOf(u8, bytes, &.{0xE9}) != null);
+
+        var parsed = try ion.parseDocument(allocator, bytes);
+        defer parsed.deinit();
+        try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
+    }
+}
+
 test "ion 1.1 writer11 symbol address opcodes at E2/E3 boundary roundtrip" {
     const allocator = std.testing.allocator;
 
