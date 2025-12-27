@@ -3,7 +3,10 @@
 //! Public entrypoints:
 //! - `parseDocument(allocator, bytes)` parses either Ion text or Ion binary (IVM-detected).
 //! - `parseDocumentWithOptions(allocator, bytes, options)` parses Ion with optional Ion 1.1 configuration.
+//! - `parseDocumentBinary11WithOptions(allocator, bytes, options)` parses Ion 1.1 binary with explicit options.
 //! - `serializeDocument(allocator, format, elements)` writes Ion text or Ion binary.
+//! - `serializeDocumentBinary11WithOptions(allocator, elements, options)` writes Ion 1.1 binary with writer options.
+//! - `serializeDocumentBinary11SelfContainedWithOptions(allocator, elements, options)` writes self-contained Ion 1.1 binary with writer options.
 
 const std = @import("std");
 
