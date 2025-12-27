@@ -3,8 +3,8 @@
 //! This started as a value-only writer, but has grown a small set of low-level helpers for
 //! emitting Ion 1.1 binary e-expressions (including conformance-driven directive/macro patterns).
 //! It is still not a full Ion 1.1 module/macro system implementation.
-//! For self-contained output, it can emit a minimal module prelude (`set_symbols`) so user symbols
-//! can be encoded by address without relying on external module state.
+//! For self-contained output, it can emit a minimal module prelude (`$ion::(module ...)`) so user
+//! symbols can be encoded by address without relying on external module state.
 //!
 //! Symbol values can be written as either inline text (A0..AF/FA) or as symbol addresses (E1..E3),
 //! and system symbols can be referenced using `0xEE` (SystemSymbolAddress).
@@ -26,7 +26,7 @@ pub const Options = struct {
     ///
     /// Note: emitting symbol addresses correctly requires module/symbol table context. This writer
     /// can either be given that state via `user_symbol_ids` (for ad-hoc tooling), or it can emit a
-    /// minimal `set_symbols` prelude via `writeBinary11SelfContained` to make the output
+    /// minimal module prelude via `writeBinary11SelfContained` to make the output
     /// deterministic and self-contained.
     symbol_encoding: enum { inline_text_only, addresses } = .addresses,
 
@@ -66,7 +66,7 @@ pub fn writeBinary11WithOptions(allocator: std.mem.Allocator, doc: []const value
 }
 
 pub fn writeBinary11SelfContained(allocator: std.mem.Allocator, doc: []const value.Element) IonError![]u8 {
-    // Emit a minimal module prelude (set_symbols) so non-system symbols can be encoded by address
+    // Emit a minimal `$ion::(module ...)` prelude so non-system symbols can be encoded by address
     // without external module context.
     //
     // This writer keeps a strict contract: it requires `text` for any non-system symbol. SID-only
@@ -86,13 +86,49 @@ pub fn writeBinary11SelfContained(allocator: std.mem.Allocator, doc: []const val
     try appendSlice(&out, allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
 
     if (user_texts.items.len != 0) {
-        try writeSetSymbolsDirective(allocator, &out, user_texts.items);
+        try writeModuleDirectivePrelude(allocator, &out, user_texts.items);
     }
 
     const opts: Options = .{ .symbol_encoding = .addresses, .user_symbol_ids = &map };
     for (doc) |e| try writeElement(allocator, &out, opts, e);
 
     return out.toOwnedSlice(allocator) catch return IonError.OutOfMemory;
+}
+
+fn writeModuleDirectivePrelude(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    user_symbol_texts: []const []const u8,
+) IonError!void {
+    // `$ion::(module _ (symbols _ <text-or-null>*))`
+    //
+    // This is not a full Ion 1.1 module writer. It's just enough structure to let our Ion 1.1
+    // binary reader track the symbol address space deterministically for roundtrips.
+    const ann = [_]value.Symbol{value.makeSymbolId(null, "$ion")};
+
+    const sym_module: value.Symbol = value.makeSymbolId(null, "module");
+    const sym_symbols: value.Symbol = value.makeSymbolId(null, "symbols");
+    const sym_underscore: value.Symbol = value.makeSymbolId(null, "_");
+
+    const clause_items = allocator.alloc(value.Element, 2 + user_symbol_texts.len) catch return IonError.OutOfMemory;
+    defer allocator.free(clause_items);
+    clause_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = sym_symbols } };
+    clause_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = sym_underscore } };
+    for (user_symbol_texts, 0..) |t, i| {
+        clause_items[2 + i] = .{ .annotations = &.{}, .value = .{ .string = t } };
+    }
+    const clause_elem: value.Element = .{ .annotations = &.{}, .value = .{ .sexp = clause_items } };
+
+    const module_items = allocator.alloc(value.Element, 3) catch return IonError.OutOfMemory;
+    defer allocator.free(module_items);
+    module_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = sym_module } };
+    module_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = sym_underscore } };
+    module_items[2] = clause_elem;
+
+    const elem: value.Element = .{ .annotations = @constCast(ann[0..]), .value = .{ .sexp = module_items } };
+
+    // Inline text is deterministic and avoids depending on any system symbol address mapping.
+    try writeElement(allocator, out, .{ .symbol_encoding = .inline_text_only }, elem);
 }
 
 pub fn writeSetSymbolsDirectiveText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), texts: []const []const u8) IonError!void {

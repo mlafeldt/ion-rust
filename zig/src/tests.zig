@@ -2059,8 +2059,8 @@ fn roundtripEq(allocator: std.mem.Allocator, data: []const u8, format1: ion.Form
 
 fn parseDocumentForRoundtrip(allocator: std.mem.Allocator, bytes: []const u8) !ion.Document {
     // `serializeDocument(.binary_1_1, ...)` currently emits a self-contained Ion 1.1 binary stream
-    // with a minimal `set_symbols` prelude. `binary11` tracks that module state separately and
-    // requires an explicit resolver pass to materialize symbol texts.
+    // with a minimal `$ion::(module ...)` prelude. `binary11` tracks that module state separately
+    // and requires an explicit resolver pass to materialize symbol texts.
     //
     // We keep the core parser behavior (conformance-driven) unchanged, and only apply the resolver
     // here so roundtrip tests validate byte<->DOM<->text parity.

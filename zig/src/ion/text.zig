@@ -2841,6 +2841,7 @@ fn applyIonSystemModuleDirective(self: *Parser, elem: value.Element) IonError!vo
 
     var defs: []const value.Element = &.{};
     var base_addr: usize = 0;
+    var symbols: []const value.Element = &.{};
 
     // Syntax variants used by upstream tooling:
     // - `$ion::(module _ (macros <macro_def>...) (symbols _))` (conformance DSL source form)
@@ -2872,11 +2873,50 @@ fn applyIonSystemModuleDirective(self: *Parser, elem: value.Element) IonError!vo
             }
             continue;
         }
+
+        if (std.mem.eql(u8, head, "symbols") or std.mem.eql(u8, head, "symbol_table")) {
+            // Expected forms:
+            // - (symbols _ <text-or-null>...)
+            // - (symbol_table _ <text-or-null>...)
+            //
+            // Note: Ion 1.1 module symbol addresses are a distinct address space. In the
+            // conformance "default module" model, user symbols occupy SIDs 1..N and system symbols
+            // follow. We track this list so `$<sid>` and address-based symbol decoding can be
+            // resolved deterministically in tests/tools.
+            if (csx.len >= 3) {
+                symbols = csx[2..];
+            } else {
+                symbols = &.{};
+            }
+            continue;
+        }
     }
 
     // `module` with no macro table clause is allowed; treat it as resetting to an empty user macro table.
     const parsed = try ion.macro.parseMacroTableWithBase(self.arena.allocator(), defs, base_addr);
     self.mactab_local = parsed;
+
+    if (symbols.len != 0) {
+        var out = std.ArrayListUnmanaged(?[]const u8){};
+        errdefer out.deinit(self.arena.allocator());
+        for (symbols) |s| {
+            if (s.annotations.len != 0) return IonError.InvalidIon;
+            switch (s.value) {
+                .string => |t| out.append(self.arena.allocator(), try self.arena.dupe(t)) catch return IonError.OutOfMemory,
+                .symbol => |sym| {
+                    const t = sym.text orelse return IonError.InvalidIon;
+                    out.append(self.arena.allocator(), try self.arena.dupe(t)) catch return IonError.OutOfMemory;
+                },
+                .null => |ty| {
+                    if (ty != .symbol) return IonError.InvalidIon;
+                    out.append(self.arena.allocator(), null) catch return IonError.OutOfMemory;
+                },
+                else => return IonError.InvalidIon,
+            }
+        }
+        self.ion11_user_symbols = out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+        self.ion11_system_loaded = true;
+    }
 }
 
 fn stripIonLiteralAnnotation(arena: *value.Arena, elem: value.Element) IonError!value.Element {

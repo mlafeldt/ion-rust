@@ -130,6 +130,7 @@ const Decoder = struct {
 
         var defs: []const value.Element = &.{};
         var base_addr: usize = 0;
+        var symbols: []const value.Element = &.{};
 
         for (sx[2..]) |clause_elem| {
             if (clause_elem.annotations.len != 0 or clause_elem.value != .sexp) continue;
@@ -157,11 +158,45 @@ const Decoder = struct {
                 }
                 continue;
             }
+
+            if (std.mem.eql(u8, head, "symbols") or std.mem.eql(u8, head, "symbol_table")) {
+                // Expected forms:
+                // - (symbols _ <text-or-null>...)
+                // - (symbol_table _ <text-or-null>...)
+                if (csx.len >= 3) {
+                    symbols = csx[2..];
+                } else {
+                    symbols = &.{};
+                }
+                continue;
+            }
         }
 
         const parsed = try ion.macro.parseMacroTableWithBase(self.arena.allocator(), defs, base_addr);
         self.mactab_local = parsed;
         self.mactab_local_set = true;
+
+        if (symbols.len != 0) {
+            var out = std.ArrayListUnmanaged(?[]const u8){};
+            errdefer out.deinit(self.arena.allocator());
+            for (symbols) |s| {
+                if (s.annotations.len != 0) return IonError.InvalidIon;
+                switch (s.value) {
+                    .string => |t| out.append(self.arena.allocator(), try self.arena.dupe(t)) catch return IonError.OutOfMemory,
+                    .symbol => |sym| {
+                        const t = sym.text orelse return IonError.InvalidIon;
+                        out.append(self.arena.allocator(), try self.arena.dupe(t)) catch return IonError.OutOfMemory;
+                    },
+                    .null => |ty| {
+                        if (ty != .symbol) return IonError.InvalidIon;
+                        out.append(self.arena.allocator(), null) catch return IonError.OutOfMemory;
+                    },
+                    else => return IonError.InvalidIon,
+                }
+            }
+            self.module_state.user_symbols = out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+            self.module_state.system_loaded = true;
+        }
     }
 
     fn readValueExpr(self: *Decoder) IonError![]value.Element {
