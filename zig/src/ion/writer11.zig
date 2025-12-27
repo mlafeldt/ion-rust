@@ -2005,7 +2005,8 @@ fn writeMacroShapeArg(
             try writeElement(allocator, out, options, val);
             return;
         }
-        if (std.mem.eql(u8, shape.name, "make_string") or
+        if (std.mem.eql(u8, shape.name, "values") or
+            std.mem.eql(u8, shape.name, "make_string") or
             std.mem.eql(u8, shape.name, "make_symbol") or
             std.mem.eql(u8, shape.name, "make_blob"))
         {
