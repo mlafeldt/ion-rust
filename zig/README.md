@@ -178,7 +178,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
 - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
-- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `116/116` tests).
+- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `117/117` tests).
 
 ### Skip list (currently empty)
 
@@ -219,7 +219,7 @@ The `ion-tests/` repo contains multiple suites. The Zig harness covers the two c
 1) Files in suite: 55 (`.ion`)
 2) Current result in Zig:
    - Run: 55/55 conformance files (via a single walker test in `zig/src/tests.zig`)
-   - Branch-level status (2025-12-25):
+   - Branch-level status (2025-12-27):
      - Total branches: 2859
      - Passed: 2859
      - Skipped (unsupported): 0

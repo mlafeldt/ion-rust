@@ -3742,6 +3742,24 @@ test "ion 1.1 text can apply $ion::(module ...) to install user macros" {
     }
 }
 
+test "ion 1.1 text can apply $1::(module ...) directive" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const input =
+        "$ion_1_1\n" ++
+        "$1::(module _ (macros (macro m () 1)) (symbols _))\n" ++
+        "(:m)\n";
+
+    const got = try ion.text.parseTopLevel(&arena, input);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expect(got[0].value == .int);
+    switch (got[0].value.int) {
+        .small => |v| try std.testing.expectEqual(@as(i128, 1), v),
+        else => return error.TestExpectedEqual,
+    }
+}
+
 test "ion 1.1 binary writer roundtrip (timestamps long form)" {
     const frac: ion.value.Decimal = .{ .is_negative = false, .coefficient = .{ .small = 123 }, .exponent = -3 };
     const doc = &[_]ion.value.Element{

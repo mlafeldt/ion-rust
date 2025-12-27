@@ -2825,13 +2825,22 @@ fn hasIonLiteralAnnotation(annotations: []const value.Symbol) bool {
 
 fn isIonSystemModuleDirective(elem: value.Element) bool {
     if (elem.annotations.len != 1) return false;
-    const ann = elem.annotations[0].text orelse return false;
-    if (!std.mem.eql(u8, ann, "$ion")) return false;
+    const ann0 = elem.annotations[0];
+    if (ann0.text) |ann| {
+        if (!std.mem.eql(u8, ann, "$ion")) return false;
+    } else {
+        if (ann0.sid != 1) return false;
+    }
     if (elem.value != .sexp) return false;
     const sx = elem.value.sexp;
     if (sx.len < 2) return false;
     if (sx[0].annotations.len != 0 or sx[0].value != .symbol) return false;
-    const head = sx[0].value.symbol.text orelse return false;
+    const head_sym = sx[0].value.symbol;
+    if (head_sym.sid) |sid| {
+        // ion-tests uses `module` at address 15, ion-rust uses address 16.
+        if (sid == 15 or sid == 16) return true;
+    }
+    const head = head_sym.text orelse return false;
     return std.mem.eql(u8, head, "module");
 }
 
