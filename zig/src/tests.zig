@@ -1731,6 +1731,15 @@ test "ion 1.1 binary11 decodes canonical qualified parse_ion (addr 18)" {
     try std.testing.expectEqual(@as(i128, 2), elems[1].value.int.small);
 }
 
+test "ion 1.1 binary11 rejects unknown/reserved opcode as InvalidIon" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // IVM + unknown opcode 0x69 (not used by ion-rust opcode table).
+    const bytes = [_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0x69 };
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, &bytes));
+}
+
 test "ion 1.1 writer11 can emit canonical qualified meta/flatten/parse_ion helpers" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
@@ -4897,6 +4906,30 @@ test "ion 1.1 binary system make_decimal supports big exponent and coefficient" 
     try std.testing.expect(!elems[0].value.decimal.is_negative);
     try std.testing.expect(elems[0].value.decimal.coefficient == .big);
     try std.testing.expectEqual(@as(usize, 129), elems[0].value.decimal.coefficient.big.toConst().bitCountAbs());
+}
+
+test "ion 1.1 binary decimal coefficient minInt(i128) decodes without overflow" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // E0 01 01 EA (IVM)
+    // F7 <len=17> <payload>
+    // payload: exponent flexint(0) encoded as 0x01, followed by coefficient bytes for minInt(i128)
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+
+    try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xF7, 0x23, 0x01 });
+    var coeff = [_]u8{0} ** 16;
+    coeff[15] = 0x80;
+    try bytes.appendSlice(std.testing.allocator, &coeff);
+
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
+    try std.testing.expectEqual(@as(usize, 1), elems.len);
+    try std.testing.expect(elems[0].value == .decimal);
+    try std.testing.expectEqual(@as(i32, 0), elems[0].value.decimal.exponent);
+    try std.testing.expect(elems[0].value.decimal.is_negative);
+    try std.testing.expect(elems[0].value.decimal.coefficient == .big);
+    try std.testing.expectEqual(@as(usize, 128), elems[0].value.decimal.coefficient.big.toConst().bitCountAbs());
 }
 
 test "ion 1.1 binary system make_timestamp accepts big ints for fields" {

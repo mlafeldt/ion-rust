@@ -190,7 +190,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
 - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
-- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `177/177` tests).
+- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `179/179` tests).
 
 ### Skip list (currently empty)
 
@@ -262,6 +262,11 @@ you can avoid environment variables and in-stream inference by using:
 ## Gaps vs ion-rust (high-level)
 
 This port is "tests green" for `ion-tests/`, but it is not feature-complete vs the Rust implementation.
+
+For Ion 1.1 semantics in particular, treat ion-rust as the canonical reference implementation. Where `ion-tests` and
+ion-rust differ (for example: Ion 1.1 system symbol table variants and macro address layouts), the Zig port keeps the
+`ion-tests` expectations green while also providing explicit options to select ion-rust-compatible behavior for
+interoperability.
 
 Major gaps (not exhaustive):
 
@@ -344,7 +349,8 @@ Below is a tighter checklist for "spec completeness" work. These are not require
 
 4) Ion 1.1 binary (spec completeness audit)
    - [ ] Audit remaining value opcodes and edge cases against ion-rust's Ion 1.1 binary reader/writer:
-     - [ ] Ensure all reserved/invalid opcodes signal errors as required (not `Unsupported` where the spec requires `InvalidIon`).
+     - [x] Ensure unknown/reserved opcodes surface as `InvalidIon` (not `Unsupported`).
+     - [x] Fix `minInt(i128)` overflow in Ion 1.1 decimal decoding (decode as a BigInt magnitude).
      - [ ] Validate canonical vs non-canonical encodings where the spec distinguishes them.
      - [ ] Verify all container forms (short/long/delimited) and annotation wrappers across nesting.
    - Relevant files: `zig/src/ion/binary11.zig`, `zig/src/ion/writer11.zig`, `src/lazy/binary/raw/v1_1/reader.rs`, `src/lazy/encoder/binary/v1_1/value_writer.rs`.

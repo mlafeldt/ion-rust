@@ -427,7 +427,7 @@ const Decoder = struct {
 
         const pushSymAddr = struct {
             fn run(list: *std.ArrayListUnmanaged(value.Symbol), arena: *value.Arena, sid: usize) IonError!void {
-                if (sid > std.math.maxInt(u32)) return IonError.Unsupported;
+                if (sid > std.math.maxInt(u32)) return IonError.InvalidIon;
                 list.append(arena.allocator(), value.makeSymbolId(@intCast(sid), null)) catch return IonError.OutOfMemory;
             }
         }.run;
@@ -1443,7 +1443,6 @@ const Decoder = struct {
     }
 
     fn makeDecimalFromTwoInts(self: *Decoder, coeff_v: value.Value, exp_v: value.Value) IonError!value.Element {
-        _ = self;
         if (coeff_v != .int or exp_v != .int) return IonError.InvalidIon;
 
         const exp_i128: i128 = switch (exp_v.int) {
@@ -1471,9 +1470,17 @@ const Decoder = struct {
         switch (coeff_v.int) {
             .small => |v| {
                 if (v < 0) {
-                    if (v == std.math.minInt(i128)) return IonError.Unsupported;
                     is_negative = true;
-                    magnitude = .{ .small = @intCast(@abs(v)) };
+                    if (v == std.math.minInt(i128)) {
+                        // `abs(minInt(i128))` overflows, but Ion allows this integer magnitude.
+                        // Materialize it as a BigInt magnitude instead of rejecting it.
+                        const mag = try self.arena.makeBigInt();
+                        mag.set(v) catch return IonError.OutOfMemory;
+                        mag.abs();
+                        magnitude = .{ .big = mag };
+                    } else {
+                        magnitude = .{ .small = @intCast(@abs(v)) };
+                    }
                 } else {
                     magnitude = .{ .small = v };
                 }
@@ -2731,9 +2738,16 @@ const Decoder = struct {
         switch (coeff_v.int) {
             .small => |v| {
                 if (v < 0) {
-                    if (v == std.math.minInt(i128)) return IonError.Unsupported;
                     is_negative = true;
-                    magnitude = .{ .small = @intCast(@abs(v)) };
+                    if (v == std.math.minInt(i128)) {
+                        // `abs(minInt(i128))` overflows; represent the magnitude as a BigInt.
+                        const mag = try self.arena.makeBigInt();
+                        mag.set(v) catch return IonError.OutOfMemory;
+                        mag.abs();
+                        magnitude = .{ .big = mag };
+                    } else {
+                        magnitude = .{ .small = @intCast(@abs(v)) };
+                    }
                 } else {
                     magnitude = .{ .small = v };
                 }
@@ -2851,7 +2865,7 @@ const Decoder = struct {
         _ = self;
         return switch (i) {
             .small => |v| v,
-            .big => |p| p.toConst().toInt(i128) catch return IonError.Unsupported,
+            .big => |p| p.toConst().toInt(i128) catch return IonError.InvalidIon,
         };
     }
 
@@ -3487,7 +3501,9 @@ const Decoder = struct {
         // Ion 1.1 IVM opcode (`E0`, 3 bytes payload) may appear in-stream; accept and ignore only the Ion 1.1 IVM.
         if (op == 0xE0) {
             const b = try self.readBytes(3);
-            if (b[0] == 0x01 and b[1] == 0x01 and b[2] == 0xEA) return IonError.Unsupported; // should have been handled by `readValueExpr()`
+            // IVMs are only allowed at the "value expression" layer. If `readValue()` sees an IVM,
+            // it was invoked in an invalid context.
+            if (b[0] == 0x01 and b[1] == 0x01 and b[2] == 0xEA) return IonError.InvalidIon;
             return IonError.InvalidIon;
         }
 
@@ -3498,7 +3514,7 @@ const Decoder = struct {
             const id_raw: usize = readFixedUIntLE(b);
             const biases = [_]usize{ 0, 256, 65792 };
             const sid: usize = id_raw + biases[len - 1];
-            if (sid > std.math.maxInt(u32)) return IonError.Unsupported;
+            if (sid > std.math.maxInt(u32)) return IonError.InvalidIon;
             return value.Value{ .symbol = value.makeSymbolId(@intCast(sid), null) };
         }
 
@@ -3698,7 +3714,8 @@ const Decoder = struct {
             return value.Value{ .clob = owned };
         }
 
-        return IonError.Unsupported;
+        // Unknown or reserved opcode: invalid Ion 1.1 binary.
+        return IonError.InvalidIon;
     }
 
     fn readBytes(self: *Decoder, len: usize) IonError![]const u8 {
@@ -4292,7 +4309,7 @@ fn typeCodeToIonType(tc: u8) ?value.IonType {
 }
 
 fn readFlexUInt(input: []const u8, cursor: *usize) IonError!usize {
-    const shift = detectFlexShift(input, cursor) orelse return IonError.Unsupported;
+    const shift = try detectFlexShift(input, cursor);
     if (shift == 0) return IonError.InvalidIon;
     if (cursor.* + shift > input.len) return IonError.Incomplete;
     const raw = input[cursor.* .. cursor.* + shift];
@@ -4324,7 +4341,7 @@ fn readFlexUInt(input: []const u8, cursor: *usize) IonError!usize {
         out |= (@as(usize, ob) << @intCast(out_idx * 8));
     }
 
-    const overflow_bit = std.math.add(usize, shift, @bitSizeOf(usize)) catch return IonError.Unsupported;
+    const overflow_bit = std.math.add(usize, shift, @bitSizeOf(usize)) catch return IonError.InvalidIon;
     if (overflow_bit < raw.len * 8) {
         const start_byte = overflow_bit / 8;
         const start_bit: u3 = @intCast(overflow_bit % 8);
@@ -4337,7 +4354,7 @@ fn readFlexUInt(input: []const u8, cursor: *usize) IonError!usize {
 }
 
 fn readFlexInt(input: []const u8, cursor: *usize) IonError!i32 {
-    const shift = detectFlexShift(input, cursor) orelse return IonError.Unsupported;
+    const shift = try detectFlexShift(input, cursor);
     if (shift == 0) return IonError.InvalidIon;
     if (cursor.* + shift > input.len) return IonError.Incomplete;
     const raw = input[cursor.* .. cursor.* + shift];
@@ -4363,13 +4380,13 @@ fn readFlexInt(input: []const u8, cursor: *usize) IonError!i32 {
     }
 
     // If the shifted value's natural bit width is < 64, apply sign-extension for negative values.
-    const width_bits = std.math.mul(usize, shift, 7) catch return IonError.Unsupported;
+    const width_bits = std.math.mul(usize, shift, 7) catch return IonError.InvalidIon;
     if (negative and width_bits < 64) {
         low64 |= (~@as(u64, 0)) << @intCast(width_bits);
     }
 
     // Validate that any remaining high bits (above bit 63 after shifting) match sign extension.
-    const overflow_bit = std.math.add(usize, shift, 64) catch return IonError.Unsupported;
+    const overflow_bit = std.math.add(usize, shift, 64) catch return IonError.InvalidIon;
     if (overflow_bit < raw.len * 8) {
         const start_byte = overflow_bit / 8;
         const start_bit: u3 = @intCast(overflow_bit % 8);
@@ -4389,7 +4406,7 @@ fn readFlexInt(input: []const u8, cursor: *usize) IonError!i32 {
 }
 
 fn readFlexUIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!value.Int {
-    const shift = detectFlexShift(input, cursor) orelse return IonError.Unsupported;
+    const shift = try detectFlexShift(input, cursor);
     if (shift == 0) return IonError.InvalidIon;
     if (cursor.* + shift > input.len) return IonError.Incomplete;
     const raw = input[cursor.* .. cursor.* + shift];
@@ -4412,7 +4429,7 @@ fn readFlexUIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize) Ion
 }
 
 fn readFlexIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!value.Int {
-    const shift = detectFlexShift(input, cursor) orelse return IonError.Unsupported;
+    const shift = try detectFlexShift(input, cursor);
     if (shift == 0) return IonError.InvalidIon;
     if (cursor.* + shift > input.len) return IonError.Incomplete;
     const raw = input[cursor.* .. cursor.* + shift];
@@ -4487,10 +4504,19 @@ fn decodeDecimal11(arena: *value.Arena, payload: []const u8) IonError!value.Deci
 
     const signed = try readTwosComplementIntLE(arena, coeff_bytes);
     return switch (signed) {
-        .small => |v| if (v < 0)
-            .{ .is_negative = true, .coefficient = .{ .small = -v }, .exponent = exp_i32 }
-        else
-            .{ .is_negative = false, .coefficient = .{ .small = v }, .exponent = exp_i32 },
+        .small => |v| blk: {
+            if (v < 0) {
+                if (v == std.math.minInt(i128)) {
+                    // `-minInt(i128)` overflows, but Ion allows this integer magnitude.
+                    const mag = try arena.makeBigInt();
+                    mag.set(v) catch return IonError.OutOfMemory;
+                    mag.abs();
+                    break :blk .{ .is_negative = true, .coefficient = .{ .big = mag }, .exponent = exp_i32 };
+                }
+                break :blk .{ .is_negative = true, .coefficient = .{ .small = -v }, .exponent = exp_i32 };
+            }
+            break :blk .{ .is_negative = false, .coefficient = .{ .small = v }, .exponent = exp_i32 };
+        },
         .big => |bi| blk: {
             const negative = !bi.toConst().positive;
             if (negative) bi.negate();
@@ -4512,8 +4538,8 @@ fn flatten(arena: *value.Arena, seqs: []const value.Element) IonError![]value.El
     return out.toOwnedSlice(arena.allocator()) catch return IonError.OutOfMemory;
 }
 
-fn detectFlexShift(input: []const u8, cursor: *usize) ?usize {
-    if (cursor.* >= input.len) return null;
+fn detectFlexShift(input: []const u8, cursor: *usize) IonError!usize {
+    if (cursor.* >= input.len) return IonError.Incomplete;
     // FlexInt/FlexUInt encoding uses a "tag bit" that is the least-significant set bit of the
     // underlying little-endian integer. If the tag bit is at position (N-1), the encoding is N
     // bytes long and the value is obtained by shifting right by N bits.
@@ -4525,9 +4551,10 @@ fn detectFlexShift(input: []const u8, cursor: *usize) ?usize {
         const b = input[cursor.* + idx];
         if (b == 0) continue;
         const tz: usize = @intCast(@ctz(b));
-        const bits_before = std.math.mul(usize, idx, 8) catch return null;
-        const with_tz = std.math.add(usize, bits_before, tz) catch return null;
-        return std.math.add(usize, with_tz, 1) catch return null;
+        const bits_before = std.math.mul(usize, idx, 8) catch return IonError.InvalidIon;
+        const with_tz = std.math.add(usize, bits_before, tz) catch return IonError.InvalidIon;
+        return std.math.add(usize, with_tz, 1) catch return IonError.InvalidIon;
     }
-    return null;
+    // All remaining bytes are 0 => no tag bit => invalid encoding.
+    return IonError.InvalidIon;
 }
