@@ -4122,6 +4122,54 @@ test "ion 1.1 binary strict_opcodes rejects conformance opcode quirks" {
     );
 }
 
+test "ion 1.1 binary resolve_user_symbols resolves module symbol addresses" {
+    const allocator = std.testing.allocator;
+
+    var arena = try ion.value.Arena.init(allocator);
+    defer arena.deinit();
+
+    const ann_text = try arena.dupe("ann");
+    const field_text = try arena.dupe("field");
+    const val_text = try arena.dupe("val");
+
+    const ann_syms = try arena.allocator().alloc(ion.value.Symbol, 1);
+    ann_syms[0] = ion.value.makeSymbolId(null, ann_text);
+
+    const fields = try arena.allocator().alloc(ion.value.StructField, 1);
+    fields[0] = .{
+        .name = ion.value.makeSymbolId(null, field_text),
+        .value = .{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, val_text) } },
+    };
+
+    const doc = [_]ion.value.Element{
+        .{
+            .annotations = ann_syms,
+            .value = .{ .@"struct" = .{ .fields = fields } },
+        },
+    };
+
+    const bytes = try ion.serializeDocument(allocator, .binary_1_1, &doc);
+    defer allocator.free(bytes);
+
+    var parsed = try ion.parseDocumentBinary11WithOptions(allocator, bytes, .{ .resolve_user_symbols = true });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.elements.len);
+    try std.testing.expectEqual(@as(usize, 1), parsed.elements[0].annotations.len);
+    try std.testing.expect(parsed.elements[0].annotations[0].text != null);
+    try std.testing.expectEqualStrings("ann", parsed.elements[0].annotations[0].text.?);
+
+    try std.testing.expect(parsed.elements[0].value == .@"struct");
+    const st = parsed.elements[0].value.@"struct";
+    try std.testing.expectEqual(@as(usize, 1), st.fields.len);
+    try std.testing.expect(st.fields[0].name.text != null);
+    try std.testing.expectEqualStrings("field", st.fields[0].name.text.?);
+
+    try std.testing.expect(st.fields[0].value.value == .symbol);
+    try std.testing.expect(st.fields[0].value.value.symbol.text != null);
+    try std.testing.expectEqualStrings("val", st.fields[0].value.value.symbol.text.?);
+}
+
 test "ion 1.1 binary e-expression 12-bit address (minimal)" {
     // Minimal coverage for the EExpressionWith12BitAddress encoding (0x40..0x4F).
     // This uses a synthetic user macro at address 64 that expands to its single argument.

@@ -190,7 +190,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
 - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
-- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `189/189` tests).
+- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `190/190` tests).
 
 ### Skip list (currently empty)
 
@@ -239,6 +239,7 @@ For stricter validation (opt-in; defaults remain conformance-friendly):
 
 - `ion.parseDocumentBinary11WithOptions(..., .{ .strict_flex = true })` rejects non-minimal FlexInt/FlexUInt encodings.
 - `ion.parseDocumentBinary11WithOptions(..., .{ .strict_opcodes = true })` rejects known conformance opcode quirks (for example: `0x01` as an alternative tagged int(0) in some macro argument positions).
+- `ion.parseDocumentBinary11WithOptions(..., .{ .resolve_user_symbols = true })` resolves user symbol text for Ion 1.1 binary symbol IDs/addresses using module state from `$ion::(module ...)` / `set_symbols` / `add_symbols` / `use`.
 
 ### 4) Ion 1.1 conformance: `ion-tests/conformance/**/*.ion` (full pass)
 

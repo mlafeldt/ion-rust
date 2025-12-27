@@ -68,6 +68,13 @@ pub const ParseOptions = struct {
     /// opcode table (for example the `0x01` "tagged int 0" shortcut used by some conformance
     /// fixtures).
     strict_opcodes: bool = false,
+
+    /// When true, resolves user symbol text for Ion 1.1 binary symbol IDs/addresses using the
+    /// conformance-style module symbol state tracked by `$ion::(module ...)`, `set_symbols`,
+    /// `add_symbols`, and `use`.
+    ///
+    /// Default is `false` to keep the conformance-driven decoding mode from altering parsed values.
+    resolve_user_symbols: bool = false,
 };
 
 /// Parses a byte slice as Ion (IVM-detected), with optional Ion 1.1 parsing configuration.
@@ -85,7 +92,11 @@ pub fn parseDocumentWithOptions(allocator: Allocator, bytes: []const u8, options
                 bytes,
                 options.mactab,
                 variant,
-                .{ .strict_flex = options.strict_flex, .strict_opcodes = options.strict_opcodes },
+                .{
+                    .strict_flex = options.strict_flex,
+                    .strict_opcodes = options.strict_opcodes,
+                    .resolve_user_symbols = options.resolve_user_symbols,
+                },
             );
             return .{ .arena = arena, .elements = res.elements };
         }
@@ -93,7 +104,11 @@ pub fn parseDocumentWithOptions(allocator: Allocator, bytes: []const u8, options
             &arena,
             bytes,
             options.mactab,
-            .{ .strict_flex = options.strict_flex, .strict_opcodes = options.strict_opcodes },
+            .{
+                .strict_flex = options.strict_flex,
+                .strict_opcodes = options.strict_opcodes,
+                .resolve_user_symbols = options.resolve_user_symbols,
+            },
         );
         return .{ .arena = arena, .elements = res.elements };
     } else {
@@ -164,6 +179,13 @@ pub const Binary11ParseOptions = struct {
     /// opcode table (for example the `0x01` "tagged int 0" shortcut used by some conformance
     /// fixtures).
     strict_opcodes: bool = false,
+
+    /// When true, resolves user symbol text for Ion 1.1 binary symbol IDs/addresses using the
+    /// conformance-style module symbol state tracked by `$ion::(module ...)`, `set_symbols`,
+    /// `add_symbols`, and `use`.
+    ///
+    /// Default is `false` to keep the conformance-driven decoding mode from altering parsed values.
+    resolve_user_symbols: bool = false,
 };
 
 /// Parses an Ion 1.1 binary stream that begins with the Ion 1.1 IVM (`E0 01 01 EA`).
@@ -182,7 +204,11 @@ pub fn parseDocumentBinary11WithOptions(allocator: Allocator, bytes: []const u8,
             bytes,
             options.mactab,
             variant,
-            .{ .strict_flex = options.strict_flex, .strict_opcodes = options.strict_opcodes },
+            .{
+                .strict_flex = options.strict_flex,
+                .strict_opcodes = options.strict_opcodes,
+                .resolve_user_symbols = options.resolve_user_symbols,
+            },
         );
         return .{ .arena = arena, .elements = res.elements };
     }
@@ -190,7 +216,11 @@ pub fn parseDocumentBinary11WithOptions(allocator: Allocator, bytes: []const u8,
         &arena,
         bytes,
         options.mactab,
-        .{ .strict_flex = options.strict_flex, .strict_opcodes = options.strict_opcodes },
+        .{
+            .strict_flex = options.strict_flex,
+            .strict_opcodes = options.strict_opcodes,
+            .resolve_user_symbols = options.resolve_user_symbols,
+        },
     );
     return .{ .arena = arena, .elements = res.elements };
 }
