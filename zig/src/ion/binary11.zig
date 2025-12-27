@@ -80,7 +80,7 @@ const Decoder = struct {
     input: []const u8,
     i: usize,
     mactab: ?*const MacroTable,
-    mactab_local: MacroTable = .{ .macros = &.{} },
+    mactab_local: MacroTable = .{ .base_addr = 0, .macros = &.{} },
     mactab_local_set: bool = false,
     invoke_ctx: InvokeCtx = .nested,
     module_state: ModuleState11 = .{},
@@ -102,10 +102,66 @@ const Decoder = struct {
 
         while (self.i < self.input.len) {
             const vals = try self.readValueExpr();
+            if (vals.len == 1 and self.invoke_ctx == .top and self.isIonSystemModuleDirective(vals[0])) {
+                try self.applyIonSystemModuleDirective(vals[0]);
+                continue;
+            }
             out.appendSlice(self.arena.allocator(), vals) catch return IonError.OutOfMemory;
         }
 
         return out.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
+    }
+
+    fn isIonSystemModuleDirective(_: *const Decoder, elem: value.Element) bool {
+        if (elem.annotations.len != 1) return false;
+        const ann = elem.annotations[0].text orelse return false;
+        if (!std.mem.eql(u8, ann, "$ion")) return false;
+        if (elem.value != .sexp) return false;
+        const sx = elem.value.sexp;
+        if (sx.len < 2) return false;
+        if (sx[0].annotations.len != 0 or sx[0].value != .symbol) return false;
+        const head = sx[0].value.symbol.text orelse return false;
+        return std.mem.eql(u8, head, "module");
+    }
+
+    fn applyIonSystemModuleDirective(self: *Decoder, elem: value.Element) IonError!void {
+        if (!self.isIonSystemModuleDirective(elem)) return IonError.InvalidIon;
+        const sx = elem.value.sexp;
+
+        var defs: []const value.Element = &.{};
+        var base_addr: usize = 0;
+
+        for (sx[2..]) |clause_elem| {
+            if (clause_elem.annotations.len != 0 or clause_elem.value != .sexp) continue;
+            const csx = clause_elem.value.sexp;
+            if (csx.len == 0) continue;
+            if (csx[0].annotations.len != 0 or csx[0].value != .symbol) continue;
+            const head = csx[0].value.symbol.text orelse continue;
+
+            if (std.mem.eql(u8, head, "macros")) {
+                defs = csx[1..];
+                base_addr = 0;
+                continue;
+            }
+
+            if (std.mem.eql(u8, head, "macro_table")) {
+                base_addr = ion.macro.system_macro_count;
+
+                // Common upstream encoding: (macro_table _ <macro_def>...)
+                if (csx.len >= 3) {
+                    defs = csx[2..];
+                } else if (csx.len >= 2) {
+                    defs = csx[1..];
+                } else {
+                    defs = &.{};
+                }
+                continue;
+            }
+        }
+
+        const parsed = try ion.macro.parseMacroTableWithBase(self.arena.allocator(), defs, base_addr);
+        self.mactab_local = parsed;
+        self.mactab_local_set = true;
     }
 
     fn readValueExpr(self: *Decoder) IonError![]value.Element {
@@ -137,6 +193,15 @@ const Decoder = struct {
 
         // E-expression with 6-bit address: opcode byte is the address.
         if (op0 <= 0x3F) {
+            if (@import("builtin").mode == .Debug) {
+                if (std.posix.getenv("ION_ZIG_TRACE_EEXP") != null) {
+                    std.debug.print("binary11: eexp opcode=0x{X:0>2} at offset {d} (invoke_ctx={s})\n", .{
+                        op0,
+                        self.i,
+                        @tagName(self.invoke_ctx),
+                    });
+                }
+            }
             self.i += 1;
             return self.readMacroInvocationAtAddress(@intCast(op0));
         }
@@ -1973,9 +2038,12 @@ const Decoder = struct {
     fn applyAddMacros(self: *Decoder, defs: []const value.Element) IonError!void {
         const parsed = ion.macro.parseMacroTable(self.arena.allocator(), defs) catch return IonError.InvalidIon;
         const base = self.currentMacroTable();
+        const base_addr: usize = if (base) |t| t.base_addr else 0;
         const base_macros: []const ion.macro.Macro = if (base) |t| t.macros else &.{};
         if (base_macros.len == 0) {
-            self.mactab_local = parsed;
+            var out = parsed;
+            out.base_addr = base_addr;
+            self.mactab_local = out;
             self.mactab_local_set = true;
             return;
         }
@@ -1984,7 +2052,7 @@ const Decoder = struct {
         const merged = self.arena.allocator().alloc(ion.macro.Macro, total) catch return IonError.OutOfMemory;
         @memcpy(merged[0..base_macros.len], base_macros);
         if (parsed.macros.len != 0) @memcpy(merged[base_macros.len..], parsed.macros);
-        self.mactab_local = .{ .macros = merged };
+        self.mactab_local = .{ .base_addr = base_addr, .macros = merged };
         self.mactab_local_set = true;
     }
 

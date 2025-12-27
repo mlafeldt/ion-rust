@@ -12,6 +12,11 @@ const value = @import("value.zig");
 
 const IonError = ion.IonError;
 
+/// Number of system macros in the `$ion` module as exercised by ion-rust and ion-tests.
+/// User macro addresses in a module that includes these system macros are commonly assigned starting
+/// at this offset.
+pub const system_macro_count: usize = 24;
+
 pub const ParamType = enum {
     tagged,
     /// A macro shape (or qualified type name) used as a tagless encoding.
@@ -61,17 +66,23 @@ pub const Macro = struct {
 };
 
 pub const MacroTable = struct {
+    /// The lowest macro address that can resolve to an entry in `macros`.
+    /// Addresses below `base_addr` are not user macros and should be treated as system macros
+    /// (or as invalid, depending on context).
+    base_addr: usize = 0,
     macros: []Macro,
 
     pub fn macroForAddress(self: *const MacroTable, addr: usize) ?Macro {
-        if (addr >= self.macros.len) return null;
-        return self.macros[addr];
+        if (addr < self.base_addr) return null;
+        const idx = addr - self.base_addr;
+        if (idx >= self.macros.len) return null;
+        return self.macros[idx];
     }
 
     pub fn addressForName(self: *const MacroTable, name: []const u8) ?usize {
         for (self.macros, 0..) |m, idx| {
             if (m.name) |n| {
-                if (std.mem.eql(u8, n, name)) return idx;
+                if (std.mem.eql(u8, n, name)) return self.base_addr + idx;
             }
         }
         return null;
@@ -97,7 +108,13 @@ pub fn parseMacroTable(allocator: std.mem.Allocator, items: []const value.Elemen
         out.append(allocator, m) catch return IonError.OutOfMemory;
     }
 
-    return .{ .macros = out.toOwnedSlice(allocator) catch return IonError.OutOfMemory };
+    return .{ .base_addr = 0, .macros = out.toOwnedSlice(allocator) catch return IonError.OutOfMemory };
+}
+
+pub fn parseMacroTableWithBase(allocator: std.mem.Allocator, items: []const value.Element, base_addr: usize) IonError!MacroTable {
+    var tab = try parseMacroTable(allocator, items);
+    tab.base_addr = base_addr;
+    return tab;
 }
 
 fn parseMacroDef(allocator: std.mem.Allocator, it: value.Element) IonError!Macro {

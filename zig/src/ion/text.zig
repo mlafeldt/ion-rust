@@ -195,6 +195,18 @@ const Parser = struct {
             const before = self.i;
             const elem = try self.parseElement(.top);
             const is_literal = hasIonLiteralAnnotation(elem.annotations);
+
+            // Ion 1.1 encoding directive: `$ion::(module ...)`.
+            // The conformance suite uses this as the source form that `(mactab ...)` expands to.
+            // Treat it as a system value that mutates the active macro table and produces no user
+            // values.
+            if (self.version == .v1_1 and !is_literal and isIonSystemModuleDirective(elem)) {
+                try applyIonSystemModuleDirective(self, elem);
+                // Prevent infinite loops on malformed inputs.
+                if (self.i == before) return IonError.InvalidIon;
+                continue;
+            }
+
             // `parse_ion` mode: treat IVM tokens as user values after the leading IVM has been
             // consumed.
             if (self.parse_ion_mode and self.parse_ion_ivm_consumed and !is_literal and elem.annotations.len == 0 and elem.value == .symbol) {
@@ -828,7 +840,7 @@ const Parser = struct {
 
             // Empty argument list / empty expression groups: clear or no-op.
             if (defs_list.items.len == 0) {
-                if (kind.? == .set_macros) self.mactab_local = .{ .macros = &.{} };
+                if (kind.? == .set_macros) self.mactab_local = .{ .base_addr = 0, .macros = &.{} };
                 return &.{};
             }
 
@@ -904,12 +916,13 @@ const Parser = struct {
                 self.mactab_local = parsed;
             } else {
                 const base = self.currentMacroTable();
+                const base_addr: usize = if (base) |t| t.base_addr else 0;
                 const base_macros = if (base) |t| t.macros else &.{};
                 const total = base_macros.len + parsed.macros.len;
                 const merged = self.arena.allocator().alloc(ion.macro.Macro, total) catch return IonError.OutOfMemory;
                 if (base_macros.len != 0) @memcpy(merged[0..base_macros.len], base_macros);
                 if (parsed.macros.len != 0) @memcpy(merged[base_macros.len..], parsed.macros);
-                self.mactab_local = .{ .macros = merged };
+                self.mactab_local = .{ .base_addr = base_addr, .macros = merged };
             }
             return &.{};
         }
@@ -2808,6 +2821,62 @@ fn hasIonLiteralAnnotation(annotations: []const value.Symbol) bool {
         if (std.mem.eql(u8, t, "$ion_literal")) return true;
     }
     return false;
+}
+
+fn isIonSystemModuleDirective(elem: value.Element) bool {
+    if (elem.annotations.len != 1) return false;
+    const ann = elem.annotations[0].text orelse return false;
+    if (!std.mem.eql(u8, ann, "$ion")) return false;
+    if (elem.value != .sexp) return false;
+    const sx = elem.value.sexp;
+    if (sx.len < 2) return false;
+    if (sx[0].annotations.len != 0 or sx[0].value != .symbol) return false;
+    const head = sx[0].value.symbol.text orelse return false;
+    return std.mem.eql(u8, head, "module");
+}
+
+fn applyIonSystemModuleDirective(self: *Parser, elem: value.Element) IonError!void {
+    if (!isIonSystemModuleDirective(elem)) return IonError.InvalidIon;
+    const sx = elem.value.sexp;
+
+    var defs: []const value.Element = &.{};
+    var base_addr: usize = 0;
+
+    // Syntax variants used by upstream tooling:
+    // - `$ion::(module _ (macros <macro_def>...) (symbols _))` (conformance DSL source form)
+    // - `$ion::(module _ (macro_table _ (<macro_def>...)) (symbol_table _))` (ion-rust binary writer prelude)
+    for (sx[2..]) |clause_elem| {
+        if (clause_elem.annotations.len != 0 or clause_elem.value != .sexp) continue;
+        const csx = clause_elem.value.sexp;
+        if (csx.len == 0) continue;
+        if (csx[0].annotations.len != 0 or csx[0].value != .symbol) continue;
+        const head = csx[0].value.symbol.text orelse continue;
+
+        if (std.mem.eql(u8, head, "macros")) {
+            defs = csx[1..];
+            base_addr = 0;
+            continue;
+        }
+
+        if (std.mem.eql(u8, head, "macro_table")) {
+            // Expected form: (macro_table _ (<macro_def>...))
+            base_addr = ion.macro.system_macro_count;
+
+            // Common upstream encoding: (macro_table _ <macro_def>...)
+            if (csx.len >= 3) {
+                defs = csx[2..];
+            } else if (csx.len >= 2) {
+                defs = csx[1..];
+            } else {
+                defs = &.{};
+            }
+            continue;
+        }
+    }
+
+    // `module` with no macro table clause is allowed; treat it as resetting to an empty user macro table.
+    const parsed = try ion.macro.parseMacroTableWithBase(self.arena.allocator(), defs, base_addr);
+    self.mactab_local = parsed;
 }
 
 fn stripIonLiteralAnnotation(arena: *value.Arena, elem: value.Element) IonError!value.Element {

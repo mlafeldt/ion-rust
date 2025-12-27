@@ -3660,6 +3660,27 @@ test "ion 1.1 writer11 can emit length-prefixed containers" {
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed));
 }
 
+test "ion 1.1 text can apply $ion::(module ...) to install user macros" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const input =
+        "$ion_1_1\n" ++
+        "$ion::(module _ (macros (macro m () 1)) (symbols _))\n" ++
+        "(:m) (:0)\n";
+
+    const got = try ion.text.parseTopLevel(&arena, input);
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    for (got) |e| {
+        try std.testing.expectEqual(@as(usize, 0), e.annotations.len);
+        try std.testing.expect(e.value == .int);
+        switch (e.value.int) {
+            .small => |v| try std.testing.expectEqual(@as(i128, 1), v),
+            else => return error.TestExpectedEqual,
+        }
+    }
+}
+
 test "ion 1.1 binary writer roundtrip (timestamps long form)" {
     const frac: ion.value.Decimal = .{ .is_negative = false, .coefficient = .{ .small = 123 }, .exponent = -3 };
     const doc = &[_]ion.value.Element{

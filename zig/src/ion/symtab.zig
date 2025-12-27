@@ -45,6 +45,10 @@ pub const SystemSymtab = struct {
 /// Ion 1.1 system symbol table.
 /// This is currently only used by the Ion 1.1 conformance suite runner.
 pub const SystemSymtab11 = struct {
+    // NOTE: This table matches the expectations in `ion-tests/conformance/system_symbols.ion`.
+    // Ion-rust uses a different (newer) Ion 1.1 system symbol table that includes `symbol_table`
+    // and has 63 symbols. When interoperating with ion-rust's Ion 1.1 binary writer, prefer its
+    // address-to-text mapping as the source of truth.
     pub const max_id: u32 = 62;
 
     pub const symbols = [_][]const u8{
