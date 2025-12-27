@@ -306,7 +306,7 @@ Below is a tighter checklist for "spec completeness" work. These are not require
      - [ ] Recursive expansion semantics (termination rules, memoization/caching strategy).
 	   - [ ] Support more macro-shape decoding/encoding paths:
 	     - [ ] `ParamType.macro_shape` for decoding tagless args in `binary11` (`readArgValue(.macro_shape)` is currently unsupported).
-	     - [ ] More qualified system macro shapes (supported so far include `make_decimal`, `values`, `default`, `repeat`, `delta`, `sum`, `meta`, `flatten`, `annotate`, `make_string`, `make_symbol`, `make_blob`, `make_list`, `make_sexp`, `make_struct`, `make_field`, `make_timestamp`, and `parse_ion`).
+	     - [ ] More qualified system macro shapes (supported so far include `make_decimal`, `none`, `values`, `default`, `repeat`, `delta`, `sum`, `meta`, `flatten`, `annotate`, `make_string`, `make_symbol`, `make_blob`, `make_list`, `make_sexp`, `make_struct`, `make_field`, `make_timestamp`, and `parse_ion`).
 	   - Relevant files: `zig/src/ion/macro.zig`, `zig/src/ion/tdl_eval.zig`, `zig/src/conformance/runner.zig`, `zig/src/ion/binary11.zig`, `zig/src/ion/writer11.zig`.
 
 3) Ion 1.1 writing (spec-complete)
