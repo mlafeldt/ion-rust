@@ -1777,6 +1777,29 @@ test "ion 1.1 binary11 rejects invalid FlexSym escape byte" {
     try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes));
 }
 
+test "ion 1.1 binary11 rejects unqualified eexp 20-bit address without macro table" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // E-expression with 20-bit address: opcode 0x50 and fixed_u16=0 => addr=4160.
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0x50, 0x00, 0x00 };
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes));
+}
+
+test "ion 1.1 binary11 rejects length-prefixed eexp large address without macro table" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(std.testing.allocator);
+
+    try bytes.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xF5 });
+    try appendFlexUIntShift1(std.testing.allocator, &bytes, 300);
+    try appendFlexUIntShift1(std.testing.allocator, &bytes, 0);
+
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.binary11.parseTopLevel(&arena, bytes.items));
+}
+
 test "ion 1.1 writer11 can emit canonical qualified meta/flatten/parse_ion helpers" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

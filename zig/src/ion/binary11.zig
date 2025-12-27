@@ -492,7 +492,9 @@ const Decoder = struct {
         }
 
         // Otherwise, treat this as an invocation of a system macro loaded into the default module.
-        if (addr > std.math.maxInt(u8)) return IonError.Unsupported;
+        // System macros are a fixed table. If there is no active macro table, a macro address
+        // outside the system range is invalid.
+        if (addr > std.math.maxInt(u8)) return IonError.InvalidIon;
         return self.readSystemMacroInvocationAt(addr);
     }
 
@@ -524,15 +526,9 @@ const Decoder = struct {
             }
         }
 
-        if (addr <= std.math.maxInt(u8)) {
-            const expanded = self.expandSystemMacroLengthPrefixed(@intCast(addr), &sub) catch |e| switch (e) {
-                IonError.Unsupported => null,
-                else => return e,
-            };
-            if (expanded) |vals| return vals;
-        }
-
-        return IonError.Unsupported;
+        // No active macro table: the only valid targets are system macros.
+        if (addr > std.math.maxInt(u8)) return IonError.InvalidIon;
+        return self.expandSystemMacroLengthPrefixed(@intCast(addr), &sub);
     }
 
     fn emptyElems() []value.Element {
