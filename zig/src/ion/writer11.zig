@@ -1642,10 +1642,20 @@ pub fn writeSystemMacroInvocationQualifiedFlatten(
     sequences: []const value.Element,
     options: Options,
 ) IonError!void {
-    // (flatten <sequence*>): system macro address 19 (overloaded with set_symbols in conformance).
+    // (flatten <sequence*>): conformance uses system macro address 19 (overloaded with set_symbols).
     //
     // If all args are unannotated text values, the decoder will treat address 19 as `set_symbols`.
     return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 19, sequences, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedFlattenCanonical(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    sequences: []const value.Element,
+    options: Options,
+) IonError!void {
+    // Canonical (ion-rust): (flatten <sequence*>): system macro address 5.
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 5, sequences, options);
 }
 
 pub fn writeSystemMacroInvocationQualifiedSetSymbolsDirectiveText(
@@ -1770,13 +1780,23 @@ pub fn writeSystemMacroInvocationQualifiedParseIon(
     bytes: value.Element,
     options: Options,
 ) IonError!void {
-    // (parse_ion <bytes>): system macro address 16.
+    // (parse_ion <bytes>): conformance uses system macro address 16 (overloaded with make_field).
     //
     // Note: address 16 is overloaded with make_field. The decoder selects parse_ion when the
     // first argument is a string/clob/blob value.
     try appendByte(out, allocator, 0xEF);
     try appendByte(out, allocator, 0x10);
     try writeElement(allocator, out, options, bytes);
+}
+
+pub fn writeSystemMacroInvocationQualifiedParseIonCanonical(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    parts: []const value.Element,
+    options: Options,
+) IonError!void {
+    // Canonical (ion-rust): (parse_ion <data*>): system macro address 18.
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 18, parts, options);
 }
 
 pub fn writeSystemMacroInvocationQualifiedMakeField(
@@ -1811,11 +1831,21 @@ pub fn writeSystemMacroInvocationQualifiedMeta(
     args: []const value.Element,
     options: Options,
 ) IonError!void {
-    // (meta <expr*>): system macro address 21 (overloaded with set_macros in conformance).
+    // (meta <expr*>): conformance uses system macro address 21 (overloaded with set_macros).
     //
     // The decoder disambiguates address 21: if all args are macro defs, it treats it as set_macros;
     // otherwise it treats it as meta. This writer does not attempt to validate the meta payload.
     return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 21, args, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedMetaCanonical(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    args: []const value.Element,
+    options: Options,
+) IonError!void {
+    // Canonical (ion-rust): (meta <expr*>): system macro address 3.
+    return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 3, args, options);
 }
 
 pub fn writeMacroInvocationLengthPrefixedWithParams(

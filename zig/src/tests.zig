@@ -1647,6 +1647,43 @@ test "ion 1.1 binary11 decodes canonical qualified parse_ion (addr 18)" {
     try std.testing.expectEqual(@as(i128, 2), elems[1].value.int.small);
 }
 
+test "ion 1.1 writer11 can emit canonical qualified meta/flatten/parse_ion helpers" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const meta_args = [_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } }};
+
+    const list_items_a = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    list_items_a[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
+    list_items_a[1] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } };
+    const list_a: ion.value.Element = .{ .annotations = &.{}, .value = .{ .list = list_items_a } };
+
+    const list_items_b = arena.allocator().alloc(ion.value.Element, 1) catch return ion.IonError.OutOfMemory;
+    list_items_b[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } };
+    const list_b: ion.value.Element = .{ .annotations = &.{}, .value = .{ .list = list_items_b } };
+    const seqs = [_]ion.value.Element{ list_a, list_b };
+
+    const parse_parts = [_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .string = "1 2" } }};
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+
+    try ion.writer11.writeSystemMacroInvocationQualifiedMetaCanonical(std.testing.allocator, &out, &meta_args, .{});
+    try ion.writer11.writeSystemMacroInvocationQualifiedFlattenCanonical(std.testing.allocator, &out, &seqs, .{});
+    try ion.writer11.writeSystemMacroInvocationQualifiedParseIonCanonical(std.testing.allocator, &out, &parse_parts, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    const expected = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+    };
+    try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
+}
+
 test "ion 1.1 writer11 can emit qualified system set_macros and add_macros directives" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
