@@ -184,7 +184,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
 - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
-- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `170/170` tests).
+- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `171/171` tests).
 
 ### Skip list (currently empty)
 
@@ -304,10 +304,10 @@ Below is a tighter checklist for "spec completeness" work. These are not require
      - [ ] Full `(macro ...)` compilation, including nested shapes and tagless encodings.
      - [ ] Correct cardinality (`one`, `?`, `*`, `+`) across tagged and tagless parameters.
      - [ ] Recursive expansion semantics (termination rules, memoization/caching strategy).
-	   - [ ] Support more macro-shape decoding/encoding paths:
-	     - [ ] `ParamType.macro_shape` for decoding tagless args in `binary11` (`readArgValue(.macro_shape)` is currently unsupported).
-	     - [ ] More qualified system macro shapes (supported so far include `make_decimal`, `none`, `values`, `default`, `repeat`, `delta`, `sum`, `meta`, `flatten`, `annotate`, `make_string`, `make_symbol`, `make_blob`, `make_list`, `make_sexp`, `make_struct`, `make_field`, `make_timestamp`, and `parse_ion`).
-	   - Relevant files: `zig/src/ion/macro.zig`, `zig/src/ion/tdl_eval.zig`, `zig/src/conformance/runner.zig`, `zig/src/ion/binary11.zig`, `zig/src/ion/writer11.zig`.
+     - [ ] Support more macro-shape decoding/encoding paths:
+       - [ ] `ParamType.macro_shape` for tagless argument encodings in `binary11` (`readArgValue(.macro_shape)` / `readTaglessFrom(.macro_shape)` remain unsupported).
+       - [ ] More qualified system macro shapes (supported so far include `make_decimal`, `none`, `values`, `default`, `repeat`, `delta`, `sum`, `meta`, `flatten`, `annotate`, `make_string`, `make_symbol`, `make_blob`, `make_list`, `make_sexp`, `make_struct`, `make_field`, `make_timestamp`, and `parse_ion`).
+   - Relevant files: `zig/src/ion/macro.zig`, `zig/src/ion/tdl_eval.zig`, `zig/src/conformance/runner.zig`, `zig/src/ion/binary11.zig`, `zig/src/ion/writer11.zig`.
 
 3) Ion 1.1 writing (spec-complete)
    - [ ] Ion 1.1 text writer:

@@ -1521,7 +1521,12 @@ const Decoder = struct {
                 return self.expandMakeStruct();
             }
             if (std.mem.eql(u8, shape.name, "make_field")) {
-                return self.expandSystem16();
+                // `macro_shape` is name-based, not address-based; do not reuse the addr-16
+                // parse_ion/make_field overload logic here.
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
+                const first = try self.readValue();
+                return self.expandMakeFieldFrom(first);
             }
             if (std.mem.eql(u8, shape.name, "annotate")) {
                 return self.expandAnnotate();
@@ -1539,7 +1544,12 @@ const Decoder = struct {
                 return self.expandSum();
             }
             if (std.mem.eql(u8, shape.name, "parse_ion")) {
-                return self.expandSystem16();
+                // `macro_shape` is name-based, not address-based; do not reuse the addr-16
+                // parse_ion/make_field overload logic here.
+                const prev = self.pushInvokeCtx(.nested);
+                defer self.invoke_ctx = prev;
+                const first = try self.readValue();
+                return self.expandParseIonFrom(first);
             }
             if (std.mem.eql(u8, shape.name, "values")) {
                 return self.expandValues();
