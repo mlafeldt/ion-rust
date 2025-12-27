@@ -190,7 +190,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
 - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
-- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `188/188` tests).
+- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `189/189` tests).
 
 ### Skip list (currently empty)
 
@@ -235,7 +235,12 @@ you can avoid environment variables and in-stream inference by using:
 - `ion.parseDocumentBinary11WithOptions(..., .{ .sys_symtab11_variant = .ion_tests })`
 - `ion.parseDocumentBinary11WithOptions(..., .{ .sys_symtab11_variant = .ion_rust })`
 
-### 3) Ion 1.1 conformance: `ion-tests/conformance/**/*.ion` (full pass)
+For stricter validation (opt-in; defaults remain conformance-friendly):
+
+- `ion.parseDocumentBinary11WithOptions(..., .{ .strict_flex = true })` rejects non-minimal FlexInt/FlexUInt encodings.
+- `ion.parseDocumentBinary11WithOptions(..., .{ .strict_opcodes = true })` rejects known conformance opcode quirks (for example: `0x01` as an alternative tagged int(0) in some macro argument positions).
+
+### 4) Ion 1.1 conformance: `ion-tests/conformance/**/*.ion` (full pass)
 
 1) Files in suite: 55 (`.ion`)
 2) Current result in Zig:
@@ -251,7 +256,7 @@ you can avoid environment variables and in-stream inference by using:
    - The conformance runner's abstract evaluator supports the same system macro subset as the Ion 1.1 text parser (`none`, `values`, `default`, `repeat`, `sum`, `delta`, `meta`, `annotate`, `make_*`, `flatten`) so new conformance cases are less likely to require special-casing.
    - Passing `ion-tests/conformance` does not imply a complete Ion 1.1 implementation; it means the subset exercised by the suite is implemented.
 
-4) Conformance suite notes / workarounds
+5) Conformance suite notes / workarounds
 
 1) `ion-tests/conformance/system_macros/parse_ion.ion` includes malformed text fragments (missing closing `"`). The runner patches these inputs at runtime so the rest of the suite remains actionable.
 2) `ion-tests/conformance/tdl/for.ion` has an extra trailing `)` in some text fragments and an expectation mismatch around concatenated `text` fragments. The runner patches these at runtime to match the expected output.
