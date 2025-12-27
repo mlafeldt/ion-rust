@@ -177,6 +177,24 @@ test "zig ion serializeDocument binary_1_1 rejects SID-only symbols" {
     try std.testing.expectError(ion.IonError.InvalidIon, ion.serializeDocument(std.testing.allocator, .binary_1_1, elems));
 }
 
+test "zig ion serializeDocument binary_1_1 rejects SID-only user symbols in annotations" {
+    var anns = [_]ion.value.Symbol{.{ .sid = 200, .text = null }};
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = anns[0..], .value = .{ .int = .{ .small = 1 } } },
+    };
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.serializeDocument(std.testing.allocator, .binary_1_1, doc));
+}
+
+test "zig ion serializeDocument binary_1_1 rejects SID-only user symbols as struct field names" {
+    var fields = [_]ion.value.StructField{
+        .{ .name = .{ .sid = 200, .text = null }, .value = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } } },
+    };
+    const doc = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = fields[0..] } } },
+    };
+    try std.testing.expectError(ion.IonError.InvalidIon, ion.serializeDocument(std.testing.allocator, .binary_1_1, doc));
+}
+
 test "zig ion serializeDocument binary_1_1 uses system symbol addresses in module prelude" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
@@ -191,6 +209,18 @@ test "zig ion serializeDocument binary_1_1 uses system symbol addresses in modul
     // - symbols == 7
     try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x0F }) != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x07 }) != null);
+}
+
+test "zig ion serializeDocument binary_1_1 does not emit module prelude when unnecessary" {
+    const elems = &[_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = null, .text = "$ion" } } },
+    };
+    const bytes = try ion.serializeDocument(std.testing.allocator, .binary_1_1, elems);
+    defer std.testing.allocator.free(bytes);
+
+    // No user symbols appear in the stream, so `writeBinary11SelfContained` should not emit the
+    // `$ion::(module ...)` prelude (which contains the system symbol address for "module": EE 0F).
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x0F }) == null);
 }
 
 test "zig ion serializeDocument binary_1_1_raw does not emit module prelude" {
@@ -447,6 +477,29 @@ test "ion 1.1 writer11 long decimal uses 0xF7" {
 
     try std.testing.expect(bytes.len >= 5);
     try std.testing.expect(bytes[4] == 0xF7);
+
+    var parsed = try ion.parseDocument(allocator, bytes);
+    defer parsed.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
+}
+
+test "ion 1.1 writer11 encodes decimal negative zero marker" {
+    const allocator = std.testing.allocator;
+
+    const doc = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .decimal = .{ .is_negative = true, .coefficient = .{ .small = 0 }, .exponent = 0 } },
+    }};
+
+    const bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc, .{});
+    defer allocator.free(bytes);
+
+    // Decimal with exponent 0 emits FlexInt(0) = 0x01. Negative zero adds an extra 0x00 marker.
+    // This should produce a short decimal opcode with payload length 2 => 0x72.
+    try std.testing.expect(bytes.len >= 7);
+    try std.testing.expect(bytes[4] == 0x72);
+    try std.testing.expect(bytes[5] == 0x01);
+    try std.testing.expect(bytes[6] == 0x00);
 
     var parsed = try ion.parseDocument(allocator, bytes);
     defer parsed.deinit();
