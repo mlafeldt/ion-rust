@@ -1734,6 +1734,11 @@ pub fn writeSystemMacroInvocationQualifiedFlatten(
     // (flatten <sequence*>): conformance uses system macro address 19 (overloaded with set_symbols).
     //
     // If all args are unannotated text values, the decoder will treat address 19 as `set_symbols`.
+    //
+    // Note: ion-rust's system macro table uses address 5 for `flatten` and address 19 for
+    // `set_symbols`. Rejecting the conformance encoding here prevents the writer from emitting
+    // ambiguous bytes when `Options.sys_symtab11_variant == .ion_rust`.
+    if (effectiveSystemSymtab11Variant(options) == .ion_rust) return IonError.InvalidIon;
     return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 19, sequences, options);
 }
 
@@ -1885,6 +1890,11 @@ pub fn writeSystemMacroInvocationQualifiedParseIon(
     //
     // Note: address 16 is overloaded with make_field. The decoder selects parse_ion when the
     // first argument is a string/clob/blob value.
+    //
+    // Note: ion-rust's system macro table uses address 18 for `parse_ion` and address 16 for
+    // `make_field`. Rejecting the conformance encoding here prevents the writer from emitting
+    // ambiguous bytes when `Options.sys_symtab11_variant == .ion_rust`.
+    if (effectiveSystemSymtab11Variant(options) == .ion_rust) return IonError.InvalidIon;
     try appendByte(out, allocator, 0xEF);
     try appendByte(out, allocator, 0x10);
     try writeElement(allocator, out, options, bytes);
@@ -1951,6 +1961,11 @@ pub fn writeSystemMacroInvocationQualifiedMeta(
     //
     // The decoder disambiguates address 21: if all args are macro defs, it treats it as set_macros;
     // otherwise it treats it as meta. This writer does not attempt to validate the meta payload.
+    //
+    // Note: ion-rust's system macro table uses address 3 for `meta` and address 21 for
+    // `set_macros`. Rejecting the conformance encoding here prevents the writer from emitting
+    // ambiguous bytes when `Options.sys_symtab11_variant == .ion_rust`.
+    if (effectiveSystemSymtab11Variant(options) == .ion_rust) return IonError.InvalidIon;
     return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 21, args, options);
 }
 

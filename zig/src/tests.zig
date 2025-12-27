@@ -1736,6 +1736,30 @@ test "ion 1.1 writer11 can select canonical qualified macro addrs via sys_symtab
     try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
 }
 
+test "ion 1.1 writer11 rejects conformance-only qualified macro encodings under ion-rust variant" {
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+
+    const args = [_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } }};
+    const parse_arg: ion.value.Element = .{ .annotations = &.{}, .value = .{ .string = "1" } };
+
+    const opts: ion.writer11.Options = .{ .sys_symtab11_variant = .ion_rust };
+
+    try std.testing.expectError(
+        ion.IonError.InvalidIon,
+        ion.writer11.writeSystemMacroInvocationQualifiedMeta(std.testing.allocator, &out, &args, opts),
+    );
+    try std.testing.expectError(
+        ion.IonError.InvalidIon,
+        ion.writer11.writeSystemMacroInvocationQualifiedFlatten(std.testing.allocator, &out, &args, opts),
+    );
+    try std.testing.expectError(
+        ion.IonError.InvalidIon,
+        ion.writer11.writeSystemMacroInvocationQualifiedParseIon(std.testing.allocator, &out, parse_arg, opts),
+    );
+}
+
 test "ion 1.1 writer11 can emit qualified system set_macros and add_macros directives" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();
