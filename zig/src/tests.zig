@@ -5315,3 +5315,69 @@ test "ion 1.1 binary e-expression F5: flatten concatenates sequences" {
         try std.testing.expectEqual(@as(i128, @intCast(i + 1)), e.value.int.small);
     }
 }
+
+test "ion 1.1 binary e-expression F5: make_field produces a single-field struct" {
+    const params = [_]ion.macro.Param{
+        .{ .ty = .tagged, .card = .one, .name = "name", .shape = null },
+        .{ .ty = .tagged, .card = .one, .name = "value", .shape = null },
+    };
+
+    const name_args = [_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "a") } }};
+    const value_args = [_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } }};
+    const args_by_param = [_][]const ion.value.Element{ name_args[0..], value_args[0..] };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationLengthPrefixedWithParams(
+        std.testing.allocator,
+        &out,
+        16, // make_field
+        params[0..],
+        args_by_param[0..],
+        .{},
+    );
+
+    const bytes = try out.toOwnedSlice(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expectEqual(@as(usize, 1), parsed.len);
+    try std.testing.expect(parsed[0].annotations.len == 0);
+    try std.testing.expect(parsed[0].value == .@"struct");
+    const st = parsed[0].value.@"struct";
+    try std.testing.expectEqual(@as(usize, 1), st.fields.len);
+    try std.testing.expect(st.fields[0].name.text != null and std.mem.eql(u8, st.fields[0].name.text.?, "a"));
+    try std.testing.expect(st.fields[0].value.value == .int);
+    try std.testing.expectEqual(@as(i128, 1), st.fields[0].value.value.int.small);
+}
+
+test "ion 1.1 binary e-expression F5: parse_ion parses embedded Ion bytes" {
+    const args = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .string = "1 2" } },
+    };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationLengthPrefixedTaggedVariadic(
+        std.testing.allocator,
+        &out,
+        18, // parse_ion
+        args[0..],
+    );
+
+    const bytes = try out.toOwnedSlice(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+
+    var parsed_arena = try ion.value.Arena.init(std.testing.allocator);
+    defer parsed_arena.deinit();
+    const parsed = try ion.binary11.parseTopLevel(&parsed_arena, bytes);
+    try std.testing.expectEqual(@as(usize, 2), parsed.len);
+    try std.testing.expect(parsed[0].value == .int);
+    try std.testing.expect(parsed[1].value == .int);
+    try std.testing.expectEqual(@as(i128, 1), parsed[0].value.int.small);
+    try std.testing.expectEqual(@as(i128, 2), parsed[1].value.int.small);
+}

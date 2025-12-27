@@ -551,6 +551,45 @@ const Decoder = struct {
             }
         }.run;
 
+        const concatIonBytes = struct {
+            fn run(arena: *value.Arena, items: []const value.Element) IonError![]const u8 {
+                var parts = std.ArrayListUnmanaged([]const u8){};
+                defer parts.deinit(arena.allocator());
+                for (items) |e| {
+                    const b: []const u8 = switch (e.value) {
+                        .string => |s| s,
+                        .blob => |bb| bb,
+                        .clob => |bb| bb,
+                        else => return IonError.InvalidIon,
+                    };
+                    parts.append(arena.allocator(), b) catch return IonError.OutOfMemory;
+                }
+                var total: usize = 0;
+                for (parts.items) |b| total += b.len;
+                const buf = arena.allocator().alloc(u8, total) catch return IonError.OutOfMemory;
+                var i: usize = 0;
+                for (parts.items) |b| {
+                    if (b.len != 0) {
+                        @memcpy(buf[i .. i + b.len], b);
+                        i += b.len;
+                    }
+                }
+                return buf;
+            }
+        }.run;
+
+        const parseEmbedded = struct {
+            fn run(arena: *value.Arena, bytes: []const u8) IonError![]value.Element {
+                if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x00 and bytes[3] == 0xEA) {
+                    return ion.binary.parseTopLevel(arena, bytes);
+                }
+                if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA) {
+                    return ion.binary11.parseTopLevelWithMacroTable(arena, bytes, null);
+                }
+                return ion.text.parseTopLevelWithMacroTable(arena, bytes, null);
+            }
+        }.run;
+
         const flatten = struct {
             fn run(arena: *value.Arena, seqs: []const value.Element) IonError![]value.Element {
                 var out = std.ArrayListUnmanaged(value.Element){};
@@ -980,6 +1019,26 @@ const Decoder = struct {
                 const flat = try flatten(self.arena, bindings[0].values);
                 break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .sexp = flat } });
             },
+            16 => blk: {
+                const p = [_]ion.macro.Param{
+                    .{ .ty = .tagged, .card = .one, .name = "name", .shape = null },
+                    .{ .ty = .tagged, .card = .one, .name = "value", .shape = null },
+                };
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const name_elem = try bindingSingle(bindings[0]);
+                const val_elem = try bindingSingle(bindings[1]);
+
+                const name_sym: value.Symbol = switch (name_elem.value) {
+                    .string => |s| try value.makeSymbol(self.arena, s),
+                    .symbol => |s| s,
+                    else => return IonError.InvalidIon,
+                };
+
+                const fields = self.arena.allocator().alloc(value.StructField, 1) catch return IonError.OutOfMemory;
+                fields[0] = .{ .name = name_sym, .value = val_elem };
+                break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = fields } } });
+            },
             17 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "fields", .shape = null }};
                 const bindings = try sub.readLengthPrefixedArgBindings(&p);
@@ -994,6 +1053,13 @@ const Decoder = struct {
                 }
                 const fields = out_fields.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory;
                 break :blk try mkOne(self.arena, .{ .annotations = &.{}, .value = .{ .@"struct" = .{ .fields = fields } } });
+            },
+            18 => blk: {
+                const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "data", .shape = null }};
+                const bindings = try sub.readLengthPrefixedArgBindings(&p);
+                if (sub.i != sub.input.len) return IonError.InvalidIon;
+                const bytes = try concatIonBytes(self.arena, bindings[0].values);
+                break :blk try parseEmbedded(self.arena, bytes);
             },
             19 => blk: {
                 const p = [_]ion.macro.Param{.{ .ty = .tagged, .card = .zero_or_many, .name = "args", .shape = null }};
