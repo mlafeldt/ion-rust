@@ -1505,6 +1505,12 @@ const Decoder = struct {
             if (std.mem.eql(u8, shape.name, "make_blob")) {
                 return self.expandMakeBlob();
             }
+            if (std.mem.eql(u8, shape.name, "meta")) {
+                return self.expandMetaCanonicalQualified();
+            }
+            if (std.mem.eql(u8, shape.name, "flatten")) {
+                return self.expandFlattenCanonicalQualified();
+            }
             if (std.mem.eql(u8, shape.name, "make_list")) {
                 return self.expandMakeSequence(.list);
             }

@@ -2357,9 +2357,11 @@ fn writeMacroShapeArg(
             return;
         }
         if (std.mem.eql(u8, shape.name, "values") or
+            std.mem.eql(u8, shape.name, "meta") or
             std.mem.eql(u8, shape.name, "make_string") or
             std.mem.eql(u8, shape.name, "make_symbol") or
-            std.mem.eql(u8, shape.name, "make_blob"))
+            std.mem.eql(u8, shape.name, "make_blob") or
+            std.mem.eql(u8, shape.name, "flatten"))
         {
             // Payload encoding matches the qualified system macro invocation encoding (minus the
             // leading `0xEF <addr>`):
