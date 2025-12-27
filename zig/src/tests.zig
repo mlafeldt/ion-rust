@@ -575,6 +575,155 @@ test "ion 1.1 writer11 encodes system symbol field name as FlexSym escape" {
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed.elements));
 }
 
+test "ion 1.1 writer11 timestamp short microseconds/nanoseconds opcodes" {
+    const allocator = std.testing.allocator;
+
+    const base: ion.value.Timestamp = .{
+        .year = 2020,
+        .month = 1,
+        .day = 2,
+        .hour = 3,
+        .minute = 4,
+        .second = 5,
+        .fractional = null,
+        .offset_minutes = null, // unknown offset
+        .precision = .fractional,
+    };
+
+    const ts_us: ion.value.Timestamp = blk: {
+        var ts = base;
+        ts.fractional = .{ .is_negative = false, .coefficient = .{ .small = 123_456 }, .exponent = -6 };
+        break :blk ts;
+    };
+    const doc_us = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .timestamp = ts_us } }};
+    const us_bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc_us, .{});
+    defer allocator.free(us_bytes);
+    try std.testing.expect(us_bytes.len >= 5);
+    try std.testing.expect(us_bytes[4] == 0x86);
+    var parsed_us = try ion.parseDocument(allocator, us_bytes);
+    defer parsed_us.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_us, parsed_us.elements));
+
+    const ts_ns: ion.value.Timestamp = blk: {
+        var ts = base;
+        ts.fractional = .{ .is_negative = false, .coefficient = .{ .small = 987_654_321 }, .exponent = -9 };
+        break :blk ts;
+    };
+    const doc_ns = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .timestamp = ts_ns } }};
+    const ns_bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc_ns, .{});
+    defer allocator.free(ns_bytes);
+    try std.testing.expect(ns_bytes.len >= 5);
+    try std.testing.expect(ns_bytes[4] == 0x87);
+    var parsed_ns = try ion.parseDocument(allocator, ns_bytes);
+    defer parsed_ns.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_ns, parsed_ns.elements));
+}
+
+test "ion 1.1 writer11 timestamp known offset short opcodes" {
+    const allocator = std.testing.allocator;
+
+    const ts_min: ion.value.Timestamp = .{
+        .year = 2020,
+        .month = 1,
+        .day = 2,
+        .hour = 3,
+        .minute = 4,
+        .second = null,
+        .fractional = null,
+        .offset_minutes = 0, // UTC
+        .precision = .minute,
+    };
+    const doc_min = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .timestamp = ts_min } }};
+    const min_bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc_min, .{});
+    defer allocator.free(min_bytes);
+    try std.testing.expect(min_bytes.len >= 5);
+    try std.testing.expect(min_bytes[4] == 0x88);
+    var parsed_min = try ion.parseDocument(allocator, min_bytes);
+    defer parsed_min.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_min, parsed_min.elements));
+
+    const ts_sec: ion.value.Timestamp = .{
+        .year = 2020,
+        .month = 1,
+        .day = 2,
+        .hour = 3,
+        .minute = 4,
+        .second = 5,
+        .fractional = null,
+        .offset_minutes = 0, // UTC
+        .precision = .second,
+    };
+    const doc_sec = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .timestamp = ts_sec } }};
+    const sec_bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc_sec, .{});
+    defer allocator.free(sec_bytes);
+    try std.testing.expect(sec_bytes.len >= 5);
+    try std.testing.expect(sec_bytes[4] == 0x89);
+    var parsed_sec = try ion.parseDocument(allocator, sec_bytes);
+    defer parsed_sec.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_sec, parsed_sec.elements));
+
+    const ts_ms: ion.value.Timestamp = .{
+        .year = 2020,
+        .month = 1,
+        .day = 2,
+        .hour = 3,
+        .minute = 4,
+        .second = 5,
+        .fractional = .{ .is_negative = false, .coefficient = .{ .small = 999 }, .exponent = -3 },
+        .offset_minutes = 0, // UTC
+        .precision = .fractional,
+    };
+    const doc_ms = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .timestamp = ts_ms } }};
+    const ms_bytes = try ion.writer11.writeBinary11WithOptions(allocator, doc_ms, .{});
+    defer allocator.free(ms_bytes);
+    try std.testing.expect(ms_bytes.len >= 5);
+    try std.testing.expect(ms_bytes[4] == 0x8A);
+    var parsed_ms = try ion.parseDocument(allocator, ms_bytes);
+    defer parsed_ms.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_ms, parsed_ms.elements));
+}
+
+test "ion 1.1 writer11 float opcode selection" {
+    const allocator = std.testing.allocator;
+
+    const doc_f16 = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .float = 1.5 },
+    }};
+    const bytes_f16 = try ion.writer11.writeBinary11WithOptions(allocator, doc_f16, .{});
+    defer allocator.free(bytes_f16);
+    try std.testing.expect(bytes_f16.len >= 5);
+    try std.testing.expect(bytes_f16[4] == 0x6B);
+    var parsed_f16 = try ion.parseDocument(allocator, bytes_f16);
+    defer parsed_f16.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_f16, parsed_f16.elements));
+
+    const f32_exact: f32 = @bitCast(@as(u32, 0x3F800001)); // 1.0000001192092896
+    const doc_f32 = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .float = @floatCast(f32_exact) },
+    }};
+    const bytes_f32 = try ion.writer11.writeBinary11WithOptions(allocator, doc_f32, .{});
+    defer allocator.free(bytes_f32);
+    try std.testing.expect(bytes_f32.len >= 5);
+    try std.testing.expect(bytes_f32[4] == 0x6C);
+    var parsed_f32 = try ion.parseDocument(allocator, bytes_f32);
+    defer parsed_f32.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_f32, parsed_f32.elements));
+
+    const doc_inf = &[_]ion.value.Element{.{
+        .annotations = &.{},
+        .value = .{ .float = std.math.inf(f64) },
+    }};
+    const bytes_inf = try ion.writer11.writeBinary11WithOptions(allocator, doc_inf, .{});
+    defer allocator.free(bytes_inf);
+    try std.testing.expect(bytes_inf.len >= 5);
+    try std.testing.expect(bytes_inf[4] == 0x6D);
+    var parsed_inf = try ion.parseDocument(allocator, bytes_inf);
+    defer parsed_inf.deinit();
+    try std.testing.expect(ion.eq.ionEqElements(doc_inf, parsed_inf.elements));
+}
+
 test "zig ion serializeDocument binary_1_1 inlines system symbols by SID" {
     const elems = &[_]ion.value.Element{
         .{ .annotations = &.{}, .value = .{ .symbol = .{ .sid = 1, .text = null } } }, // $ion
