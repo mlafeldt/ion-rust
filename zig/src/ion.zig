@@ -49,6 +49,38 @@ pub fn parseDocument(allocator: Allocator, bytes: []const u8) IonError!Document 
     return parseDocumentWithMacroTable(allocator, bytes, null);
 }
 
+pub const ParseOptions = struct {
+    /// Optional macro table for decoding Ion 1.1 binary e-expressions.
+    mactab: ?*const macro.MacroTable = null,
+    /// Optional override for the Ion 1.1 system symbol table variant when parsing Ion 1.1 binary.
+    /// When null, the parser may use environment configuration and/or in-stream inference.
+    sys_symtab11_variant: ?symtab.SystemSymtab11Variant = null,
+};
+
+/// Parses a byte slice as Ion (IVM-detected), with optional Ion 1.1 parsing configuration.
+pub fn parseDocumentWithOptions(allocator: Allocator, bytes: []const u8, options: ParseOptions) IonError!Document {
+    var arena = try value.Arena.init(allocator);
+    errdefer arena.deinit();
+
+    if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x00 and bytes[3] == 0xEA) {
+        const elements = try binary.parseTopLevel(&arena, bytes);
+        return .{ .arena = arena, .elements = elements };
+    } else if (bytes.len >= 4 and bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA) {
+        if (options.sys_symtab11_variant) |variant| {
+            const res = try binary11.parseTopLevelWithMacroTableAndStateWithSystemSymtabVariant(&arena, bytes, options.mactab, variant);
+            return .{ .arena = arena, .elements = res.elements };
+        }
+        const elements = try binary11.parseTopLevelWithMacroTable(&arena, bytes, options.mactab);
+        return .{ .arena = arena, .elements = elements };
+    } else {
+        const decoded = try decodeTextToUtf8(allocator, bytes);
+        defer if (decoded) |b| allocator.free(b);
+        const input = if (decoded) |b| b else bytes;
+        const elements = try text.parseTopLevelWithMacroTable(&arena, input, options.mactab);
+        return .{ .arena = arena, .elements = elements };
+    }
+}
+
 /// Parses a byte slice as Ion, optionally using a conformance-provided Ion 1.1 macro table.
 ///
 /// This is currently only used by the conformance runner to interpret Ion 1.1 binary e-expressions
