@@ -39,6 +39,15 @@ pub const Options = struct {
     /// When absent, writing `macro_shape` arguments is unsupported.
     mactab: ?*const ion.macro.MacroTable = null,
 
+    /// Overrides the Ion 1.1 system symbol table variant used for:
+    /// - mapping system symbol text <-> system symbol addresses (0xEE)
+    /// - emitting `$ion::(module ...)` clauses (`symbols` vs `symbol_table`)
+    /// - choosing canonical system macro addresses when `writer11` provides both
+    ///
+    /// When null, the variant is chosen by `symtab.systemSymtab11Variant()` (env-driven in
+    /// non-test builds; forced to `ion_tests` in Zig tests).
+    sys_symtab11_variant: ?symtab.SystemSymtab11Variant = null,
+
     /// When emitting a self-contained stream (via `writeBinary11SelfContainedWithOptions`),
     /// controls whether the module directive prelude includes a `(macro_table ...)` clause
     /// derived from `mactab`.
@@ -77,6 +86,31 @@ pub const Options = struct {
     arg_group_chunk_max_bytes: usize = 4096,
 };
 
+fn effectiveSystemSymtab11Variant(options: Options) symtab.SystemSymtab11Variant {
+    return options.sys_symtab11_variant orelse symtab.systemSymtab11Variant();
+}
+
+fn systemSymtab11MaxId(options: Options) u32 {
+    return switch (effectiveSystemSymtab11Variant(options)) {
+        .ion_tests => symtab.SystemSymtab11.max_id,
+        .ion_rust => symtab.SystemSymtab11IonRust.max_id,
+    };
+}
+
+fn systemSymtab11TextForSid(options: Options, sid: u32) ?[]const u8 {
+    return switch (effectiveSystemSymtab11Variant(options)) {
+        .ion_tests => symtab.SystemSymtab11.textForSid(sid),
+        .ion_rust => symtab.SystemSymtab11IonRust.textForSid(sid),
+    };
+}
+
+fn systemSymtab11SidForText(options: Options, text: []const u8) ?u32 {
+    return switch (effectiveSystemSymtab11Variant(options)) {
+        .ion_tests => symtab.SystemSymtab11.sidForText(text),
+        .ion_rust => symtab.SystemSymtab11IonRust.sidForText(text),
+    };
+}
+
 pub fn writeBinary11(allocator: std.mem.Allocator, doc: []const value.Element) IonError![]u8 {
     return writeBinary11WithOptions(allocator, doc, .{});
 }
@@ -108,7 +142,7 @@ pub fn writeBinary11SelfContainedWithOptions(allocator: std.mem.Allocator, doc: 
     var user_texts = std.ArrayListUnmanaged([]const u8){};
     defer user_texts.deinit(allocator);
 
-    try collectUserSymbolTexts(allocator, doc, &map, &user_texts);
+    try collectUserSymbolTexts(allocator, doc, options, &map, &user_texts);
 
     var out = std.ArrayListUnmanaged(u8){};
     errdefer out.deinit(allocator);
@@ -118,7 +152,7 @@ pub fn writeBinary11SelfContainedWithOptions(allocator: std.mem.Allocator, doc: 
 
     if (user_texts.items.len != 0 or (options.emit_macro_table_prelude and options.mactab != null)) {
         const tab = if (options.emit_macro_table_prelude) options.mactab else null;
-        try writeIonSystemModuleDirectivePrelude(allocator, &out, user_texts.items, tab);
+        try writeIonSystemModuleDirectivePrelude(allocator, &out, user_texts.items, tab, options);
     }
 
     var opts = options;
@@ -134,6 +168,7 @@ pub fn writeIonSystemModuleDirectivePrelude(
     out: *std.ArrayListUnmanaged(u8),
     user_symbol_texts: []const []const u8,
     mactab: ?*const ion.macro.MacroTable,
+    options: Options,
 ) IonError!void {
     // `$ion::(module _ (<symbols-clause> _ <text-or-null>*))`
     //
@@ -142,7 +177,7 @@ pub fn writeIonSystemModuleDirectivePrelude(
     const ann = [_]value.Symbol{value.makeSymbolId(null, "$ion")};
 
     const sym_module: value.Symbol = value.makeSymbolId(null, "module");
-    const symbols_clause_name: []const u8 = switch (symtab.systemSymtab11Variant()) {
+    const symbols_clause_name: []const u8 = switch (effectiveSystemSymtab11Variant(options)) {
         .ion_tests => "symbols",
         .ion_rust => "symbol_table",
     };
@@ -304,8 +339,10 @@ pub fn writeIonSystemModuleDirectivePrelude(
 
     // Use system symbol addresses (0xEE) when possible. This keeps the output compact, but note
     // that the Ion 1.1 system symbol table differs between `ion-tests` and ion-rust (see
-    // `symtab.systemSymtab11Variant()` / `ION_ZIG_SYSTEM_SYMTAB11`).
-    try writeElement(allocator, out, .{ .symbol_encoding = .addresses }, elem);
+    // `Options.sys_symtab11_variant` / `symtab.systemSymtab11Variant()` / `ION_ZIG_SYSTEM_SYMTAB11`).
+    var opts = options;
+    opts.symbol_encoding = .addresses;
+    try writeElement(allocator, out, opts, elem);
 }
 
 pub fn writeSetSymbolsDirectiveText(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), texts: []const []const u8) IonError!void {
@@ -943,7 +980,7 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
     if (s.text) |t| {
         if (!std.unicode.utf8ValidateSlice(t)) return IonError.InvalidIon;
         if (options.symbol_encoding == .addresses) {
-            if (symtab.systemSymtab11SidForText(t)) |sys_sid| {
+            if (systemSymtab11SidForText(options, t)) |sys_sid| {
                 if (sys_sid <= 0xFF) {
                     // System symbol address: EE <addr>
                     try appendByte(out, allocator, 0xEE);
@@ -973,8 +1010,8 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
         // We don't have module/symbol-address state in this mode, but we can still inline known
         // Ion 1.1 system symbol texts by SID.
         if (s.sid) |sid| {
-            if (sid > 0 and sid <= symtab.systemSymtab11MaxId()) {
-                if (symtab.systemSymtab11TextForSid(sid)) |sys_text| {
+            if (sid > 0 and sid <= systemSymtab11MaxId(options)) {
+                if (systemSymtab11TextForSid(options, sid)) |sys_text| {
                     if (!std.unicode.utf8ValidateSlice(sys_text)) return IonError.InvalidIon;
                     if (sys_text.len <= 15) {
                         try appendByte(out, allocator, 0xA0 + @as(u8, @intCast(sys_text.len)));
@@ -997,7 +1034,7 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
 
         // If the caller provided an SID-only system symbol, encode it as a system symbol address.
         // This keeps the output self-contained and avoids depending on ambient module state.
-        if (sid > 0 and sid <= symtab.systemSymtab11MaxId() and sid <= 0xFF) {
+        if (sid > 0 and sid <= systemSymtab11MaxId(options) and sid <= 0xFF) {
             try appendByte(out, allocator, 0xEE);
             try appendByte(out, allocator, @intCast(sid));
             return;
@@ -1223,7 +1260,7 @@ fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
     if (sym.text) |t| {
         if (!std.unicode.utf8ValidateSlice(t)) return IonError.InvalidIon;
         if (options.symbol_encoding == .addresses) {
-            if (symtab.systemSymtab11SidForText(t)) |sys_sid| {
+            if (systemSymtab11SidForText(options, t)) |sys_sid| {
                 if (sys_sid >= 1 and sys_sid <= 0x80) {
                     // FlexSym escape: FlexInt(0) then 0x60 + <addr>.
                     try writeFlexIntShift1(out, allocator, 0);
@@ -1245,8 +1282,8 @@ fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
     }
     if (sym.sid) |sid| {
         if (options.symbol_encoding == .inline_text_only) {
-            if (sid > 0 and sid <= symtab.systemSymtab11MaxId()) {
-                const sys_text = symtab.systemSymtab11TextForSid(sid) orelse return IonError.InvalidIon;
+            if (sid > 0 and sid <= systemSymtab11MaxId(options)) {
+                const sys_text = systemSymtab11TextForSid(options, sid) orelse return IonError.InvalidIon;
                 if (!std.unicode.utf8ValidateSlice(sys_text)) return IonError.InvalidIon;
                 try writeFlexIntShift1(out, allocator, -@as(i64, @intCast(sys_text.len)));
                 try appendSlice(out, allocator, sys_text);
@@ -1658,6 +1695,18 @@ pub fn writeSystemMacroInvocationQualifiedFlattenCanonical(
     return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 5, sequences, options);
 }
 
+pub fn writeSystemMacroInvocationQualifiedFlattenByVariant(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    sequences: []const value.Element,
+    options: Options,
+) IonError!void {
+    return switch (effectiveSystemSymtab11Variant(options)) {
+        .ion_tests => writeSystemMacroInvocationQualifiedFlatten(allocator, out, sequences, options),
+        .ion_rust => writeSystemMacroInvocationQualifiedFlattenCanonical(allocator, out, sequences, options),
+    };
+}
+
 pub fn writeSystemMacroInvocationQualifiedSetSymbolsDirectiveText(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
@@ -1799,6 +1848,21 @@ pub fn writeSystemMacroInvocationQualifiedParseIonCanonical(
     return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 18, parts, options);
 }
 
+pub fn writeSystemMacroInvocationQualifiedParseIonByVariant(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    parts: []const value.Element,
+    options: Options,
+) IonError!void {
+    return switch (effectiveSystemSymtab11Variant(options)) {
+        .ion_tests => blk: {
+            if (parts.len != 1) return IonError.InvalidIon;
+            break :blk writeSystemMacroInvocationQualifiedParseIon(allocator, out, parts[0], options);
+        },
+        .ion_rust => writeSystemMacroInvocationQualifiedParseIonCanonical(allocator, out, parts, options),
+    };
+}
+
 pub fn writeSystemMacroInvocationQualifiedMakeField(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
@@ -1846,6 +1910,18 @@ pub fn writeSystemMacroInvocationQualifiedMetaCanonical(
 ) IonError!void {
     // Canonical (ion-rust): (meta <expr*>): system macro address 3.
     return writeSystemMacroInvocationQualifiedTaggedGroup(allocator, out, 3, args, options);
+}
+
+pub fn writeSystemMacroInvocationQualifiedMetaByVariant(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    args: []const value.Element,
+    options: Options,
+) IonError!void {
+    return switch (effectiveSystemSymtab11Variant(options)) {
+        .ion_tests => writeSystemMacroInvocationQualifiedMeta(allocator, out, args, options),
+        .ion_rust => writeSystemMacroInvocationQualifiedMetaCanonical(allocator, out, args, options),
+    };
 }
 
 pub fn writeMacroInvocationLengthPrefixedWithParams(
@@ -2564,14 +2640,15 @@ fn intToI64(v: value.Int) IonError!i64 {
 fn collectUserSymbolTexts(
     allocator: std.mem.Allocator,
     elems: []const value.Element,
+    options: Options,
     map: *std.StringHashMapUnmanaged(u32),
     out_texts: *std.ArrayListUnmanaged([]const u8),
 ) IonError!void {
     var next_sid: u32 = 1;
 
     const addText = struct {
-        fn run(alloc: std.mem.Allocator, m: *std.StringHashMapUnmanaged(u32), texts: *std.ArrayListUnmanaged([]const u8), next: *u32, t: []const u8) IonError!void {
-            if (symtab.systemSymtab11SidForText(t) != null) return;
+        fn run(alloc: std.mem.Allocator, opts: Options, m: *std.StringHashMapUnmanaged(u32), texts: *std.ArrayListUnmanaged([]const u8), next: *u32, t: []const u8) IonError!void {
+            if (systemSymtab11SidForText(opts, t) != null) return;
             if (m.contains(t)) return;
             m.put(alloc, t, next.*) catch return IonError.OutOfMemory;
             texts.append(alloc, t) catch return IonError.OutOfMemory;
@@ -2580,13 +2657,13 @@ fn collectUserSymbolTexts(
     }.run;
 
     const validateSidOnly = struct {
-        fn run(sym: value.Symbol) IonError!void {
+        fn run(opts: Options, sym: value.Symbol) IonError!void {
             if (sym.text != null) return;
             if (sym.sid) |sid| {
                 // `$0` is a well-known "unknown symbol" sentinel and does not require text.
                 if (sid == 0) return;
                 // Allow SID-only system symbols; everything else requires text for self-contained output.
-                if (sid > 0 and sid <= symtab.systemSymtab11MaxId()) return;
+                if (sid > 0 and sid <= systemSymtab11MaxId(opts)) return;
                 return IonError.InvalidIon;
             }
             return IonError.InvalidIon;
@@ -2596,24 +2673,25 @@ fn collectUserSymbolTexts(
     const walkElement = struct {
         fn run(
             alloc: std.mem.Allocator,
+            opts: Options,
             m: *std.StringHashMapUnmanaged(u32),
             texts: *std.ArrayListUnmanaged([]const u8),
             next: *u32,
             e: value.Element,
         ) IonError!void {
             for (e.annotations) |a| {
-                if (a.text) |t| try addText(alloc, m, texts, next, t) else try validateSidOnly(a);
+                if (a.text) |t| try addText(alloc, opts, m, texts, next, t) else try validateSidOnly(opts, a);
             }
             switch (e.value) {
                 .symbol => |s| {
-                    if (s.text) |t| try addText(alloc, m, texts, next, t) else try validateSidOnly(s);
+                    if (s.text) |t| try addText(alloc, opts, m, texts, next, t) else try validateSidOnly(opts, s);
                 },
-                .list => |items| for (items) |child| try run(alloc, m, texts, next, child),
-                .sexp => |items| for (items) |child| try run(alloc, m, texts, next, child),
+                .list => |items| for (items) |child| try run(alloc, opts, m, texts, next, child),
+                .sexp => |items| for (items) |child| try run(alloc, opts, m, texts, next, child),
                 .@"struct" => |st| {
                     for (st.fields) |f| {
-                        if (f.name.text) |t| try addText(alloc, m, texts, next, t) else try validateSidOnly(f.name);
-                        try run(alloc, m, texts, next, f.value);
+                        if (f.name.text) |t| try addText(alloc, opts, m, texts, next, t) else try validateSidOnly(opts, f.name);
+                        try run(alloc, opts, m, texts, next, f.value);
                     }
                 },
                 .null, .bool, .int, .float, .decimal, .timestamp, .string, .blob, .clob => {},
@@ -2621,7 +2699,7 @@ fn collectUserSymbolTexts(
         }
     }.run;
 
-    for (elems) |e| try walkElement(allocator, map, out_texts, &next_sid, e);
+    for (elems) |e| try walkElement(allocator, options, map, out_texts, &next_sid, e);
 }
 
 fn twosComplementIntBytesLe(allocator: std.mem.Allocator, i: value.Int) IonError![]u8 {

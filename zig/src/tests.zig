@@ -1029,6 +1029,20 @@ test "ion 1.1 binary can infer ion-rust system symbols from module head" {
     try std.testing.expectEqualStrings("module", res.elements[0].value.symbol.text orelse return error.TestExpectedEqual);
 }
 
+test "ion 1.1 writer11 self-contained module prelude can use ion-rust system symbols" {
+    const allocator = std.testing.allocator;
+
+    // Force emission of the module prelude by including a user symbol.
+    const doc = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "a") } }};
+
+    const bytes = try ion.writer11.writeBinary11SelfContainedWithOptions(allocator, doc, .{ .sys_symtab11_variant = .ion_rust });
+    defer allocator.free(bytes);
+
+    // Under the ion-rust system symbol table, the module prelude uses the `symbol_table` clause,
+    // which is system symbol address 15.
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x0F }) != null);
+}
+
 test "ion 1.1 writer11 can emit delimited tagged argument groups" {
     const allocator = std.testing.allocator;
 
@@ -1672,6 +1686,44 @@ test "ion 1.1 writer11 can emit canonical qualified meta/flatten/parse_ion helpe
     try ion.writer11.writeSystemMacroInvocationQualifiedMetaCanonical(std.testing.allocator, &out, &meta_args, .{});
     try ion.writer11.writeSystemMacroInvocationQualifiedFlattenCanonical(std.testing.allocator, &out, &seqs, .{});
     try ion.writer11.writeSystemMacroInvocationQualifiedParseIonCanonical(std.testing.allocator, &out, &parse_parts, .{});
+
+    const elems = try ion.binary11.parseTopLevel(&arena, out.items);
+    const expected = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+    };
+    try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
+}
+
+test "ion 1.1 writer11 can select canonical qualified macro addrs via sys_symtab11_variant" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const meta_args = [_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } }};
+
+    const list_items_a = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    list_items_a[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } };
+    list_items_a[1] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } };
+    const list_a: ion.value.Element = .{ .annotations = &.{}, .value = .{ .list = list_items_a } };
+
+    const list_items_b = arena.allocator().alloc(ion.value.Element, 1) catch return ion.IonError.OutOfMemory;
+    list_items_b[0] = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 3 } } };
+    const list_b: ion.value.Element = .{ .annotations = &.{}, .value = .{ .list = list_items_b } };
+    const seqs = [_]ion.value.Element{ list_a, list_b };
+
+    const parse_parts = [_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .string = "1 2" } }};
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+
+    const opts: ion.writer11.Options = .{ .sys_symtab11_variant = .ion_rust };
+    try ion.writer11.writeSystemMacroInvocationQualifiedMetaByVariant(std.testing.allocator, &out, &meta_args, opts);
+    try ion.writer11.writeSystemMacroInvocationQualifiedFlattenByVariant(std.testing.allocator, &out, &seqs, opts);
+    try ion.writer11.writeSystemMacroInvocationQualifiedParseIonByVariant(std.testing.allocator, &out, &parse_parts, opts);
 
     const elems = try ion.binary11.parseTopLevel(&arena, out.items);
     const expected = [_]ion.value.Element{
@@ -5677,7 +5729,7 @@ test "ion 1.1 binary module macro_table clause enables user macro invocation" {
     defer out.deinit(std.testing.allocator);
 
     try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
-    try ion.writer11.writeIonSystemModuleDirectivePrelude(std.testing.allocator, &out, &.{}, &tab);
+    try ion.writer11.writeIonSystemModuleDirectivePrelude(std.testing.allocator, &out, &.{}, &tab, .{});
     try ion.writer11.writeUserMacroInvocationAtAddressWithParams(
         std.testing.allocator,
         &out,
