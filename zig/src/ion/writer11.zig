@@ -2997,3 +2997,62 @@ fn appendByte(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, b:
 fn appendSlice(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, bytes: []const u8) IonError!void {
     out.appendSlice(allocator, bytes) catch return IonError.OutOfMemory;
 }
+
+test "writer11 FlexUInt encodings match ion-rust" {
+    const alloc = std.testing.allocator;
+
+    const Case = struct { v: usize, enc: []const u8 };
+    const cases = [_]Case{
+        .{ .v = 0, .enc = &.{0b00000001} },
+        .{ .v = 1, .enc = &.{0b00000011} },
+        .{ .v = 2, .enc = &.{0b00000101} },
+        .{ .v = 3, .enc = &.{0b00000111} },
+        .{ .v = 4, .enc = &.{0b00001001} },
+        .{ .v = 5, .enc = &.{0b00001011} },
+        .{ .v = 14, .enc = &.{0b00011101} },
+        .{ .v = 63, .enc = &.{0b01111111} },
+        .{ .v = 64, .enc = &.{0b10000001} },
+        .{ .v = 127, .enc = &.{0b11111111} },
+        .{ .v = 128, .enc = &.{ 0b00000010, 0b00000010 } },
+        .{ .v = 729, .enc = &.{ 0b01100110, 0b00001011 } },
+        .{ .v = 16383, .enc = &.{ 0b11111110, 0b11111111 } },
+        .{ .v = 16384, .enc = &.{ 0b00000100, 0b00000000, 0b00000010 } },
+    };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(alloc);
+
+    for (cases) |c| {
+        out.clearRetainingCapacity();
+        try writeFlexUIntShift1(&out, alloc, c.v);
+        try std.testing.expectEqualSlices(u8, c.enc, out.items);
+    }
+}
+
+test "writer11 FlexInt encodings match ion-rust" {
+    const alloc = std.testing.allocator;
+
+    const Case = struct { v: i64, enc: []const u8 };
+    const cases = [_]Case{
+        .{ .v = 0, .enc = &.{0b00000001} },
+        .{ .v = 1, .enc = &.{0b00000011} },
+        .{ .v = 63, .enc = &.{0b01111111} },
+        .{ .v = 64, .enc = &.{ 0b00000010, 0b00000001 } },
+        .{ .v = 729, .enc = &.{ 0b01100110, 0b00001011 } },
+        .{ .v = 9223372036854775807, .enc = &.{ 0b00000000, 0b11111110, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b00000001 } },
+        .{ .v = -1, .enc = &.{0b11111111} },
+        .{ .v = -2, .enc = &.{0b11111101} },
+        .{ .v = -64, .enc = &.{0b10000001} },
+        .{ .v = -65, .enc = &.{ 0b11111110, 0b11111110 } },
+        .{ .v = -729, .enc = &.{ 0b10011110, 0b11110100 } },
+    };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(alloc);
+
+    for (cases) |c| {
+        out.clearRetainingCapacity();
+        try writeFlexIntShift1(&out, alloc, c.v);
+        try std.testing.expectEqualSlices(u8, c.enc, out.items);
+    }
+}
