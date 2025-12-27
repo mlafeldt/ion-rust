@@ -225,6 +225,8 @@ pub const SystemSymtab11IonRust = struct {
 pub const SystemSymtab11Variant = enum { ion_tests, ion_rust };
 
 pub fn systemSymtab11Variant() SystemSymtab11Variant {
+    // Keep test behavior stable regardless of ambient environment variables.
+    if (@import("builtin").is_test) return .ion_tests;
     const raw = std.posix.getenv("ION_ZIG_SYSTEM_SYMTAB11") orelse return .ion_tests;
     if (std.mem.eql(u8, raw, "ion-rust") or std.mem.eql(u8, raw, "ion_rust")) return .ion_rust;
     if (std.mem.eql(u8, raw, "ion-tests") or std.mem.eql(u8, raw, "ion_tests")) return .ion_tests;
