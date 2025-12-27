@@ -4100,6 +4100,28 @@ test "ion 1.1 binary strict_flex rejects non-minimal FlexUInt/FlexInt encodings"
     );
 }
 
+test "ion 1.1 binary strict_opcodes rejects conformance opcode quirks" {
+    const allocator = std.testing.allocator;
+
+    // Conformance historically accepts `0x01` as an alternative tagged encoding for int(0)
+    // inside system macro invocation arguments (e.g. `(:make_decimal 0 0)`).
+    //
+    // Strict opcode mode rejects this quirk as invalid Ion 1.1 binary.
+    const bytes = &[_]u8{ 0xE0, 0x01, 0x01, 0xEA, 0xEF, 0x0B, 0x01, 0x01 };
+    {
+        var doc = try ion.parseDocument(allocator, bytes);
+        defer doc.deinit();
+        try std.testing.expectEqual(@as(usize, 1), doc.elements.len);
+        try std.testing.expect(doc.elements[0].value == .decimal);
+        try std.testing.expectEqual(@as(i32, 0), doc.elements[0].value.decimal.exponent);
+        try std.testing.expectEqual(@as(i128, 0), doc.elements[0].value.decimal.coefficient.small);
+    }
+    try std.testing.expectError(
+        ion.IonError.InvalidIon,
+        ion.parseDocumentBinary11WithOptions(allocator, bytes, .{ .strict_opcodes = true }),
+    );
+}
+
 test "ion 1.1 binary e-expression 12-bit address (minimal)" {
     // Minimal coverage for the EExpressionWith12BitAddress encoding (0x40..0x4F).
     // This uses a synthetic user macro at address 64 that expands to its single argument.

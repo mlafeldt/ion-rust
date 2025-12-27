@@ -64,6 +64,10 @@ pub const ParseOptions = struct {
     /// Note: `ion-tests` (especially conformance) intentionally uses non-canonical Flex encodings,
     /// so the default is `false` to keep the suite green.
     strict_flex: bool = false,
+    /// When true, rejects conformance-driven opcode quirks that are not part of the Ion 1.1 binary
+    /// opcode table (for example the `0x01` "tagged int 0" shortcut used by some conformance
+    /// fixtures).
+    strict_opcodes: bool = false,
 };
 
 /// Parses a byte slice as Ion (IVM-detected), with optional Ion 1.1 parsing configuration.
@@ -81,11 +85,16 @@ pub fn parseDocumentWithOptions(allocator: Allocator, bytes: []const u8, options
                 bytes,
                 options.mactab,
                 variant,
-                .{ .strict_flex = options.strict_flex },
+                .{ .strict_flex = options.strict_flex, .strict_opcodes = options.strict_opcodes },
             );
             return .{ .arena = arena, .elements = res.elements };
         }
-        const res = try binary11.parseTopLevelWithMacroTableAndStateWithOptions(&arena, bytes, options.mactab, .{ .strict_flex = options.strict_flex });
+        const res = try binary11.parseTopLevelWithMacroTableAndStateWithOptions(
+            &arena,
+            bytes,
+            options.mactab,
+            .{ .strict_flex = options.strict_flex, .strict_opcodes = options.strict_opcodes },
+        );
         return .{ .arena = arena, .elements = res.elements };
     } else {
         const decoded = try decodeTextToUtf8(allocator, bytes);
@@ -151,6 +160,10 @@ pub const Binary11ParseOptions = struct {
     /// Note: `ion-tests` (especially conformance) intentionally uses non-canonical Flex encodings,
     /// so the default is `false` to keep the suite green.
     strict_flex: bool = false,
+    /// When true, rejects conformance-driven opcode quirks that are not part of the Ion 1.1 binary
+    /// opcode table (for example the `0x01` "tagged int 0" shortcut used by some conformance
+    /// fixtures).
+    strict_opcodes: bool = false,
 };
 
 /// Parses an Ion 1.1 binary stream that begins with the Ion 1.1 IVM (`E0 01 01 EA`).
@@ -169,11 +182,16 @@ pub fn parseDocumentBinary11WithOptions(allocator: Allocator, bytes: []const u8,
             bytes,
             options.mactab,
             variant,
-            .{ .strict_flex = options.strict_flex },
+            .{ .strict_flex = options.strict_flex, .strict_opcodes = options.strict_opcodes },
         );
         return .{ .arena = arena, .elements = res.elements };
     }
-    const res = try binary11.parseTopLevelWithMacroTableAndStateWithOptions(&arena, bytes, options.mactab, .{ .strict_flex = options.strict_flex });
+    const res = try binary11.parseTopLevelWithMacroTableAndStateWithOptions(
+        &arena,
+        bytes,
+        options.mactab,
+        .{ .strict_flex = options.strict_flex, .strict_opcodes = options.strict_opcodes },
+    );
     return .{ .arena = arena, .elements = res.elements };
 }
 

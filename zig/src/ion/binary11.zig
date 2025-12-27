@@ -75,6 +75,11 @@ pub const ParseOptions = struct {
     /// Note: `ion-tests` (especially conformance) intentionally uses non-canonical Flex encodings
     /// in a number of places. The default is `false` so the suite stays green.
     strict_flex: bool = false,
+
+    /// When true, rejects conformance-driven opcode quirks that are not part of the Ion 1.1 binary
+    /// opcode table (for example the `0x01` "tagged int 0" shortcut used by some conformance
+    /// fixtures).
+    strict_opcodes: bool = false,
 };
 
 pub fn parseTopLevelWithMacroTableAndStateWithOptions(
@@ -85,7 +90,15 @@ pub fn parseTopLevelWithMacroTableAndStateWithOptions(
 ) IonError!ParseResultWithState {
     if (bytes.len < 4) return IonError.InvalidIon;
     if (!(bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA)) return IonError.InvalidIon;
-    var d = Decoder{ .arena = arena, .input = bytes[4..], .i = 0, .mactab = mactab, .invoke_ctx = .top, .strict_flex = options.strict_flex };
+    var d = Decoder{
+        .arena = arena,
+        .input = bytes[4..],
+        .i = 0,
+        .mactab = mactab,
+        .invoke_ctx = .top,
+        .strict_flex = options.strict_flex,
+        .strict_opcodes = options.strict_opcodes,
+    };
     const elems = try d.parseTopLevel();
     return .{ .elements = elems, .state = d.module_state };
 }
@@ -115,6 +128,7 @@ pub fn parseTopLevelWithMacroTableAndStateWithSystemSymtabVariantAndOptions(
         .mactab = mactab,
         .invoke_ctx = .top,
         .strict_flex = options.strict_flex,
+        .strict_opcodes = options.strict_opcodes,
         .sys_symtab11_variant_override = variant,
         .sys_symtab11_variant_forced = true,
     };
@@ -136,6 +150,7 @@ const Decoder = struct {
     sys_symtab11_variant_override: ?symtab.SystemSymtab11Variant = null,
     sys_symtab11_variant_forced: bool = false,
     strict_flex: bool = false,
+    strict_opcodes: bool = false,
 
     fn pushInvokeCtx(self: *Decoder, next: InvokeCtx) InvokeCtx {
         const prev = self.invoke_ctx;
@@ -546,6 +561,7 @@ const Decoder = struct {
             .invoke_ctx = .nested,
             .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
             .strict_flex = self.strict_flex,
+            .strict_opcodes = self.strict_opcodes,
         };
 
         if (self.currentMacroTable()) |tab| {
@@ -1664,6 +1680,7 @@ const Decoder = struct {
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
                 .strict_flex = self.strict_flex,
+                .strict_opcodes = self.strict_opcodes,
             };
             var out = std.ArrayListUnmanaged(value.Element){};
             errdefer out.deinit(self.arena.allocator());
@@ -1691,6 +1708,7 @@ const Decoder = struct {
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
                 .strict_flex = self.strict_flex,
+                .strict_opcodes = self.strict_opcodes,
             };
             while (sub.i < sub.input.len) {
                 const produced = try sub.readMacroShapeValues(shape);
@@ -1714,6 +1732,7 @@ const Decoder = struct {
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
                 .strict_flex = self.strict_flex,
+                .strict_opcodes = self.strict_opcodes,
             };
             var out = std.ArrayListUnmanaged(value.Element){};
             errdefer out.deinit(self.arena.allocator());
@@ -3250,6 +3269,7 @@ const Decoder = struct {
                 .mactab = self.currentMacroTable(),
                 .invoke_ctx = .nested,
                 .strict_flex = self.strict_flex,
+                .strict_opcodes = self.strict_opcodes,
             };
             while (sub.i < sub.input.len) {
                 const vals = try sub.readValueExpr();
@@ -3435,7 +3455,10 @@ const Decoder = struct {
         // Note: `0x01` is also used by the binary conformance DSL as a FlexUInt(0) sentinel in
         // delimited expression group encodings. We only interpret it as a value opcode here when
         // a tagged value is expected and `readValue()` is called.
-        if (op == 0x01) return value.Value{ .int = .{ .small = 0 } };
+        if (op == 0x01) {
+            if (self.strict_opcodes) return IonError.InvalidIon;
+            return value.Value{ .int = .{ .small = 0 } };
+        }
 
         // null / typed null
         if (op == 0xEA) return value.Value{ .null = .null };
@@ -3489,6 +3512,7 @@ const Decoder = struct {
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
                 .strict_flex = self.strict_flex,
+                .strict_opcodes = self.strict_opcodes,
             };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
@@ -3511,6 +3535,7 @@ const Decoder = struct {
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
                 .strict_flex = self.strict_flex,
+                .strict_opcodes = self.strict_opcodes,
             };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
@@ -3526,7 +3551,14 @@ const Decoder = struct {
             if (op == 0xD1) return IonError.InvalidIon; // reserved
             const len: usize = op - 0xD0;
             const body = try self.readBytes(len);
-            const st = try parseStructBody(self.arena, body, self.currentMacroTable(), self.sys_symtab11_variant_override, self.strict_flex);
+            const st = try parseStructBody(
+                self.arena,
+                body,
+                self.currentMacroTable(),
+                self.sys_symtab11_variant_override,
+                self.strict_flex,
+                self.strict_opcodes,
+            );
             return value.Value{ .@"struct" = st };
         }
 
@@ -3652,6 +3684,7 @@ const Decoder = struct {
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
                 .strict_flex = self.strict_flex,
+                .strict_opcodes = self.strict_opcodes,
             };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
@@ -3674,6 +3707,7 @@ const Decoder = struct {
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
                 .strict_flex = self.strict_flex,
+                .strict_opcodes = self.strict_opcodes,
             };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
@@ -3688,7 +3722,14 @@ const Decoder = struct {
         if (op == 0xFD) {
             const len = try readFlexUInt(self.input, &self.i, self.strict_flex);
             const body = try self.readBytes(len);
-            const st = try parseStructBody(self.arena, body, self.currentMacroTable(), self.sys_symtab11_variant_override, self.strict_flex);
+            const st = try parseStructBody(
+                self.arena,
+                body,
+                self.currentMacroTable(),
+                self.sys_symtab11_variant_override,
+                self.strict_flex,
+                self.strict_opcodes,
+            );
             return value.Value{ .@"struct" = st };
         }
 
@@ -3730,7 +3771,15 @@ const Decoder = struct {
             return value.Value{ .sexp = items.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory };
         }
         if (op == 0xF3) {
-            const st = try parseStructDelimited(self.arena, self.input, &self.i, self.currentMacroTable(), self.sys_symtab11_variant_override, self.strict_flex);
+            const st = try parseStructDelimited(
+                self.arena,
+                self.input,
+                &self.i,
+                self.currentMacroTable(),
+                self.sys_symtab11_variant_override,
+                self.strict_flex,
+                self.strict_opcodes,
+            );
             return value.Value{ .@"struct" = st };
         }
 
@@ -3851,6 +3900,7 @@ fn parseStructBody(
     mactab: ?*const MacroTable,
     variant_override: ?symtab.SystemSymtab11Variant,
     strict_flex: bool,
+    strict_opcodes: bool,
 ) IonError!value.Struct {
     var d = Decoder{
         .arena = arena,
@@ -3860,6 +3910,7 @@ fn parseStructBody(
         .invoke_ctx = .nested,
         .sys_symtab11_variant_override = variant_override,
         .strict_flex = strict_flex,
+        .strict_opcodes = strict_opcodes,
     };
     var fields = std.ArrayListUnmanaged(value.StructField){};
     errdefer fields.deinit(arena.allocator());
@@ -3909,6 +3960,7 @@ fn parseStructDelimited(
     mactab: ?*const MacroTable,
     variant_override: ?symtab.SystemSymtab11Variant,
     strict_flex: bool,
+    strict_opcodes: bool,
 ) IonError!value.Struct {
     var d = Decoder{
         .arena = arena,
@@ -3918,6 +3970,7 @@ fn parseStructDelimited(
         .invoke_ctx = .nested,
         .sys_symtab11_variant_override = variant_override,
         .strict_flex = strict_flex,
+        .strict_opcodes = strict_opcodes,
     };
     defer cursor.* = d.i;
 
