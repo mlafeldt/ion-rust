@@ -302,6 +302,11 @@ This is a rough "where to look next" map. Passing `ion-tests/` does not imply fe
 Below is a tighter checklist for "spec completeness" work. These are not required for `ion-tests`, but are required for something closer to "spec complete Ion 1.1" and/or ion-rust feature parity.
 
 1) Ion 1.1 modules (reader + writer)
+   - Current state (useful tools, not full semantics):
+     - Ion 1.1 system symbol table variant can be selected explicitly when parsing/writing Ion 1.1 binary:
+       - Parsing: `ion.parseDocumentWithOptions(...)` / `ion.parseDocumentBinary11WithOptions(...)` (`.sys_symtab11_variant`), plus `ION_ZIG_SYSTEM_SYMTAB11` in non-test builds.
+       - Writing: `writer11.Options.sys_symtab11_variant` and `writer11` `...ByVariant` helpers for choosing canonical system macro addresses.
+     - The binary reader can also infer the variant from in-stream module directives; this inference is disabled when a variant is forced.
    - [ ] Implement a real Ion 1.1 module state model (not the conformance-only "default module" model).
    - [ ] Implement full symbol semantics:
      - [ ] Separate system symbol addresses (`0xEE`) vs symbol IDs (`0xE1..0xE3`, FlexSym positive IDs).
@@ -332,6 +337,9 @@ Below is a tighter checklist for "spec completeness" work. These are not require
      - [ ] Full module-aware emission (beyond `writeBinary11SelfContained` and `binary_1_1_raw`).
      - [ ] Full macro/e-expression emission (beyond conformance helpers and the value-only writer).
      - [ ] Ensure canonical encodings where required by the spec (not just "decoder accepts it").
+     - [ ] Emit unambiguous system macro addresses for the selected system symtab variant:
+       - Conformance-style overload encodings for `meta`/`flatten`/`parse_ion` (`EF 21`/`EF 19`/`EF 16`) are rejected when `writer11.Options.sys_symtab11_variant == .ion_rust`.
+       - Prefer `writer11` canonical helpers (or `...ByVariant` helpers) for variant-correct output.
    - Relevant files: `zig/src/ion/writer11.zig`, `zig/src/ion/writer.zig`, `zig/src/ion/text.zig`.
 
 4) Ion 1.1 binary (spec completeness audit)
