@@ -415,6 +415,28 @@ test "ion 1.1 writer11 can emit delimited tagged expression groups for values" {
     try std.testing.expectEqual(@as(i128, 2), elems[1].value.int.small);
 }
 
+test "ion 1.1 writer11 can emit delimited expression groups for qualified values" {
+    const allocator = std.testing.allocator;
+
+    const args = [_]ion.value.Element{
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 1 } } },
+        .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } },
+    };
+
+    var bytes = std.ArrayListUnmanaged(u8){};
+    defer bytes.deinit(allocator);
+    try bytes.appendSlice(allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+    try ion.writer11.writeSystemMacroInvocationQualifiedValues(allocator, &bytes, args[0..], .{ .arg_group_encoding = .delimited });
+
+    var arena = try ion.value.Arena.init(allocator);
+    defer arena.deinit();
+    const elems = try ion.binary11.parseTopLevel(&arena, bytes.items);
+
+    try std.testing.expectEqual(@as(usize, 2), elems.len);
+    try std.testing.expectEqual(@as(i128, 1), elems[0].value.int.small);
+    try std.testing.expectEqual(@as(i128, 2), elems[1].value.int.small);
+}
+
 test "ion 1.1 writer11 can chunk tagless delimited groups" {
     const allocator = std.testing.allocator;
 

@@ -1221,11 +1221,20 @@ pub fn writeSystemMacroInvocationQualifiedTaggedGroup(
     }
 
     try appendByte(out, allocator, 0x02);
-    var payload = std.ArrayListUnmanaged(u8){};
-    defer payload.deinit(allocator);
-    for (args) |e| try writeElement(allocator, &payload, options, e);
-    try writeFlexUIntShift1(out, allocator, payload.items.len);
-    try appendSlice(out, allocator, payload.items);
+    switch (options.arg_group_encoding) {
+        .length_prefixed => {
+            var payload = std.ArrayListUnmanaged(u8){};
+            defer payload.deinit(allocator);
+            for (args) |e| try writeElement(allocator, &payload, options, e);
+            try writeFlexUIntShift1(out, allocator, payload.items.len);
+            try appendSlice(out, allocator, payload.items);
+        },
+        .delimited => {
+            try writeFlexUIntShift1(out, allocator, 0);
+            for (args) |e| try writeElement(allocator, out, options, e);
+            try appendByte(out, allocator, 0xF0);
+        },
+    }
 }
 
 pub fn writeSystemMacroInvocationQualifiedValues(
