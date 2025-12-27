@@ -2136,6 +2136,45 @@ test "ion 1.1 writer11/binary11 support macro_shape args for $ion::default" {
     try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
 }
 
+test "ion 1.1 writer11/binary11 support macro_shape args for $ion::none" {
+    var arena = try ion.value.Arena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const body_sym_percent = try ion.value.makeSymbol(&arena, "%");
+    const body_sym_x = try ion.value.makeSymbol(&arena, "x");
+    const body_sx_items = arena.allocator().alloc(ion.value.Element, 2) catch return ion.IonError.OutOfMemory;
+    body_sx_items[0] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_percent } };
+    body_sx_items[1] = .{ .annotations = &.{}, .value = .{ .symbol = body_sym_x } };
+    const body_elem: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = body_sx_items } };
+
+    const p_none = ion.macro.Param{ .ty = .macro_shape, .card = .zero_or_many, .name = "x", .shape = .{ .module = "$ion", .name = "none" } };
+    const macro_body = [_]ion.value.Element{body_elem};
+
+    const macro_defs = try std.testing.allocator.alloc(ion.macro.Macro, 2);
+    defer std.testing.allocator.free(macro_defs);
+    macro_defs[0] = .{ .name = null, .params = &.{}, .body = &.{} };
+    macro_defs[1] = .{ .name = "m", .params = @constCast((&[_]ion.macro.Param{p_none})[0..]), .body = &macro_body };
+    const mactab: ion.macro.MacroTable = .{ .macros = macro_defs };
+
+    const none_args: ion.value.Element = .{ .annotations = &.{}, .value = .{ .sexp = &.{} } };
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(std.testing.allocator);
+    try out.appendSlice(std.testing.allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+
+    try ion.writer11.writeMacroInvocationLengthPrefixedWithParams(
+        std.testing.allocator,
+        &out,
+        1,
+        &.{p_none},
+        &.{&.{none_args}},
+        .{ .mactab = &mactab },
+    );
+
+    const elems = try ion.binary11.parseTopLevelWithMacroTable(&arena, out.items, &mactab);
+    try std.testing.expect(elems.len == 0);
+}
+
 test "ion 1.1 writer11 can emit user macro by name (unqualified + length-prefixed)" {
     var arena = try ion.value.Arena.init(std.testing.allocator);
     defer arena.deinit();

@@ -2520,6 +2520,11 @@ fn writeMacroShapeArg(
             if (b_code == 0b01) try writeOne(allocator, out, options, args[1]) else try writeGroup(allocator, out, options, args[1]);
             return;
         }
+        if (std.mem.eql(u8, shape.name, "none")) {
+            if (args.len != 0) return IonError.InvalidIon;
+            // `none` produces no values and consumes no argument bytes.
+            return;
+        }
         return IonError.Unsupported;
     }
 
