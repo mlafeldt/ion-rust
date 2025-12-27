@@ -190,7 +190,7 @@ Key properties:
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
 - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
-- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `187/187` tests).
+- As of 2025-12-27, `cd zig && zig build test --summary all` passes with 0 skips (currently `188/188` tests).
 
 ### Skip list (currently empty)
 
@@ -354,7 +354,8 @@ Below is a tighter checklist for "spec completeness" work. These are not require
      - [x] Align FlexUInt/FlexInt size limits with ion-rust (reject encodings over 10 bytes).
      - [x] Decode FlexInt as i64 for FlexSym (match ion-rust's FlexInt range; reject out-of-range values).
      - [x] Writer emits canonical FlexUInt/FlexInt encodings (matches ion-rust regression vectors).
-     - [ ] Validate canonical vs non-canonical encodings where the spec distinguishes them (decoder strictness options are not implemented).
+     - [x] Add a `strict_flex` option to reject non-minimal FlexUInt/FlexInt encodings (opt-in; conformance stays lenient).
+     - [ ] Validate canonical vs non-canonical encodings where the spec distinguishes them (beyond `strict_flex`).
      - [ ] Verify all container forms (short/long/delimited) and annotation wrappers across nesting (partially covered by tests; not an exhaustive audit).
    - Relevant files: `zig/src/ion/binary11.zig`, `zig/src/ion/writer11.zig`, `src/lazy/binary/raw/v1_1/reader.rs`, `src/lazy/encoder/binary/v1_1/value_writer.rs`.
 

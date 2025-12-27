@@ -66,9 +66,26 @@ pub fn parseTopLevelWithMacroTableAndState(
     bytes: []const u8,
     mactab: ?*const MacroTable,
 ) IonError!ParseResultWithState {
+    return parseTopLevelWithMacroTableAndStateWithOptions(arena, bytes, mactab, .{});
+}
+
+pub const ParseOptions = struct {
+    /// When true, rejects non-minimal FlexUInt/FlexInt encodings.
+    ///
+    /// Note: `ion-tests` (especially conformance) intentionally uses non-canonical Flex encodings
+    /// in a number of places. The default is `false` so the suite stays green.
+    strict_flex: bool = false,
+};
+
+pub fn parseTopLevelWithMacroTableAndStateWithOptions(
+    arena: *value.Arena,
+    bytes: []const u8,
+    mactab: ?*const MacroTable,
+    options: ParseOptions,
+) IonError!ParseResultWithState {
     if (bytes.len < 4) return IonError.InvalidIon;
     if (!(bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA)) return IonError.InvalidIon;
-    var d = Decoder{ .arena = arena, .input = bytes[4..], .i = 0, .mactab = mactab, .invoke_ctx = .top };
+    var d = Decoder{ .arena = arena, .input = bytes[4..], .i = 0, .mactab = mactab, .invoke_ctx = .top, .strict_flex = options.strict_flex };
     const elems = try d.parseTopLevel();
     return .{ .elements = elems, .state = d.module_state };
 }
@@ -79,6 +96,16 @@ pub fn parseTopLevelWithMacroTableAndStateWithSystemSymtabVariant(
     mactab: ?*const MacroTable,
     variant: symtab.SystemSymtab11Variant,
 ) IonError!ParseResultWithState {
+    return parseTopLevelWithMacroTableAndStateWithSystemSymtabVariantAndOptions(arena, bytes, mactab, variant, .{});
+}
+
+pub fn parseTopLevelWithMacroTableAndStateWithSystemSymtabVariantAndOptions(
+    arena: *value.Arena,
+    bytes: []const u8,
+    mactab: ?*const MacroTable,
+    variant: symtab.SystemSymtab11Variant,
+    options: ParseOptions,
+) IonError!ParseResultWithState {
     if (bytes.len < 4) return IonError.InvalidIon;
     if (!(bytes[0] == 0xE0 and bytes[1] == 0x01 and bytes[2] == 0x01 and bytes[3] == 0xEA)) return IonError.InvalidIon;
     var d = Decoder{
@@ -87,6 +114,7 @@ pub fn parseTopLevelWithMacroTableAndStateWithSystemSymtabVariant(
         .i = 0,
         .mactab = mactab,
         .invoke_ctx = .top,
+        .strict_flex = options.strict_flex,
         .sys_symtab11_variant_override = variant,
         .sys_symtab11_variant_forced = true,
     };
@@ -107,6 +135,7 @@ const Decoder = struct {
     module_state: ModuleState11 = .{},
     sys_symtab11_variant_override: ?symtab.SystemSymtab11Variant = null,
     sys_symtab11_variant_forced: bool = false,
+    strict_flex: bool = false,
 
     fn pushInvokeCtx(self: *Decoder, next: InvokeCtx) InvokeCtx {
         const prev = self.invoke_ctx;
@@ -408,7 +437,7 @@ const Decoder = struct {
             }
             if (op == 0xED) {
                 self.i += 1;
-                const n = try readFlexUInt(self.input, &self.i);
+                const n = try readFlexUInt(self.input, &self.i, self.strict_flex);
                 if (self.i + n > self.input.len) return IonError.Incomplete;
                 self.i += n;
                 continue;
@@ -434,47 +463,47 @@ const Decoder = struct {
 
         switch (op) {
             0xE4 => {
-                const sid = try readFlexUInt(self.input, &self.i);
+                const sid = try readFlexUInt(self.input, &self.i, self.strict_flex);
                 try pushSymAddr(&out, self.arena, sid);
             },
             0xE5 => {
-                const a = try readFlexUInt(self.input, &self.i);
-                const b = try readFlexUInt(self.input, &self.i);
+                const a = try readFlexUInt(self.input, &self.i, self.strict_flex);
+                const b = try readFlexUInt(self.input, &self.i, self.strict_flex);
                 try pushSymAddr(&out, self.arena, a);
                 try pushSymAddr(&out, self.arena, b);
             },
             0xE6 => {
-                const seq_len = try readFlexUInt(self.input, &self.i);
+                const seq_len = try readFlexUInt(self.input, &self.i, self.strict_flex);
                 if (self.i + seq_len > self.input.len) return IonError.Incomplete;
                 const bytes = self.input[self.i .. self.i + seq_len];
                 self.i += seq_len;
 
                 var j: usize = 0;
                 while (j < bytes.len) {
-                    const sid = try readFlexUInt(bytes, &j);
+                    const sid = try readFlexUInt(bytes, &j, self.strict_flex);
                     try pushSymAddr(&out, self.arena, sid);
                 }
                 if (j != bytes.len) return IonError.InvalidIon;
             },
             0xE7 => {
-                const sym = try readFlexSymSymbol(self.arena, self.input, &self.i, self.sys_symtab11_variant_override);
+                const sym = try readFlexSymSymbol(self.arena, self.input, &self.i, self.sys_symtab11_variant_override, self.strict_flex);
                 out.append(self.arena.allocator(), sym) catch return IonError.OutOfMemory;
             },
             0xE8 => {
-                const a = try readFlexSymSymbol(self.arena, self.input, &self.i, self.sys_symtab11_variant_override);
-                const b = try readFlexSymSymbol(self.arena, self.input, &self.i, self.sys_symtab11_variant_override);
+                const a = try readFlexSymSymbol(self.arena, self.input, &self.i, self.sys_symtab11_variant_override, self.strict_flex);
+                const b = try readFlexSymSymbol(self.arena, self.input, &self.i, self.sys_symtab11_variant_override, self.strict_flex);
                 out.append(self.arena.allocator(), a) catch return IonError.OutOfMemory;
                 out.append(self.arena.allocator(), b) catch return IonError.OutOfMemory;
             },
             0xE9 => {
-                const seq_len = try readFlexUInt(self.input, &self.i);
+                const seq_len = try readFlexUInt(self.input, &self.i, self.strict_flex);
                 if (self.i + seq_len > self.input.len) return IonError.Incomplete;
                 const bytes = self.input[self.i .. self.i + seq_len];
                 self.i += seq_len;
 
                 var j: usize = 0;
                 while (j < bytes.len) {
-                    const sym = try readFlexSymSymbol(self.arena, bytes, &j, self.sys_symtab11_variant_override);
+                    const sym = try readFlexSymSymbol(self.arena, bytes, &j, self.sys_symtab11_variant_override, self.strict_flex);
                     out.append(self.arena.allocator(), sym) catch return IonError.OutOfMemory;
                 }
                 if (j != bytes.len) return IonError.InvalidIon;
@@ -503,8 +532,8 @@ const Decoder = struct {
         if (self.input[self.i] != 0xF5) return IonError.InvalidIon;
         self.i += 1;
 
-        const addr = try readFlexUInt(self.input, &self.i);
-        const args_len = try readFlexUInt(self.input, &self.i);
+        const addr = try readFlexUInt(self.input, &self.i, self.strict_flex);
+        const args_len = try readFlexUInt(self.input, &self.i, self.strict_flex);
         if (self.i + args_len > self.input.len) return IonError.Incomplete;
         const args_bytes = self.input[self.i .. self.i + args_len];
         self.i += args_len;
@@ -516,6 +545,7 @@ const Decoder = struct {
             .mactab = self.currentMacroTable(),
             .invoke_ctx = .nested,
             .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+            .strict_flex = self.strict_flex,
         };
 
         if (self.currentMacroTable()) |tab| {
@@ -1609,7 +1639,7 @@ const Decoder = struct {
                 },
                 else => blk: {
                     var cursor = self.i;
-                    const v = try readTaglessFrom(self.arena, self.input, &cursor, p.ty, self.sys_symtab11_variant_override);
+                    const v = try readTaglessFrom(self.arena, self.input, &cursor, p.ty, self.sys_symtab11_variant_override, self.strict_flex);
                     self.i = cursor;
                     const one = self.arena.allocator().alloc(value.Element, 1) catch return IonError.OutOfMemory;
                     one[0] = .{ .annotations = &.{}, .value = v };
@@ -1623,7 +1653,7 @@ const Decoder = struct {
     }
 
     fn readMacroShapeArgGroupValueExprs(self: *Decoder, shape: ion.macro.MacroShape) IonError![]value.Element {
-        const total_len = try readFlexUInt(self.input, &self.i);
+        const total_len = try readFlexUInt(self.input, &self.i, self.strict_flex);
         if (total_len != 0) {
             const payload = try self.readBytes(total_len);
             var sub = Decoder{
@@ -1633,6 +1663,7 @@ const Decoder = struct {
                 .mactab = self.currentMacroTable(),
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+                .strict_flex = self.strict_flex,
             };
             var out = std.ArrayListUnmanaged(value.Element){};
             errdefer out.deinit(self.arena.allocator());
@@ -1649,7 +1680,7 @@ const Decoder = struct {
         var out = std.ArrayListUnmanaged(value.Element){};
         errdefer out.deinit(self.arena.allocator());
         while (true) {
-            const chunk_len = try readFlexUInt(self.input, &self.i);
+            const chunk_len = try readFlexUInt(self.input, &self.i, self.strict_flex);
             if (chunk_len == 0) break;
             const chunk = try self.readBytes(chunk_len);
             var sub = Decoder{
@@ -1659,6 +1690,7 @@ const Decoder = struct {
                 .mactab = self.currentMacroTable(),
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+                .strict_flex = self.strict_flex,
             };
             while (sub.i < sub.input.len) {
                 const produced = try sub.readMacroShapeValues(shape);
@@ -1671,7 +1703,7 @@ const Decoder = struct {
 
     fn readTaggedArgGroupValueExprs(self: *Decoder) IonError![]value.Element {
         // An argument group for a tagged parameter is a sequence of tagged value expressions.
-        const total_len = try readFlexUInt(self.input, &self.i);
+        const total_len = try readFlexUInt(self.input, &self.i, self.strict_flex);
         if (total_len != 0) {
             const payload = try self.readBytes(total_len);
             var sub = Decoder{
@@ -1681,6 +1713,7 @@ const Decoder = struct {
                 .mactab = self.currentMacroTable(),
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+                .strict_flex = self.strict_flex,
             };
             var out = std.ArrayListUnmanaged(value.Element){};
             errdefer out.deinit(self.arena.allocator());
@@ -3121,15 +3154,15 @@ const Decoder = struct {
             .tagged => try self.readValue(),
             .macro_shape => return IonError.Unsupported,
             .flex_uint => blk: {
-                const n = try readFlexUIntAsInt(self.arena, self.input, &self.i);
+                const n = try readFlexUIntAsInt(self.arena, self.input, &self.i, self.strict_flex);
                 break :blk .{ .int = n };
             },
             .flex_int => blk: {
-                const n = try readFlexIntAsInt(self.arena, self.input, &self.i);
+                const n = try readFlexIntAsInt(self.arena, self.input, &self.i, self.strict_flex);
                 break :blk .{ .int = n };
             },
             .flex_sym => blk: {
-                const sym = try readFlexSymSymbol(self.arena, self.input, &self.i, self.sys_symtab11_variant_override);
+                const sym = try readFlexSymSymbol(self.arena, self.input, &self.i, self.sys_symtab11_variant_override, self.strict_flex);
                 break :blk .{ .symbol = sym };
             },
             .uint8 => blk: {
@@ -3191,7 +3224,7 @@ const Decoder = struct {
     }
 
     fn readExpressionGroup(self: *Decoder, ty: ion.macro.ParamType) IonError![]value.Element {
-        const total_len = try readFlexUInt(self.input, &self.i);
+        const total_len = try readFlexUInt(self.input, &self.i, self.strict_flex);
         if (total_len != 0) {
             const payload = try self.readBytes(total_len);
             return self.readExpressionGroupPayload(ty, payload);
@@ -3216,6 +3249,7 @@ const Decoder = struct {
                 .i = 0,
                 .mactab = self.currentMacroTable(),
                 .invoke_ctx = .nested,
+                .strict_flex = self.strict_flex,
             };
             while (sub.i < sub.input.len) {
                 const vals = try sub.readValueExpr();
@@ -3226,7 +3260,7 @@ const Decoder = struct {
         }
 
         while (cursor < payload.len) {
-            const v = readTaglessFrom(self.arena, payload, &cursor, ty, self.sys_symtab11_variant_override) catch |e| switch (e) {
+            const v = readTaglessFrom(self.arena, payload, &cursor, ty, self.sys_symtab11_variant_override, self.strict_flex) catch |e| switch (e) {
                 // The expression group length prefix promised that the full payload is present. Any
                 // attempt to read beyond the payload is a structural error, not an EOF of the
                 // enclosing stream.
@@ -3266,12 +3300,12 @@ const Decoder = struct {
         // Tagless delimited groups are encoded as a sequence of chunks:
         //   <flexuint chunk_len> <chunk_bytes...> ... <flexuint 0>
         while (true) {
-            const chunk_len = try readFlexUInt(self.input, &self.i);
+            const chunk_len = try readFlexUInt(self.input, &self.i, self.strict_flex);
             if (chunk_len == 0) break;
             const chunk = try self.readBytes(chunk_len);
             var cursor: usize = 0;
             while (cursor < chunk.len) {
-                const v = readTaglessFrom(self.arena, chunk, &cursor, ty, self.sys_symtab11_variant_override) catch |e| switch (e) {
+                const v = readTaglessFrom(self.arena, chunk, &cursor, ty, self.sys_symtab11_variant_override, self.strict_flex) catch |e| switch (e) {
                     // If a tagless value is split across chunk boundaries, the encoding is invalid.
                     IonError.Incomplete => return IonError.InvalidIon,
                     else => return e,
@@ -3454,6 +3488,7 @@ const Decoder = struct {
                 .mactab = self.currentMacroTable(),
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+                .strict_flex = self.strict_flex,
             };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
@@ -3475,6 +3510,7 @@ const Decoder = struct {
                 .mactab = self.currentMacroTable(),
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+                .strict_flex = self.strict_flex,
             };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
@@ -3490,7 +3526,7 @@ const Decoder = struct {
             if (op == 0xD1) return IonError.InvalidIon; // reserved
             const len: usize = op - 0xD0;
             const body = try self.readBytes(len);
-            const st = try parseStructBody(self.arena, body, self.currentMacroTable(), self.sys_symtab11_variant_override);
+            const st = try parseStructBody(self.arena, body, self.currentMacroTable(), self.sys_symtab11_variant_override, self.strict_flex);
             return value.Value{ .@"struct" = st };
         }
 
@@ -3538,7 +3574,7 @@ const Decoder = struct {
 
         // integers: F6 <flexuint len> <payload>
         if (op == 0xF6) {
-            const len = try readFlexUInt(self.input, &self.i);
+            const len = try readFlexUInt(self.input, &self.i, self.strict_flex);
             const bytes = try self.readBytes(len);
             return value.Value{ .int = try readTwosComplementIntLE(self.arena, bytes) };
         }
@@ -3571,24 +3607,24 @@ const Decoder = struct {
         if (op >= 0x70 and op <= 0x7F) {
             const len: usize = op - 0x70;
             const payload = try self.readBytes(len);
-            return value.Value{ .decimal = try decodeDecimal11(self.arena, payload) };
+            return value.Value{ .decimal = try decodeDecimal11(self.arena, payload, self.strict_flex) };
         }
         if (op == 0xF7) {
-            const len = try readFlexUInt(self.input, &self.i);
+            const len = try readFlexUInt(self.input, &self.i, self.strict_flex);
             const payload = try self.readBytes(len);
-            return value.Value{ .decimal = try decodeDecimal11(self.arena, payload) };
+            return value.Value{ .decimal = try decodeDecimal11(self.arena, payload, self.strict_flex) };
         }
 
         // Long timestamp: F8 (length follows).
         if (op == 0xF8) {
-            const len = try readFlexUInt(self.input, &self.i);
+            const len = try readFlexUInt(self.input, &self.i, self.strict_flex);
             const payload = try self.readBytes(len);
-            return value.Value{ .timestamp = try decodeTimestampLong11(self.arena, payload) };
+            return value.Value{ .timestamp = try decodeTimestampLong11(self.arena, payload, self.strict_flex) };
         }
 
         // Long string: F9 (length follows).
         if (op == 0xF9) {
-            const len = try readFlexUInt(self.input, &self.i);
+            const len = try readFlexUInt(self.input, &self.i, self.strict_flex);
             const b = try self.readBytes(len);
             if (!std.unicode.utf8ValidateSlice(b)) return IonError.InvalidIon;
             const s = try self.arena.dupe(b);
@@ -3597,7 +3633,7 @@ const Decoder = struct {
 
         // Long symbol with inline text: FA (length follows).
         if (op == 0xFA) {
-            const len = try readFlexUInt(self.input, &self.i);
+            const len = try readFlexUInt(self.input, &self.i, self.strict_flex);
             const b = try self.readBytes(len);
             if (!std.unicode.utf8ValidateSlice(b)) return IonError.InvalidIon;
             const t = try self.arena.dupe(b);
@@ -3606,7 +3642,7 @@ const Decoder = struct {
 
         // Long list: FB (length follows).
         if (op == 0xFB) {
-            const len = try readFlexUInt(self.input, &self.i);
+            const len = try readFlexUInt(self.input, &self.i, self.strict_flex);
             const body = try self.readBytes(len);
             var sub = Decoder{
                 .arena = self.arena,
@@ -3615,6 +3651,7 @@ const Decoder = struct {
                 .mactab = self.currentMacroTable(),
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+                .strict_flex = self.strict_flex,
             };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
@@ -3627,7 +3664,7 @@ const Decoder = struct {
 
         // Long sexp: FC (length follows).
         if (op == 0xFC) {
-            const len = try readFlexUInt(self.input, &self.i);
+            const len = try readFlexUInt(self.input, &self.i, self.strict_flex);
             const body = try self.readBytes(len);
             var sub = Decoder{
                 .arena = self.arena,
@@ -3636,6 +3673,7 @@ const Decoder = struct {
                 .mactab = self.currentMacroTable(),
                 .invoke_ctx = .nested,
                 .sys_symtab11_variant_override = self.sys_symtab11_variant_override,
+                .strict_flex = self.strict_flex,
             };
             var items = std.ArrayListUnmanaged(value.Element){};
             errdefer items.deinit(self.arena.allocator());
@@ -3648,9 +3686,9 @@ const Decoder = struct {
 
         // Long struct: FD (length follows).
         if (op == 0xFD) {
-            const len = try readFlexUInt(self.input, &self.i);
+            const len = try readFlexUInt(self.input, &self.i, self.strict_flex);
             const body = try self.readBytes(len);
-            const st = try parseStructBody(self.arena, body, self.currentMacroTable(), self.sys_symtab11_variant_override);
+            const st = try parseStructBody(self.arena, body, self.currentMacroTable(), self.sys_symtab11_variant_override, self.strict_flex);
             return value.Value{ .@"struct" = st };
         }
 
@@ -3692,19 +3730,19 @@ const Decoder = struct {
             return value.Value{ .sexp = items.toOwnedSlice(self.arena.allocator()) catch return IonError.OutOfMemory };
         }
         if (op == 0xF3) {
-            const st = try parseStructDelimited(self.arena, self.input, &self.i, self.currentMacroTable(), self.sys_symtab11_variant_override);
+            const st = try parseStructDelimited(self.arena, self.input, &self.i, self.currentMacroTable(), self.sys_symtab11_variant_override, self.strict_flex);
             return value.Value{ .@"struct" = st };
         }
 
         // Blob / clob.
         if (op == 0xFE) {
-            const len = try readFlexUInt(self.input, &self.i);
+            const len = try readFlexUInt(self.input, &self.i, self.strict_flex);
             const b = try self.readBytes(len);
             const owned = try self.arena.dupe(b);
             return value.Value{ .blob = owned };
         }
         if (op == 0xFF) {
-            const len = try readFlexUInt(self.input, &self.i);
+            const len = try readFlexUInt(self.input, &self.i, self.strict_flex);
             const b = try self.readBytes(len);
             const owned = try self.arena.dupe(b);
             return value.Value{ .clob = owned };
@@ -3759,8 +3797,9 @@ fn readFlexSym(
     input: []const u8,
     cursor: *usize,
     variant_override: ?symtab.SystemSymtab11Variant,
+    strict: bool,
 ) IonError!FlexSymDecoded {
-    const v = try readFlexIntI64(input, cursor);
+    const v = try readFlexIntI64(input, cursor, strict);
     if (v > 0) {
         if (v > std.math.maxInt(u32)) return IonError.InvalidIon;
         return .{ .symbol = value.makeSymbolId(@intCast(v), null) };
@@ -3797,8 +3836,9 @@ fn readFlexSymSymbol(
     input: []const u8,
     cursor: *usize,
     variant_override: ?symtab.SystemSymtab11Variant,
+    strict: bool,
 ) IonError!value.Symbol {
-    const d = try readFlexSym(arena, input, cursor, variant_override);
+    const d = try readFlexSym(arena, input, cursor, variant_override, strict);
     return switch (d) {
         .symbol => |s| s,
         .end_delimited => return IonError.InvalidIon,
@@ -3810,6 +3850,7 @@ fn parseStructBody(
     body: []const u8,
     mactab: ?*const MacroTable,
     variant_override: ?symtab.SystemSymtab11Variant,
+    strict_flex: bool,
 ) IonError!value.Struct {
     var d = Decoder{
         .arena = arena,
@@ -3818,6 +3859,7 @@ fn parseStructBody(
         .mactab = mactab,
         .invoke_ctx = .nested,
         .sys_symtab11_variant_override = variant_override,
+        .strict_flex = strict_flex,
     };
     var fields = std.ArrayListUnmanaged(value.StructField){};
     errdefer fields.deinit(arena.allocator());
@@ -3829,7 +3871,7 @@ fn parseStructBody(
         var name_sym: value.Symbol = undefined;
         switch (mode) {
             .symbol_address => {
-                const id = try readFlexUInt(d.input, &d.i);
+                const id = try readFlexUInt(d.input, &d.i, d.strict_flex);
                 if (id == 0) {
                     mode = .flex_sym;
                     continue;
@@ -3838,7 +3880,7 @@ fn parseStructBody(
                 name_sym = value.makeSymbolId(@intCast(id), null);
             },
             .flex_sym => {
-                const dec = try readFlexSym(arena, d.input, &d.i, variant_override);
+                const dec = try readFlexSym(arena, d.input, &d.i, variant_override, d.strict_flex);
                 switch (dec) {
                     .symbol => |s| name_sym = s,
                     .end_delimited => return IonError.InvalidIon,
@@ -3866,6 +3908,7 @@ fn parseStructDelimited(
     cursor: *usize,
     mactab: ?*const MacroTable,
     variant_override: ?symtab.SystemSymtab11Variant,
+    strict_flex: bool,
 ) IonError!value.Struct {
     var d = Decoder{
         .arena = arena,
@@ -3874,6 +3917,7 @@ fn parseStructDelimited(
         .mactab = mactab,
         .invoke_ctx = .nested,
         .sys_symtab11_variant_override = variant_override,
+        .strict_flex = strict_flex,
     };
     defer cursor.* = d.i;
 
@@ -3881,7 +3925,7 @@ fn parseStructDelimited(
     errdefer fields.deinit(arena.allocator());
 
     while (true) {
-        const dec = try readFlexSym(arena, d.input, &d.i, variant_override);
+        const dec = try readFlexSym(arena, d.input, &d.i, variant_override, d.strict_flex);
         switch (dec) {
             .end_delimited => break,
             .symbol => |name_sym| {
@@ -4018,7 +4062,7 @@ fn decodeTimestampShort11(payload: []const u8, length_code: usize) IonError!valu
     }
 }
 
-fn decodeTimestampLong11(arena: *value.Arena, payload: []const u8) IonError!value.Timestamp {
+fn decodeTimestampLong11(arena: *value.Arena, payload: []const u8, strict: bool) IonError!value.Timestamp {
     // Ported from ion-rust's BinaryEncoding_1_1 long timestamp decoding logic.
     if (payload.len < 2 or payload.len == 4 or payload.len == 5) return IonError.InvalidIon;
 
@@ -4070,7 +4114,7 @@ fn decodeTimestampLong11(arena: *value.Arena, payload: []const u8) IonError!valu
 
     // Fractional seconds: [flexuint scale][fixed uint coeff bytes...]
     var j: usize = 7;
-    const scale = try readFlexUInt(payload, &j);
+    const scale = try readFlexUInt(payload, &j, strict);
     const coeff_len: usize = payload.len - j;
     const coeff_bytes = payload[j..];
     if (coeff_len == 0) {
@@ -4189,6 +4233,7 @@ fn readTaglessFrom(
     cursor: *usize,
     ty: ion.macro.ParamType,
     variant_override: ?symtab.SystemSymtab11Variant,
+    strict: bool,
 ) IonError!value.Value {
     var i = cursor.*;
     defer cursor.* = i;
@@ -4201,19 +4246,19 @@ fn readTaglessFrom(
             // places, including branches that expect `produces 1 2` and `produces 1 2 3 4`). This
             // does not match the canonical FlexUInt encoding used by the Rust implementation
             // (`0A 00`) but we accept it here to avoid skipping/failing conformance coverage.
-            if (i + 2 <= payload.len and payload[i] == 0x0B and payload[i + 1] == 0x00) {
+            if (!strict and i + 2 <= payload.len and payload[i] == 0x0B and payload[i + 1] == 0x00) {
                 i += 2;
                 break :blk .{ .int = .{ .small = 2 } };
             }
-            const n = try readFlexUIntAsInt(arena, payload, &i);
+            const n = try readFlexUIntAsInt(arena, payload, &i, strict);
             break :blk .{ .int = n };
         },
         .flex_int => blk: {
-            const n = try readFlexIntAsInt(arena, payload, &i);
+            const n = try readFlexIntAsInt(arena, payload, &i, strict);
             break :blk .{ .int = n };
         },
         .flex_sym => blk: {
-            const sym = try readFlexSymSymbol(arena, payload, &i, variant_override);
+            const sym = try readFlexSymSymbol(arena, payload, &i, variant_override, strict);
             break :blk .{ .symbol = sym };
         },
         .uint8 => blk: {
@@ -4306,7 +4351,42 @@ fn typeCodeToIonType(tc: u8) ?value.IonType {
     };
 }
 
-fn readFlexUInt(input: []const u8, cursor: *usize) IonError!usize {
+fn flexUIntMinimalBytes(v: usize) usize {
+    const uv: u128 = @intCast(v);
+    const bits: usize = if (v == 0) 0 else (usize_bits: {
+        const lz: usize = @intCast(@clz(uv));
+        break :usize_bits 128 - lz;
+    });
+    return @max(@as(usize, 1), (bits + 6) / 7);
+}
+
+fn flexIntMinimalBytesI64(v: i64) usize {
+    var n: usize = 1;
+    while (true) : (n += 1) {
+        if (n > 10) return 10;
+        const width: usize = n * 7;
+        const mag_bits: usize = width - 1;
+        if (mag_bits >= 63) return n;
+        const max: i64 = (@as(i64, 1) << @intCast(mag_bits)) - 1;
+        const min: i64 = -(@as(i64, 1) << @intCast(mag_bits));
+        if (v >= min and v <= max) return n;
+    }
+}
+
+fn flexIntMinimalBytesI128(v: i128) usize {
+    var n: usize = 1;
+    while (true) : (n += 1) {
+        if (n > 10) return 10;
+        const width: usize = n * 7;
+        const mag_bits: usize = width - 1;
+        if (mag_bits >= 127) return n;
+        const max: i128 = (@as(i128, 1) << @intCast(mag_bits)) - 1;
+        const min: i128 = -(@as(i128, 1) << @intCast(mag_bits));
+        if (v >= min and v <= max) return n;
+    }
+}
+
+fn readFlexUInt(input: []const u8, cursor: *usize, strict: bool) IonError!usize {
     const shift = try detectFlexShift(input, cursor);
     // ion-rust caps supported serialized FlexUInt size at 10 bytes.
     if (shift > 10) return IonError.InvalidIon;
@@ -4350,16 +4430,21 @@ fn readFlexUInt(input: []const u8, cursor: *usize) IonError!usize {
         for (raw[start_byte + 1 ..]) |b| if (b != 0) return IonError.InvalidIon;
     }
 
+    if (strict) {
+        const min_len = flexUIntMinimalBytes(out);
+        if (min_len != shift) return IonError.InvalidIon;
+    }
+
     return out;
 }
 
-fn readFlexInt(input: []const u8, cursor: *usize) IonError!i32 {
-    const v64 = try readFlexIntI64(input, cursor);
+fn readFlexInt(input: []const u8, cursor: *usize, strict: bool) IonError!i32 {
+    const v64 = try readFlexIntI64(input, cursor, strict);
     if (v64 < std.math.minInt(i32) or v64 > std.math.maxInt(i32)) return IonError.InvalidIon;
     return @intCast(v64);
 }
 
-fn readFlexIntI64(input: []const u8, cursor: *usize) IonError!i64 {
+fn readFlexIntI64(input: []const u8, cursor: *usize, strict: bool) IonError!i64 {
     // ion-rust represents FlexInt values as i64 and caps serialized sizes at 10 bytes.
     const shift = try detectFlexShift(input, cursor);
     if (shift > 10) return IonError.InvalidIon;
@@ -4376,7 +4461,12 @@ fn readFlexIntI64(input: []const u8, cursor: *usize) IonError!i64 {
     const sign_bit_set = (raw[raw.len - 1] & 0x80) != 0;
     if (!sign_bit_set) {
         if (shifted > @as(u128, std.math.maxInt(i64))) return IonError.InvalidIon;
-        return @intCast(shifted);
+        const out: i64 = @intCast(shifted);
+        if (strict) {
+            const min_len = flexIntMinimalBytesI64(out);
+            if (min_len != shift) return IonError.InvalidIon;
+        }
+        return out;
     }
 
     if (shifted > @as(u128, std.math.maxInt(u64))) return IonError.InvalidIon;
@@ -4388,10 +4478,15 @@ fn readFlexIntI64(input: []const u8, cursor: *usize) IonError!i64 {
     const leading_zeros: u6 = @intCast(@clz(unsigned64));
     const mi: i64 = @bitCast(@as(u64, 1) << 63);
     const mask: i64 = mi >> leading_zeros;
-    return (@as(i64, @bitCast(unsigned64)) | mask);
+    const out: i64 = (@as(i64, @bitCast(unsigned64)) | mask);
+    if (strict) {
+        const min_len = flexIntMinimalBytesI64(out);
+        if (min_len != shift) return IonError.InvalidIon;
+    }
+    return out;
 }
 
-fn readFlexUIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!value.Int {
+fn readFlexUIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize, strict: bool) IonError!value.Int {
     const shift = try detectFlexShift(input, cursor);
     if (shift > 10) return IonError.InvalidIon;
     if (shift == 0) return IonError.InvalidIon;
@@ -4412,10 +4507,20 @@ fn readFlexUIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize) Ion
     shifted.shiftRight(src, shift) catch return IonError.OutOfMemory;
 
     const as_i128 = shifted.toConst().toInt(i128) catch return .{ .big = shifted };
+    if (strict) {
+        if (as_i128 < 0) return IonError.InvalidIon;
+        const uv: u128 = @intCast(as_i128);
+        const bits: usize = if (uv == 0) 0 else (usize_bits: {
+            const lz: usize = @intCast(@clz(uv));
+            break :usize_bits 128 - lz;
+        });
+        const min_len: usize = @max(@as(usize, 1), (bits + 6) / 7);
+        if (min_len != shift) return IonError.InvalidIon;
+    }
     return .{ .small = as_i128 };
 }
 
-fn readFlexIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!value.Int {
+fn readFlexIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize, strict: bool) IonError!value.Int {
     const shift = try detectFlexShift(input, cursor);
     if (shift > 10) return IonError.InvalidIon;
     if (shift == 0) return IonError.InvalidIon;
@@ -4436,6 +4541,10 @@ fn readFlexIntAsInt(arena: *value.Arena, input: []const u8, cursor: *usize) IonE
     shifted.shiftRight(src, shift) catch return IonError.OutOfMemory;
 
     const as_i128 = shifted.toConst().toInt(i128) catch return .{ .big = shifted };
+    if (strict) {
+        const min_len = flexIntMinimalBytesI128(as_i128);
+        if (min_len != shift) return IonError.InvalidIon;
+    }
     return .{ .small = as_i128 };
 }
 
@@ -4462,13 +4571,13 @@ fn readTwosComplementIntLE(arena: *value.Arena, bytes: []const u8) IonError!valu
     return .{ .big = bi };
 }
 
-fn decodeDecimal11(arena: *value.Arena, payload: []const u8) IonError!value.Decimal {
+fn decodeDecimal11(arena: *value.Arena, payload: []const u8, strict: bool) IonError!value.Decimal {
     if (payload.len == 0) {
         return .{ .is_negative = false, .coefficient = .{ .small = 0 }, .exponent = 0 };
     }
 
     var cursor: usize = 0;
-    const exp_i32 = try readFlexInt(payload, &cursor);
+    const exp_i32 = try readFlexInt(payload, &cursor, strict);
     if (cursor > payload.len) return IonError.Incomplete;
     const coeff_bytes = payload[cursor..];
 

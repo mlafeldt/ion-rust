@@ -4058,6 +4058,48 @@ test "ion 1.1 binary decimals accept large FlexInt encodings" {
     try std.testing.expectEqual(@as(i128, 0), elems[0].value.decimal.coefficient.small);
 }
 
+test "ion 1.1 binary strict_flex rejects non-minimal FlexUInt/FlexInt encodings" {
+    const allocator = std.testing.allocator;
+
+    // Non-minimal FlexUInt length for long string: "hello" length=5 encoded in 2 bytes.
+    // For N=2: raw = (value << N) | (1 << (N-1)) = (5 << 2) | 2 = 0x16.
+    const non_min_flexuint = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA,
+        0xF9, 0x16, 0x00, 'h',
+        'e',  'l',  'l',  'o',
+    };
+    {
+        var doc = try ion.parseDocument(allocator, non_min_flexuint);
+        defer doc.deinit();
+        try std.testing.expectEqual(@as(usize, 1), doc.elements.len);
+        try std.testing.expect(doc.elements[0].value == .string);
+        try std.testing.expectEqualStrings("hello", doc.elements[0].value.string);
+    }
+    try std.testing.expectError(
+        ion.IonError.InvalidIon,
+        ion.parseDocumentBinary11WithOptions(allocator, non_min_flexuint, .{ .strict_flex = true }),
+    );
+
+    // Non-minimal FlexInt exponent for long decimal: exponent=0 encoded in 2 bytes.
+    // For N=2: raw = (0 << 2) | (1 << (2-1)) = 0x02.
+    const non_min_flexint = &[_]u8{
+        0xE0, 0x01, 0x01, 0xEA,
+        0xF7, 0x05, 0x02, 0x00,
+    };
+    {
+        var doc = try ion.parseDocument(allocator, non_min_flexint);
+        defer doc.deinit();
+        try std.testing.expectEqual(@as(usize, 1), doc.elements.len);
+        try std.testing.expect(doc.elements[0].value == .decimal);
+        try std.testing.expectEqual(@as(i32, 0), doc.elements[0].value.decimal.exponent);
+        try std.testing.expectEqual(@as(i128, 0), doc.elements[0].value.decimal.coefficient.small);
+    }
+    try std.testing.expectError(
+        ion.IonError.InvalidIon,
+        ion.parseDocumentBinary11WithOptions(allocator, non_min_flexint, .{ .strict_flex = true }),
+    );
+}
+
 test "ion 1.1 binary e-expression 12-bit address (minimal)" {
     // Minimal coverage for the EExpressionWith12BitAddress encoding (0x40..0x4F).
     // This uses a synthetic user macro at address 64 that expands to its single argument.
