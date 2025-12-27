@@ -40,7 +40,7 @@ Key properties:
   - `serializeDocument(allocator, format, elements)`:
     - Supports `Format.binary` (Ion 1.0), `Format.binary_1_1` (Ion 1.1, experimental), and text formats (compact/lines/pretty).
     - `Format.binary_1_1` emits a self-contained stream:
-      - It emits a minimal module prelude (`set_symbols`) for any non-system symbol text present in the document, then emits subsequent symbol references by *address* (E1..E3 / FlexSym positive) instead of inline text.
+      - It emits a minimal module prelude (`$ion::(module _ (symbols _ ...))`) for any non-system symbol text present in the document, then emits subsequent symbol references by *address* (E1..E3 / FlexSym positive) instead of inline text.
       - It rejects SID-only non-system symbols (including in annotations and field names), because those cannot be serialized deterministically without external module state.
       - Known Ion 1.1 system symbols are emitted using `0xEE` (SystemSymbolAddress).
   - `Document` owns an arena and a slice of parsed `Element`s; `deinit()` frees the arena.
@@ -177,7 +177,7 @@ Key properties:
   - `good/equivs/` groups must all be equivalent
   - `good/non-equivs/` groups must not be equivalent across group members
   - `good/` roundtrip through a format matrix (binary/text variants)
-  - The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
+- The same checks are also run for `ion-tests/iontestdata_1_1`, including a roundtrip that exercises the Ion 1.1 binary writer (`lines -> binary_1_1 -> lines`).
 - As of 2025-12-26, `cd zig && zig build test --summary all` passes with 0 skips.
 
 ### Skip list (currently empty)
@@ -374,6 +374,14 @@ Examples:
 2) ion-java's short integer opcodes start at `0x50`; ion-rust uses `0x60..0x68` for fixed-length integers (and `0xF6` for length-prefixed integers).
 
 For this Zig port, treat ion-rust + `ion-tests` as the source of truth for Ion 1.1 binary opcodes and semantics.
+
+## Notes on Ion 1.1 system symbols (ion-tests vs ion-rust)
+
+`ion-tests/conformance/system_symbols.ion` expects an Ion 1.1 system symbol table with `max_id = 62` (no `symbol_table` entry).
+
+ion-rust defines a different (newer) Ion 1.1 system symbol table with `max_id = 63` that includes `symbol_table` and shifts the address of `module`.
+
+For this port, `zig/src/ion/symtab.zig` keeps `SystemSymtab11` aligned with `ion-tests` so the conformance suite stays green. For interoperability with ion-rust's Ion 1.1 binary writer, prefer ion-rust's mapping when interpreting system symbol addresses.
 
 ### 6) NOP pads inside structs with non-zero SIDs
 
