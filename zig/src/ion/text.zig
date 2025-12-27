@@ -2040,8 +2040,8 @@ const Parser = struct {
             }
             if (!self.ion11_system_loaded) return IonError.InvalidIon;
             const sys_sid: u32 = sid - @as(u32, @intCast(self.ion11_user_symbols.len));
-            if (sys_sid >= 1 and sys_sid <= symtab.SystemSymtab11.max_id) {
-                return value.makeSymbolId(sid, symtab.SystemSymtab11.textForSid(sys_sid).?);
+            if (sys_sid >= 1 and sys_sid <= symtab.systemSymtab11MaxId()) {
+                return value.makeSymbolId(sid, symtab.systemSymtab11TextForSid(sys_sid).?);
             }
             return IonError.InvalidIon;
         }

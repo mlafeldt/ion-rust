@@ -766,7 +766,7 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
     if (s.text) |t| {
         if (!std.unicode.utf8ValidateSlice(t)) return IonError.InvalidIon;
         if (options.symbol_encoding == .addresses) {
-            if (symtab.SystemSymtab11.sidForText(t)) |sys_sid| {
+            if (symtab.systemSymtab11SidForText(t)) |sys_sid| {
                 if (sys_sid <= 0xFF) {
                     // System symbol address: EE <addr>
                     try appendByte(out, allocator, 0xEE);
@@ -796,8 +796,8 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
         // We don't have module/symbol-address state in this mode, but we can still inline known
         // Ion 1.1 system symbol texts by SID.
         if (s.sid) |sid| {
-            if (sid > 0 and sid <= symtab.SystemSymtab11.max_id) {
-                if (symtab.SystemSymtab11.textForSid(sid)) |sys_text| {
+            if (sid > 0 and sid <= symtab.systemSymtab11MaxId()) {
+                if (symtab.systemSymtab11TextForSid(sid)) |sys_text| {
                     if (!std.unicode.utf8ValidateSlice(sys_text)) return IonError.InvalidIon;
                     if (sys_text.len <= 15) {
                         try appendByte(out, allocator, 0xA0 + @as(u8, @intCast(sys_text.len)));
@@ -820,7 +820,7 @@ fn writeSymbol(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), o
 
         // If the caller provided an SID-only system symbol, encode it as a system symbol address.
         // This keeps the output self-contained and avoids depending on ambient module state.
-        if (sid > 0 and sid <= symtab.SystemSymtab11.max_id and sid <= 0xFF) {
+        if (sid > 0 and sid <= symtab.systemSymtab11MaxId() and sid <= 0xFF) {
             try appendByte(out, allocator, 0xEE);
             try appendByte(out, allocator, @intCast(sid));
             return;
@@ -1046,7 +1046,7 @@ fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
     if (sym.text) |t| {
         if (!std.unicode.utf8ValidateSlice(t)) return IonError.InvalidIon;
         if (options.symbol_encoding == .addresses) {
-            if (symtab.SystemSymtab11.sidForText(t)) |sys_sid| {
+            if (symtab.systemSymtab11SidForText(t)) |sys_sid| {
                 if (sys_sid >= 1 and sys_sid <= 0x80) {
                     // FlexSym escape: FlexInt(0) then 0x60 + <addr>.
                     try writeFlexIntShift1(out, allocator, 0);
@@ -1068,8 +1068,8 @@ fn writeFlexSymSymbol(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
     }
     if (sym.sid) |sid| {
         if (options.symbol_encoding == .inline_text_only) {
-            if (sid > 0 and sid <= symtab.SystemSymtab11.max_id) {
-                const sys_text = symtab.SystemSymtab11.textForSid(sid) orelse return IonError.InvalidIon;
+            if (sid > 0 and sid <= symtab.systemSymtab11MaxId()) {
+                const sys_text = symtab.systemSymtab11TextForSid(sid) orelse return IonError.InvalidIon;
                 if (!std.unicode.utf8ValidateSlice(sys_text)) return IonError.InvalidIon;
                 try writeFlexIntShift1(out, allocator, -@as(i64, @intCast(sys_text.len)));
                 try appendSlice(out, allocator, sys_text);
@@ -2212,7 +2212,7 @@ fn collectUserSymbolTexts(
 
     const addText = struct {
         fn run(alloc: std.mem.Allocator, m: *std.StringHashMapUnmanaged(u32), texts: *std.ArrayListUnmanaged([]const u8), next: *u32, t: []const u8) IonError!void {
-            if (symtab.SystemSymtab11.sidForText(t) != null) return;
+            if (symtab.systemSymtab11SidForText(t) != null) return;
             if (m.contains(t)) return;
             m.put(alloc, t, next.*) catch return IonError.OutOfMemory;
             texts.append(alloc, t) catch return IonError.OutOfMemory;
@@ -2227,7 +2227,7 @@ fn collectUserSymbolTexts(
                 // `$0` is a well-known "unknown symbol" sentinel and does not require text.
                 if (sid == 0) return;
                 // Allow SID-only system symbols; everything else requires text for self-contained output.
-                if (sid > 0 and sid <= symtab.SystemSymtab11.max_id) return;
+                if (sid > 0 and sid <= symtab.systemSymtab11MaxId()) return;
                 return IonError.InvalidIon;
             }
             return IonError.InvalidIon;

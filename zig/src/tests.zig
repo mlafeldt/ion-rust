@@ -205,7 +205,7 @@ test "ion 1.1 binary FlexSym escape returns system symbol as text" {
     const st = elems[0].value.@"struct";
     try std.testing.expectEqual(@as(usize, 1), st.fields.len);
     try std.testing.expectEqualStrings("$ion", st.fields[0].name.text orelse return error.TestExpectedEqual);
-    try std.testing.expect(st.fields[0].name.sid == null);
+    try std.testing.expect(st.fields[0].name.sid == 1);
 }
 
 test "zig ion serializeDocument binary_1_1 roundtrips values" {

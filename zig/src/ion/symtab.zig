@@ -48,7 +48,8 @@ pub const SystemSymtab11 = struct {
     // NOTE: This table matches the expectations in `ion-tests/conformance/system_symbols.ion`.
     // Ion-rust uses a different (newer) Ion 1.1 system symbol table that includes `symbol_table`
     // and has 63 symbols. When interoperating with ion-rust's Ion 1.1 binary writer, prefer its
-    // address-to-text mapping as the source of truth.
+    // address-to-text mapping as the source of truth (see `SystemSymtab11IonRust` and the
+    // `ION_ZIG_SYSTEM_SYMTAB11` toggle helpers below).
     pub const max_id: u32 = 62;
 
     pub const symbols = [_][]const u8{
@@ -132,6 +133,124 @@ pub const SystemSymtab11 = struct {
         return null;
     }
 };
+
+/// Ion 1.1 system symbol table as defined by ion-rust (`max_id = 63`, includes `symbol_table`).
+///
+/// This is used only when opted into via `ION_ZIG_SYSTEM_SYMTAB11=ion-rust`, to improve
+/// interoperability with Ion 1.1 binary streams produced by ion-rust.
+pub const SystemSymtab11IonRust = struct {
+    pub const max_id: u32 = 63;
+
+    pub const symbols = [_][]const u8{
+        "$0",
+        "$ion",
+        "$ion_1_0",
+        "$ion_symbol_table",
+        "name",
+        "version",
+        "imports",
+        "symbols",
+        "max_id",
+        "$ion_shared_symbol_table",
+        "encoding",
+        "$ion_literal",
+        "$ion_shared_module",
+        "macro",
+        "macro_table",
+        "symbol_table",
+        "module",
+        "export",
+        "import",
+        "flex_symbol",
+        "flex_int",
+        "flex_uint",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "float16",
+        "float32",
+        "float64",
+        "",
+        "for",
+        "literal",
+        "if_none",
+        "if_some",
+        "if_single",
+        "if_multi",
+        "none",
+        "values",
+        "default",
+        "meta",
+        "repeat",
+        "flatten",
+        "delta",
+        "sum",
+        "annotate",
+        "make_string",
+        "make_symbol",
+        "make_decimal",
+        "make_timestamp",
+        "make_blob",
+        "make_list",
+        "make_sexp",
+        "make_field",
+        "make_struct",
+        "parse_ion",
+        "set_symbols",
+        "add_symbols",
+        "set_macros",
+        "add_macros",
+        "use",
+    };
+
+    pub fn textForSid(sid: u32) ?[]const u8 {
+        if (sid == 0 or sid > max_id) return null;
+        return symbols[sid];
+    }
+
+    pub fn sidForText(text: []const u8) ?u32 {
+        var sid: u32 = 1;
+        while (sid <= max_id) : (sid += 1) {
+            if (std.mem.eql(u8, symbols[sid], text)) return sid;
+        }
+        return null;
+    }
+};
+
+pub const SystemSymtab11Variant = enum { ion_tests, ion_rust };
+
+pub fn systemSymtab11Variant() SystemSymtab11Variant {
+    const raw = std.posix.getenv("ION_ZIG_SYSTEM_SYMTAB11") orelse return .ion_tests;
+    if (std.mem.eql(u8, raw, "ion-rust") or std.mem.eql(u8, raw, "ion_rust")) return .ion_rust;
+    if (std.mem.eql(u8, raw, "ion-tests") or std.mem.eql(u8, raw, "ion_tests")) return .ion_tests;
+    return .ion_tests;
+}
+
+pub fn systemSymtab11MaxId() u32 {
+    return switch (systemSymtab11Variant()) {
+        .ion_tests => SystemSymtab11.max_id,
+        .ion_rust => SystemSymtab11IonRust.max_id,
+    };
+}
+
+pub fn systemSymtab11TextForSid(sid: u32) ?[]const u8 {
+    return switch (systemSymtab11Variant()) {
+        .ion_tests => SystemSymtab11.textForSid(sid),
+        .ion_rust => SystemSymtab11IonRust.textForSid(sid),
+    };
+}
+
+pub fn systemSymtab11SidForText(text: []const u8) ?u32 {
+    return switch (systemSymtab11Variant()) {
+        .ion_tests => SystemSymtab11.sidForText(text),
+        .ion_rust => SystemSymtab11IonRust.sidForText(text),
+    };
+}
 
 /// Mutable symbol table used by the parsers to resolve SIDs to text.
 pub const SymbolTable = struct {

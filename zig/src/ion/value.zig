@@ -184,7 +184,7 @@ fn resolveSymbol11WithDefaultModule(arena: *Arena, s: *Symbol, ctx: DefaultModul
 
     if (!ctx.system_loaded) return;
     const sys_sid: u32 = sid - @as(u32, @intCast(ctx.user_symbols.len));
-    if (symtab.SystemSymtab11.textForSid(sys_sid)) |t| {
+    if (symtab.systemSymtab11TextForSid(sys_sid)) |t| {
         s.text = try arena.dupe(t);
     }
 }
@@ -212,7 +212,7 @@ fn resolveValue11(arena: *Arena, v: *Value) IonError!void {
 fn resolveSymbol11(arena: *Arena, s: *Symbol) IonError!void {
     if (s.text != null) return;
     const sid = s.sid orelse return;
-    if (symtab.SystemSymtab11.textForSid(sid)) |t| {
+    if (symtab.systemSymtab11TextForSid(sid)) |t| {
         s.text = try arena.dupe(t);
     }
 }

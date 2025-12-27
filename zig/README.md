@@ -383,6 +383,8 @@ ion-rust defines a different (newer) Ion 1.1 system symbol table with `max_id = 
 
 For this port, `zig/src/ion/symtab.zig` keeps `SystemSymtab11` aligned with `ion-tests` so the conformance suite stays green. For interoperability with ion-rust's Ion 1.1 binary writer, prefer ion-rust's mapping when interpreting system symbol addresses.
 
+To opt into ion-rust's Ion 1.1 system symbol table when parsing/writing Ion 1.1 binary streams, set `ION_ZIG_SYSTEM_SYMTAB11=ion-rust`.
+
 ### 6) NOP pads inside structs with non-zero SIDs
 
 The corpus includes cases where a struct field name is followed by a NOP (padding) before the value, and the field name SID can be non-zero.

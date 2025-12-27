@@ -3088,11 +3088,11 @@ const Decoder = struct {
         if (op == 0xEE) {
             const b = try self.readBytes(1);
             const addr: u32 = b[0];
-            const sys_text = symtab.SystemSymtab11.textForSid(addr) orelse return IonError.InvalidIon;
+            const sys_text = symtab.systemSymtab11TextForSid(addr) orelse return IonError.InvalidIon;
             // System symbol addresses live in a separate address space from symbol IDs. Return the
             // symbol as text so callers don't have to interpret the address as an SID.
             const t = try self.arena.dupe(sys_text);
-            return value.Value{ .symbol = value.makeSymbolId(null, t) };
+            return value.Value{ .symbol = value.makeSymbolId(addr, t) };
         }
 
         // integers: 60..68 (len in opcode)
@@ -3319,11 +3319,11 @@ fn readFlexSym(arena: *value.Arena, input: []const u8, cursor: *usize) IonError!
         0x60 => .{ .symbol = value.makeSymbolId(0, null) },
         0x61...0xE0 => blk: {
             const addr: u32 = @intCast(esc - 0x60);
-            const sys_text = symtab.SystemSymtab11.textForSid(addr) orelse return IonError.InvalidIon;
+            const sys_text = symtab.systemSymtab11TextForSid(addr) orelse return IonError.InvalidIon;
             // Match `0xEE` behavior: system symbol addresses are a distinct address space, so
             // represent them as text rather than as an SID.
             const t = try arena.dupe(sys_text);
-            break :blk .{ .symbol = value.makeSymbolId(null, t) };
+            break :blk .{ .symbol = value.makeSymbolId(addr, t) };
         },
         0xF0 => .end_delimited,
         else => IonError.Unsupported,
