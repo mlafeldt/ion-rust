@@ -1967,6 +1967,32 @@ test "ion 1.1 writer11 can select canonical qualified macro addrs via sys_symtab
     try std.testing.expect(ion.eq.ionEqElements(elems, &expected));
 }
 
+test "ion 1.1 writer11 emits signature-driven qualified repeat under ion-rust variant" {
+    const allocator = std.testing.allocator;
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, &.{ 0xE0, 0x01, 0x01, 0xEA });
+
+    const count: ion.value.Element = .{ .annotations = &.{}, .value = .{ .int = .{ .small = 2 } } };
+    const opts: ion.writer11.Options = .{ .sys_symtab11_variant = .ion_rust };
+    try ion.writer11.writeSystemMacroInvocationQualifiedRepeat(allocator, &out, count, &.{}, opts);
+
+    // Signature-driven encoding (ion-rust):
+    //   EF 04 <bitmap expr*=empty> <n>
+    try std.testing.expectEqualSlices(u8, &.{ 0xE0, 0x01, 0x01, 0xEA, 0xEF, 0x04, 0x00, 0x61, 0x02 }, out.items);
+
+    {
+        var doc = try ion.parseDocumentBinary11WithOptions(allocator, out.items, .{ .sys_symtab11_variant = .ion_rust });
+        defer doc.deinit();
+        try std.testing.expectEqual(@as(usize, 0), doc.elements.len);
+    }
+    try std.testing.expectError(
+        ion.IonError.InvalidIon,
+        ion.parseDocumentBinary11WithOptions(allocator, out.items, .{ .sys_symtab11_variant = .ion_tests }),
+    );
+}
+
 test "ion 1.1 writer11 rejects conformance-only qualified macro encodings under ion-rust variant" {
     var out = std.ArrayListUnmanaged(u8){};
     defer out.deinit(std.testing.allocator);

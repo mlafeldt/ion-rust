@@ -1434,6 +1434,26 @@ pub fn writeSystemMacroInvocationLengthPrefixedWithParams(
     return writeMacroInvocationLengthPrefixedWithParams(allocator, out, addr, params, args_by_param, options);
 }
 
+pub fn writeSystemMacroInvocationQualifiedWithParams(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    addr: u8,
+    params: []const ion.macro.Param,
+    args_by_param: []const []const value.Element,
+    options: Options,
+) IonError!void {
+    // Qualified system macro invocation (0xEF <addr>) using the spec signature-driven argument
+    // binding encoding (bitmap + required args + arg groups).
+    //
+    // ion-rust's Ion 1.1 binary writer uses this encoding for qualified system macros. The Zig
+    // Ion 1.1 binary decoder only selects this decoding mode when `sys_symtab11_variant` is
+    // forced/inferred as `ion_rust` so conformance (which historically uses different encodings)
+    // remains green.
+    try appendByte(out, allocator, 0xEF);
+    try appendByte(out, allocator, addr);
+    try encodeArgBindings(allocator, out, params, args_by_param, options);
+}
+
 pub fn writeSystemMacroInvocationQualifiedTaggedGroup(
     allocator: std.mem.Allocator,
     out: *std.ArrayListUnmanaged(u8),
@@ -1643,6 +1663,44 @@ pub fn writeSystemMacroInvocationQualifiedMakeTimestamp(
     // args, then emits `<year>` as a tagged value, followed by each present optional arg as a
     // tagged value. The decoder also accepts optional args as a 1-element expression group, but
     // this writer uses the simple single-value form.
+    if (effectiveSystemSymtab11Variant(options) == .ion_rust) {
+        const p = [_]ion.macro.Param{
+            .{ .ty = .tagged, .card = .one, .name = "year", .shape = null },
+            .{ .ty = .tagged, .card = .zero_or_one, .name = "month", .shape = null },
+            .{ .ty = .tagged, .card = .zero_or_one, .name = "day", .shape = null },
+            .{ .ty = .tagged, .card = .zero_or_one, .name = "hour", .shape = null },
+            .{ .ty = .tagged, .card = .zero_or_one, .name = "minute", .shape = null },
+            .{ .ty = .tagged, .card = .zero_or_one, .name = "second", .shape = null },
+            .{ .ty = .tagged, .card = .zero_or_one, .name = "offset_minutes", .shape = null },
+        };
+        const year_list = [_]value.Element{year};
+        var month_buf: [1]value.Element = undefined;
+        var day_buf: [1]value.Element = undefined;
+        var hour_buf: [1]value.Element = undefined;
+        var minute_buf: [1]value.Element = undefined;
+        var second_buf: [1]value.Element = undefined;
+        var offset_buf: [1]value.Element = undefined;
+        const optList = struct {
+            fn run(buf: *[1]value.Element, v: ?value.Element) []const value.Element {
+                if (v) |vv| {
+                    buf[0] = vv;
+                    return buf[0..1];
+                }
+                return &.{};
+            }
+        }.run;
+        const args_by_param = [_][]const value.Element{
+            year_list[0..],
+            optList(&month_buf, month),
+            optList(&day_buf, day),
+            optList(&hour_buf, hour),
+            optList(&minute_buf, minute),
+            optList(&second_buf, seconds),
+            optList(&offset_buf, offset),
+        };
+        return writeSystemMacroInvocationQualifiedWithParams(allocator, out, 12, p[0..], args_by_param[0..], options);
+    }
+
     const code = struct {
         fn set(p: *u16, idx: u4, present: bool) void {
             if (!present) return;
@@ -1687,6 +1745,17 @@ pub fn writeSystemMacroInvocationQualifiedRepeat(
     // - a single tagged value, OR
     // - a presence code (0/1/2) followed by a tagged value or expression group.
     //
+    if (effectiveSystemSymtab11Variant(options) == .ion_rust) {
+        const p = [_]ion.macro.Param{
+            .{ .ty = .tagged, .card = .one, .name = "n", .shape = null },
+            .{ .ty = .tagged, .card = .zero_or_many, .name = "expr", .shape = null },
+        };
+        const count_list = [_]value.Element{count};
+        const args_by_param = [_][]const value.Element{ count_list[0..], exprs };
+        return writeSystemMacroInvocationQualifiedWithParams(allocator, out, 4, p[0..], args_by_param[0..], options);
+    }
+
+    // Conformance encoding: explicit presence codes.
     // This writer always uses the explicit 1-byte presence code for the repeated expression to
     // avoid ambiguity when the first byte of the expression could be 0, 1, or 2.
     try appendByte(out, allocator, 0xEF);
