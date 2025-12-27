@@ -2,6 +2,7 @@
 //!
 //! Public entrypoints:
 //! - `parseDocument(allocator, bytes)` parses either Ion text or Ion binary (IVM-detected).
+//! - `parseDocumentWithOptions(allocator, bytes, options)` parses Ion with optional Ion 1.1 configuration.
 //! - `serializeDocument(allocator, format, elements)` writes Ion text or Ion binary.
 
 const std = @import("std");

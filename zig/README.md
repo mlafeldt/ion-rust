@@ -231,6 +231,7 @@ The `ion-tests/` repo contains multiple suites. The Zig harness covers the two c
 For Ion 1.1 binary streams that depend on a specific Ion 1.1 system symbol table variant (ion-tests vs ion-rust),
 you can avoid environment variables and in-stream inference by using:
 
+- `ion.parseDocumentWithOptions(..., .{ .sys_symtab11_variant = .ion_tests })` / `ion.parseDocumentWithOptions(..., .{ .sys_symtab11_variant = .ion_rust })`
 - `ion.parseDocumentBinary11WithOptions(..., .{ .sys_symtab11_variant = .ion_tests })`
 - `ion.parseDocumentBinary11WithOptions(..., .{ .sys_symtab11_variant = .ion_rust })`
 
