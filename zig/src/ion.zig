@@ -246,3 +246,16 @@ pub fn serializeDocumentBinary11WithOptions(
 ) IonError![]u8 {
     return writer11.writeBinary11WithOptions(allocator, doc, options);
 }
+
+/// Serializes a sequence of top-level Ion elements as *self-contained* Ion 1.1 binary using
+/// `writer11` options.
+///
+/// This writes values (not macros/e-expressions). It emits a minimal `$ion::(module ...)` prelude
+/// when needed so user symbols can be encoded by address deterministically.
+pub fn serializeDocumentBinary11SelfContainedWithOptions(
+    allocator: Allocator,
+    doc: []const value.Element,
+    options: writer11.Options,
+) IonError![]u8 {
+    return writer11.writeBinary11SelfContainedWithOptions(allocator, doc, options);
+}

@@ -947,6 +947,24 @@ test "ion.serializeDocument(.binary_1_1_raw) allows SID-only user symbols" {
     try std.testing.expect(ion.eq.ionEqElements(doc, parsed_doc.elements));
 }
 
+test "ion.serializeDocumentBinary11SelfContainedWithOptions respects sys_symtab11_variant" {
+    const allocator = std.testing.allocator;
+
+    // Force emission of the module prelude by including a user symbol.
+    const doc = &[_]ion.value.Element{.{ .annotations = &.{}, .value = .{ .symbol = ion.value.makeSymbolId(null, "a") } }};
+
+    const bytes = try ion.serializeDocumentBinary11SelfContainedWithOptions(
+        allocator,
+        doc,
+        .{ .sys_symtab11_variant = .ion_rust },
+    );
+    defer allocator.free(bytes);
+
+    // Under the ion-rust system symbol table, the module prelude uses the `symbol_table` clause,
+    // which is system symbol address 15.
+    try std.testing.expect(std.mem.indexOf(u8, bytes, &.{ 0xEE, 0x0F }) != null);
+}
+
 test "ion 1.1 binary FlexSym escape returns system symbol as text" {
     const bytes = &[_]u8{
         0xE0, 0x01, 0x01, 0xEA, // IVM
